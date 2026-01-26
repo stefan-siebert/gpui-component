@@ -1,10 +1,10 @@
 use std::rc::Rc;
 
 use crate::{
-    ActiveTheme, Icon, IconName, InteractiveElementExt as _, Sizable as _, StyledExt, h_flex,
+    ActiveTheme, Icon, IconName, Sizable as _, StyledExt, h_flex,
 };
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Decorations, Hsla, InteractiveElement, IntoElement,
+    AnyElement, App, ClickEvent, Context, Hsla, InteractiveElement, IntoElement,
     MouseButton, ParentElement, Pixels, Render, RenderOnce, StatefulInteractiveElement as _,
     StyleRefinement, Styled, TitlebarOptions, Window, WindowControlArea, div,
     prelude::FluentBuilder as _, px,
@@ -251,79 +251,85 @@ impl Render for TitleBarState {
 
 impl RenderOnce for TitleBar {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let is_client_decorated = matches!(window.window_decorations(), Decorations::Client { .. });
         let is_linux = cfg!(target_os = "linux");
         let is_macos = cfg!(target_os = "macos");
 
         let state = window.use_state(cx, |_, _| TitleBarState { should_move: false });
 
-        div().flex_shrink_0().child(
-            div()
-                .id("title-bar")
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .h(TITLE_BAR_HEIGHT)
-                .pl(TITLE_BAR_LEFT_PADDING)
-                .border_b_1()
-                .border_color(cx.theme().title_bar_border)
-                .bg(cx.theme().title_bar)
-                .refine_style(&self.style)
-                .when(is_linux, |this| {
-                    this.on_double_click(|_, window, _| window.zoom_window())
-                })
-                .when(is_macos, |this| {
-                    this.on_double_click(|_, window, _| window.titlebar_double_click())
-                })
-                .on_mouse_down_out(window.listener_for(&state, |state, _, _, _| {
-                    state.should_move = false;
-                }))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    window.listener_for(&state, |state, _, _, _| {
-                        state.should_move = true;
-                    }),
-                )
-                .on_mouse_up(
-                    MouseButton::Left,
-                    window.listener_for(&state, |state, _, _, _| {
-                        state.should_move = false;
-                    }),
-                )
-                .on_mouse_move(window.listener_for(&state, |state, _, window, _| {
-                    if state.should_move {
-                        state.should_move = false;
-                        window.start_window_move();
-                    }
-                }))
-                .child(
-                    h_flex()
-                        .id("bar")
-                        .window_control_area(WindowControlArea::Drag)
-                        .when(window.is_fullscreen(), |this| this.pl_3())
-                        .h_full()
-                        .justify_between()
-                        .flex_shrink_0()
-                        .flex_1()
-                        .when(is_linux && is_client_decorated, |this| {
-                            this.child(
-                                div()
-                                    .top_0()
-                                    .left_0()
-                                    .absolute()
-                                    .size_full()
-                                    .h_full()
-                                    .on_mouse_down(MouseButton::Right, move |ev, window, _| {
-                                        window.show_window_menu(ev.position)
-                                    }),
-                            )
-                        })
-                        .children(self.children),
-                )
-                .child(WindowControls {
-                    on_close_window: self.on_close_window,
+        // Main title bar container - all event handlers go here (like Zed's approach)
+        h_flex()
+            .id("title-bar")
+            .flex_shrink_0()
+            // Mark as drag zone for the platform
+            .window_control_area(WindowControlArea::Drag)
+            .w_full()
+            .h(TITLE_BAR_HEIGHT)
+            .pl(TITLE_BAR_LEFT_PADDING)
+            .border_b_1()
+            .border_color(cx.theme().title_bar_border)
+            .bg(cx.theme().title_bar)
+            .refine_style(&self.style)
+            // Mouse event handlers for drag
+            .on_mouse_down_out(window.listener_for(&state, |state, _, _, _| {
+                state.should_move = false;
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                window.listener_for(&state, |state, _, _, _| {
+                    state.should_move = true;
                 }),
-        )
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                window.listener_for(&state, |state, _, _, _| {
+                    state.should_move = false;
+                }),
+            )
+            .on_mouse_move(window.listener_for(&state, |state, _, window, _| {
+                if state.should_move {
+                    state.should_move = false;
+                    window.start_window_move();
+                }
+            }))
+            // Double-click to maximize/restore
+            .when(is_linux, |this| {
+                this.on_click(|event, window, _| {
+                    if event.click_count() == 2 {
+                        window.zoom_window();
+                    }
+                })
+            })
+            .when(is_macos, |this| {
+                this.on_click(|event, window, _| {
+                    if event.click_count() == 2 {
+                        window.titlebar_double_click();
+                    }
+                })
+            })
+            // Right-click context menu for Linux
+            .when(is_linux, |this| {
+                this.on_mouse_down(MouseButton::Right, move |ev, window, _| {
+                    window.show_window_menu(ev.position)
+                })
+            })
+            // content_stretch ensures empty space in children is still clickable
+            .content_stretch()
+            // Children container - plain div, no event handlers
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .overflow_x_hidden()
+                    .w_full()
+                    .h_full()
+                    .when(window.is_fullscreen(), |this| this.pl_3())
+                    .children(self.children),
+            )
+            // Window controls (minimize, maximize, close)
+            .child(WindowControls {
+                on_close_window: self.on_close_window,
+            })
     }
 }
