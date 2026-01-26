@@ -213,22 +213,34 @@ impl RenderOnce for WindowBorder {
     }
 }
 
-fn resize_edge(pos: Point<Pixels>, shadow_size: Pixels, size: Size<Pixels>) -> Option<ResizeEdge> {
-    let edge = if pos.y < shadow_size && pos.x < shadow_size {
+fn resize_edge_with_insets(
+    pos: Point<Pixels>,
+    size: Size<Pixels>,
+    top: Pixels,
+    bottom: Pixels,
+    left: Pixels,
+    right: Pixels,
+) -> Option<ResizeEdge> {
+    let in_top = top > px(0.0) && pos.y < top;
+    let in_bottom = bottom > px(0.0) && pos.y > size.height - bottom;
+    let in_left = left > px(0.0) && pos.x < left;
+    let in_right = right > px(0.0) && pos.x > size.width - right;
+
+    let edge = if in_top && in_left {
         ResizeEdge::TopLeft
-    } else if pos.y < shadow_size && pos.x > size.width - shadow_size {
+    } else if in_top && in_right {
         ResizeEdge::TopRight
-    } else if pos.y < shadow_size {
+    } else if in_top {
         ResizeEdge::Top
-    } else if pos.y > size.height - shadow_size && pos.x < shadow_size {
+    } else if in_bottom && in_left {
         ResizeEdge::BottomLeft
-    } else if pos.y > size.height - shadow_size && pos.x > size.width - shadow_size {
+    } else if in_bottom && in_right {
         ResizeEdge::BottomRight
-    } else if pos.y > size.height - shadow_size {
+    } else if in_bottom {
         ResizeEdge::Bottom
-    } else if pos.x < shadow_size {
+    } else if in_left {
         ResizeEdge::Left
-    } else if pos.x > size.width - shadow_size {
+    } else if in_right {
         ResizeEdge::Right
     } else {
         return None;
