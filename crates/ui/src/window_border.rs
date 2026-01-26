@@ -89,7 +89,15 @@ impl RenderOnce for WindowBorder {
                             move |_bounds, hitbox, window, _| {
                                 let mouse = window.mouse_position();
                                 let size = window.window_bounds().get_bounds().size;
-                                let Some(edge) = resize_edge(mouse, SHADOW_SIZE, size) else {
+                                // Use actual shadow sizes based on tiling state
+                                let top_shadow = if tiling.top { px(0.0) } else { SHADOW_SIZE };
+                                let bottom_shadow = if tiling.bottom { px(0.0) } else { SHADOW_SIZE };
+                                let left_shadow = if tiling.left { px(0.0) } else { SHADOW_SIZE };
+                                let right_shadow = if tiling.right { px(0.0) } else { SHADOW_SIZE };
+
+                                let Some(edge) = resize_edge_with_insets(
+                                    mouse, size, top_shadow, bottom_shadow, left_shadow, right_shadow
+                                ) else {
                                     return;
                                 };
                                 window.set_cursor_style(
@@ -128,7 +136,13 @@ impl RenderOnce for WindowBorder {
                         let size = window.window_bounds().get_bounds().size;
                         let pos = window.mouse_position();
 
-                        match resize_edge(pos, SHADOW_SIZE, size) {
+                        // Use actual shadow sizes based on tiling state
+                        let top_shadow = if tiling.top { px(0.0) } else { SHADOW_SIZE };
+                        let bottom_shadow = if tiling.bottom { px(0.0) } else { SHADOW_SIZE };
+                        let left_shadow = if tiling.left { px(0.0) } else { SHADOW_SIZE };
+                        let right_shadow = if tiling.right { px(0.0) } else { SHADOW_SIZE };
+
+                        match resize_edge_with_insets(pos, size, top_shadow, bottom_shadow, left_shadow, right_shadow) {
                             Some(edge) => window.start_window_resize(edge),
                             None => {}
                         };
@@ -176,22 +190,34 @@ impl RenderOnce for WindowBorder {
     }
 }
 
-fn resize_edge(pos: Point<Pixels>, shadow_size: Pixels, size: Size<Pixels>) -> Option<ResizeEdge> {
-    let edge = if pos.y < shadow_size && pos.x < shadow_size {
+fn resize_edge_with_insets(
+    pos: Point<Pixels>,
+    size: Size<Pixels>,
+    top: Pixels,
+    bottom: Pixels,
+    left: Pixels,
+    right: Pixels,
+) -> Option<ResizeEdge> {
+    let in_top = top > px(0.0) && pos.y < top;
+    let in_bottom = bottom > px(0.0) && pos.y > size.height - bottom;
+    let in_left = left > px(0.0) && pos.x < left;
+    let in_right = right > px(0.0) && pos.x > size.width - right;
+
+    let edge = if in_top && in_left {
         ResizeEdge::TopLeft
-    } else if pos.y < shadow_size && pos.x > size.width - shadow_size {
+    } else if in_top && in_right {
         ResizeEdge::TopRight
-    } else if pos.y < shadow_size {
+    } else if in_top {
         ResizeEdge::Top
-    } else if pos.y > size.height - shadow_size && pos.x < shadow_size {
+    } else if in_bottom && in_left {
         ResizeEdge::BottomLeft
-    } else if pos.y > size.height - shadow_size && pos.x > size.width - shadow_size {
+    } else if in_bottom && in_right {
         ResizeEdge::BottomRight
-    } else if pos.y > size.height - shadow_size {
+    } else if in_bottom {
         ResizeEdge::Bottom
-    } else if pos.x < shadow_size {
+    } else if in_left {
         ResizeEdge::Left
-    } else if pos.x > size.width - shadow_size {
+    } else if in_right {
         ResizeEdge::Right
     } else {
         return None;
