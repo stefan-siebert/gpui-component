@@ -1,6 +1,7 @@
 use crate::{
     ActiveTheme, Anchor, ElementExt, Placement, StyledExt,
-    dialog::Dialog,
+    dialog::{ANIMATION_DURATION, Dialog},
+    focus_trap::FocusTrapManager,
     input::InputState,
     notification::{Notification, NotificationList},
     sheet::Sheet,
@@ -240,15 +241,31 @@ impl Root {
         cx.notify();
     }
 
-    pub fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Root>) {
+    fn close_dialog_internal(&mut self) -> Option<FocusHandle> {
         self.focused_input = None;
-        if let Some(handle) = self
-            .active_dialogs
+        self.active_dialogs
             .pop()
             .and_then(|d| d.previous_focused_handle)
             .and_then(|h| h.upgrade())
-        {
+    }
+
+    pub fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Root>) {
+        if let Some(handle) = self.close_dialog_internal() {
             window.focus(&handle, cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn defer_close_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Root>) {
+        if let Some(handle) = self.close_dialog_internal() {
+            window
+                .spawn(cx, async move |cx| {
+                    cx.background_executor().timer(*ANIMATION_DURATION).await;
+                    _ = cx.update(|window, cx| {
+                        window.focus(&handle, cx);
+                    });
+                })
+                .detach();
         }
         cx.notify();
     }
@@ -337,10 +354,72 @@ impl Root {
     }
 
     fn on_action_tab(&mut self, _: &Tab, window: &mut Window, cx: &mut Context<Self>) {
+        // Check if we're inside a focus trap
+        if let Some(container_focus_handle) = FocusTrapManager::find_active_trap(window, cx) {
+            // We're in a focus trap - try to focus next, then check if we're still inside
+            let before_focus = window.focused(cx);
+
+            // Try normal focus navigation
+            window.focus_next(cx);
+
+            // Check if we're still in the trap
+            if !container_focus_handle.contains_focused(window, cx) {
+                // We jumped out of the trap - need to cycle back to the beginning
+                // Find the first focusable element in the trap by continuing to focus_next
+                let mut attempts = 0;
+                const MAX_ATTEMPTS: usize = 100; // Prevent infinite loop
+
+                while !container_focus_handle.contains_focused(window, cx)
+                    && attempts < MAX_ATTEMPTS
+                {
+                    window.focus_next(cx);
+                    attempts += 1;
+
+                    // If we cycled back to where we started, restore original focus
+                    if window.focused(cx) == before_focus {
+                        break;
+                    }
+                }
+            }
+            return;
+        }
+
+        // Normal tab navigation
         window.focus_next(cx);
     }
 
     fn on_action_tab_prev(&mut self, _: &TabPrev, window: &mut Window, cx: &mut Context<Self>) {
+        // Check if we're inside a focus trap
+        if let Some(container_focus_handle) = FocusTrapManager::find_active_trap(window, cx) {
+            // We're in a focus trap - try to focus previous, then check if we're still inside
+            let before_focus = window.focused(cx);
+
+            // Try normal focus navigation
+            window.focus_prev(cx);
+
+            // Check if we're still in the trap
+            if !container_focus_handle.contains_focused(window, cx) {
+                // We jumped out of the trap - need to cycle back to the end
+                // Find the last focusable element in the trap by continuing to focus_prev
+                let mut attempts = 0;
+                const MAX_ATTEMPTS: usize = 100; // Prevent infinite loop
+
+                while !container_focus_handle.contains_focused(window, cx)
+                    && attempts < MAX_ATTEMPTS
+                {
+                    window.focus_prev(cx);
+                    attempts += 1;
+
+                    // If we cycled back to where we started, restore original focus
+                    if window.focused(cx) == before_focus {
+                        break;
+                    }
+                }
+            }
+            return;
+        }
+
+        // Normal tab navigation
         window.focus_prev(cx);
     }
 }
