@@ -13,7 +13,9 @@ const SHADOW_SIZE: Pixels = px(0.0);
 #[cfg(target_os = "linux")]
 const SHADOW_SIZE: Pixels = px(12.0);
 const BORDER_SIZE: Pixels = px(1.0);
-pub(crate) const BORDER_RADIUS: Pixels = px(0.0);
+
+/// Default border radius (0 for backwards compatibility)
+const DEFAULT_BORDER_RADIUS: Pixels = px(0.0);
 
 /// Create a new window border.
 pub fn window_border() -> WindowBorder {
@@ -21,16 +23,59 @@ pub fn window_border() -> WindowBorder {
 }
 
 /// Window border use to render a custom window border and shadow for Linux.
-#[derive(IntoElement, Default)]
+///
+/// # Example
+///
+/// ```rust
+/// use gpui_component::window_border;
+/// use gpui::px;
+///
+/// // Default (no rounded corners)
+/// window_border().child(my_content);
+///
+/// // With rounded corners
+/// window_border().border_radius(px(10.0)).child(my_content);
+/// ```
+#[derive(IntoElement)]
 pub struct WindowBorder {
     children: Vec<AnyElement>,
+    border_radius: Pixels,
+}
+
+impl Default for WindowBorder {
+    fn default() -> Self {
+        Self {
+            children: Vec::new(),
+            border_radius: DEFAULT_BORDER_RADIUS,
+        }
+    }
 }
 
 impl WindowBorder {
     pub fn new() -> Self {
-        Self {
-            ..Default::default()
-        }
+        Self::default()
+    }
+
+    /// Set the border radius for the window corners.
+    ///
+    /// This controls the rounding of window corners when using client-side decorations.
+    /// The radius is only applied to non-tiled edges.
+    ///
+    /// Default is `px(0.0)` (no rounding) for backwards compatibility.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gpui_component::window_border;
+    /// use gpui::px;
+    ///
+    /// window_border()
+    ///     .border_radius(px(10.0))
+    ///     .child(my_content);
+    /// ```
+    pub fn border_radius(mut self, radius: impl Into<Pixels>) -> Self {
+        self.border_radius = radius.into();
+        self
     }
 }
 
@@ -66,6 +111,7 @@ impl ParentElement for WindowBorder {
 impl RenderOnce for WindowBorder {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let decorations = window.window_decorations();
+        let border_radius = self.border_radius;
         window.set_client_inset(SHADOW_SIZE);
 
         div()
@@ -123,10 +169,16 @@ impl RenderOnce for WindowBorder {
                         .absolute(),
                     )
                     .when(!(tiling.top || tiling.right), |div| {
-                        div.rounded_tr(BORDER_RADIUS)
+                        div.rounded_tr(border_radius)
                     })
                     .when(!(tiling.top || tiling.left), |div| {
-                        div.rounded_tl(BORDER_RADIUS)
+                        div.rounded_tl(border_radius)
+                    })
+                    .when(!(tiling.bottom || tiling.right), |div| {
+                        div.rounded_br(border_radius)
+                    })
+                    .when(!(tiling.bottom || tiling.left), |div| {
+                        div.rounded_bl(border_radius)
                     })
                     .when(!tiling.top, |div| div.pt(SHADOW_SIZE))
                     .when(!tiling.bottom, |div| div.pb(SHADOW_SIZE))
@@ -156,10 +208,16 @@ impl RenderOnce for WindowBorder {
                         Decorations::Server => div,
                         Decorations::Client { tiling } => div
                             .when(!(tiling.top || tiling.right), |div| {
-                                div.rounded_tr(BORDER_RADIUS)
+                                div.rounded_tr(border_radius)
                             })
                             .when(!(tiling.top || tiling.left), |div| {
-                                div.rounded_tl(BORDER_RADIUS)
+                                div.rounded_tl(border_radius)
+                            })
+                            .when(!(tiling.bottom || tiling.right), |div| {
+                                div.rounded_br(border_radius)
+                            })
+                            .when(!(tiling.bottom || tiling.left), |div| {
+                                div.rounded_bl(border_radius)
                             })
                             .border_color(cx.theme().window_border)
                             .when(!tiling.top, |div| div.border_t(BORDER_SIZE))
@@ -185,6 +243,7 @@ impl RenderOnce for WindowBorder {
                     })
                     .bg(gpui::transparent_black())
                     .size_full()
+                    .overflow_hidden()
                     .children(self.children),
             )
     }
