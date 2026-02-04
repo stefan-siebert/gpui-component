@@ -24,6 +24,7 @@ pub fn window_border() -> WindowBorder {
 #[derive(IntoElement)]
 pub struct WindowBorder {
     shadow_size: Pixels,
+    border_radius: Pixels,
     children: Vec<AnyElement>,
 }
 
@@ -31,6 +32,7 @@ impl Default for WindowBorder {
     fn default() -> Self {
         Self {
             shadow_size: SHADOW_SIZE,
+            border_radius: BORDER_RADIUS,
             children: Vec::new(),
         }
     }
@@ -46,6 +48,14 @@ impl WindowBorder {
     /// Default: [`SHADOW_SIZE`]
     pub fn shadow_size(mut self, size: impl Into<Pixels>) -> Self {
         self.shadow_size = size.into();
+        self
+    }
+
+    /// Set the border radius for the window corners.
+    ///
+    /// Default: [`BORDER_RADIUS`]
+    pub fn border_radius(mut self, radius: impl Into<Pixels>) -> Self {
+        self.border_radius = radius.into();
         self
     }
 }
@@ -83,6 +93,7 @@ impl ParentElement for WindowBorder {
 impl RenderOnce for WindowBorder {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let decorations = window.window_decorations();
+        let border_radius = self.border_radius;
         let shadow_size = match decorations {
             Decorations::Client { tiling }
                 if tiling.top && tiling.bottom && tiling.left && tiling.right =>
@@ -146,10 +157,16 @@ impl RenderOnce for WindowBorder {
                         .absolute(),
                     )
                     .when(!(tiling.top || tiling.right), |div| {
-                        div.rounded_tr(BORDER_RADIUS)
+                        div.rounded_tr(border_radius)
                     })
                     .when(!(tiling.top || tiling.left), |div| {
-                        div.rounded_tl(BORDER_RADIUS)
+                        div.rounded_tl(border_radius)
+                    })
+                    .when(!(tiling.bottom || tiling.right), |div| {
+                        div.rounded_br(border_radius)
+                    })
+                    .when(!(tiling.bottom || tiling.left), |div| {
+                        div.rounded_bl(border_radius)
                     })
                     .when(!tiling.top, |div| div.pt(shadow_size))
                     .when(!tiling.bottom, |div| div.pb(shadow_size))
@@ -179,10 +196,16 @@ impl RenderOnce for WindowBorder {
                         Decorations::Server => div,
                         Decorations::Client { tiling } => div
                             .when(!(tiling.top || tiling.right), |div| {
-                                div.rounded_tr(BORDER_RADIUS)
+                                div.rounded_tr(border_radius)
                             })
                             .when(!(tiling.top || tiling.left), |div| {
-                                div.rounded_tl(BORDER_RADIUS)
+                                div.rounded_tl(border_radius)
+                            })
+                            .when(!(tiling.bottom || tiling.right), |div| {
+                                div.rounded_br(border_radius)
+                            })
+                            .when(!(tiling.bottom || tiling.left), |div| {
+                                div.rounded_bl(border_radius)
                             })
                             .border_color(cx.theme().window_border)
                             .when(!tiling.top, |div| div.border_t(BORDER_SIZE))
@@ -213,34 +236,22 @@ impl RenderOnce for WindowBorder {
     }
 }
 
-fn resize_edge_with_insets(
-    pos: Point<Pixels>,
-    size: Size<Pixels>,
-    top: Pixels,
-    bottom: Pixels,
-    left: Pixels,
-    right: Pixels,
-) -> Option<ResizeEdge> {
-    let in_top = top > px(0.0) && pos.y < top;
-    let in_bottom = bottom > px(0.0) && pos.y > size.height - bottom;
-    let in_left = left > px(0.0) && pos.x < left;
-    let in_right = right > px(0.0) && pos.x > size.width - right;
-
-    let edge = if in_top && in_left {
+fn resize_edge(pos: Point<Pixels>, shadow_size: Pixels, size: Size<Pixels>) -> Option<ResizeEdge> {
+    let edge = if pos.y < shadow_size && pos.x < shadow_size {
         ResizeEdge::TopLeft
-    } else if in_top && in_right {
+    } else if pos.y < shadow_size && pos.x > size.width - shadow_size {
         ResizeEdge::TopRight
-    } else if in_top {
+    } else if pos.y < shadow_size {
         ResizeEdge::Top
-    } else if in_bottom && in_left {
+    } else if pos.y > size.height - shadow_size && pos.x < shadow_size {
         ResizeEdge::BottomLeft
-    } else if in_bottom && in_right {
+    } else if pos.y > size.height - shadow_size && pos.x > size.width - shadow_size {
         ResizeEdge::BottomRight
-    } else if in_bottom {
+    } else if pos.y > size.height - shadow_size {
         ResizeEdge::Bottom
-    } else if in_left {
+    } else if pos.x < shadow_size {
         ResizeEdge::Left
-    } else if in_right {
+    } else if pos.x > size.width - shadow_size {
         ResizeEdge::Right
     } else {
         return None;

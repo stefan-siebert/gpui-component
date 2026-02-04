@@ -36,6 +36,7 @@ pub struct Root {
     pub notification: Entity<NotificationList>,
     sheet_size: Option<DefiniteLength>,
     window_shadow_size: Pixels,
+    border_radius: Pixels,
     /// The focus handle that will be restored after a dialog is closed with animation.
     /// Used to handle rapid dialog opening/closing to maintain correct focus chain.
     pending_focus_restore: Option<WeakFocusHandle>,
@@ -84,6 +85,7 @@ impl Root {
             notification: cx.new(|cx| NotificationList::new(window, cx)),
             sheet_size: None,
             window_shadow_size: window_border::SHADOW_SIZE,
+            border_radius: window_border::BORDER_RADIUS,
             pending_focus_restore: None,
         }
     }
@@ -93,6 +95,14 @@ impl Root {
     /// Default: [`window_border::SHADOW_SIZE`]
     pub fn window_shadow_size(mut self, size: impl Into<Pixels>) -> Self {
         self.window_shadow_size = size.into();
+        self
+    }
+
+    /// Set the border radius for the window corners (Linux client-side decorations).
+    ///
+    /// Default: [`window_border::BORDER_RADIUS`]
+    pub fn border_radius(mut self, radius: impl Into<Pixels>) -> Self {
+        self.border_radius = radius.into();
         self
     }
 
@@ -467,20 +477,35 @@ impl Styled for Root {
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_rem_size(cx.theme().font_size);
+        let border_radius = self.border_radius;
 
-        window_border().shadow_size(self.window_shadow_size).child(
-            div()
-                .id("root")
-                .key_context(CONTEXT)
-                .on_action(cx.listener(Self::on_action_tab))
-                .on_action(cx.listener(Self::on_action_tab_prev))
-                .relative()
-                .size_full()
-                .font_family(cx.theme().font_family.clone())
-                .bg(cx.theme().background)
-                .text_color(cx.theme().foreground)
-                .refine_style(&self.style)
-                .child(self.view.clone()),
-        )
+        window_border()
+            .shadow_size(self.window_shadow_size)
+            .border_radius(border_radius)
+            .child(
+                div()
+                    .id("root")
+                    .key_context(CONTEXT)
+                    .on_action(cx.listener(Self::on_action_tab))
+                    .on_action(cx.listener(Self::on_action_tab_prev))
+                    .relative()
+                    .size_full()
+                    .overflow_hidden()
+                    .font_family(cx.theme().font_family.clone())
+                    .bg(cx.theme().background)
+                    .text_color(cx.theme().foreground)
+                    .refine_style(&self.style)
+                    .map(|div| {
+                        match window.window_decorations() {
+                            gpui::Decorations::Server => div,
+                            gpui::Decorations::Client { tiling } => div
+                                .when(!(tiling.top || tiling.left), |d| d.rounded_tl(border_radius))
+                                .when(!(tiling.top || tiling.right), |d| d.rounded_tr(border_radius))
+                                .when(!(tiling.bottom || tiling.left), |d| d.rounded_bl(border_radius))
+                                .when(!(tiling.bottom || tiling.right), |d| d.rounded_br(border_radius))
+                        }
+                    })
+                    .child(self.view.clone()),
+            )
     }
 }
