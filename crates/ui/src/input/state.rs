@@ -652,6 +652,15 @@ impl InputState {
         cx.notify();
     }
 
+    /// Set the selected text range (in UTF-8 byte offsets).
+    ///
+    /// This selects text between `start` and `end`. Values are clamped to the text length.
+    pub fn set_selected_range(&mut self, start: usize, end: usize, cx: &mut Context<Self>) {
+        let len = self.text.len();
+        self.selected_range = (start.min(len)..end.min(len)).into();
+        cx.notify();
+    }
+
     /// Insert text at the current cursor position.
     ///
     /// And the cursor will be moved to the end of inserted text.
