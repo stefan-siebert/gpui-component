@@ -1713,6 +1713,12 @@ impl InputState {
         cx.notify()
     }
 
+    /// Sets the selected range to the given start and end offsets.
+    pub fn set_selected_range(&mut self, start: usize, end: usize, cx: &mut Context<Self>) {
+        self.selected_range = (start..end).into();
+        cx.notify();
+    }
+
     #[inline]
     pub(super) fn offset_from_utf16(&self, offset: usize) -> usize {
         self.text.offset_utf16_to_offset(offset)
