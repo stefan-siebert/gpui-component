@@ -2919,6 +2919,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "paste",
+ "raw-window-handle",
  "regex",
  "ropey",
  "rust-i18n",
@@ -2963,6 +2964,7 @@ dependencies = [
  "tree-sitter-zig",
  "unicode-segmentation",
  "uuid",
+ "windows 0.61.3",
  "zed-sum-tree",
 ]
 
