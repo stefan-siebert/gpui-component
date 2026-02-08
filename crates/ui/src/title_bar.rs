@@ -316,7 +316,26 @@ impl RenderOnce for TitleBar {
                 }))
                 .on_mouse_down(
                     MouseButton::Left,
-                    window.listener_for(&state, |state, event: &gpui::MouseDownEvent, window, _| {
+                    window.listener_for(&state, |state, event: &gpui::MouseDownEvent, window, cx| {
+                        // On Windows, a focusable parent element's auto-focus handler
+                        // calls prevent_default() on every mouse-down, which blocks
+                        // DefWindowProc from handling NC events (drag, resize, etc.).
+                        // We must stop propagation for ALL title bar clicks and handle
+                        // everything ourselves via the Win32 API.
+                        #[cfg(target_os = "windows")]
+                        {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        }
+
+                        // On Windows, handle the top resize zone (~8px) by posting
+                        // WM_NCLBUTTONDOWN + HTTOP directly, since DefWindowProc can't.
+                        #[cfg(target_os = "windows")]
+                        if event.position.y < px(8.0) {
+                            start_top_resize_win32(window);
+                            return;
+                        }
+
                         // On Windows, detect double-clicks ourselves because
                         // on_double_click doesn't fire reliably (see comment above).
                         #[cfg(target_os = "windows")]
@@ -347,7 +366,7 @@ impl RenderOnce for TitleBar {
                             state.last_mousedown_pos = Some(event.position);
                         }
 
-                        let _ = window; // suppress unused warning on non-Windows
+                        let _ = (window, &cx); // suppress unused warnings on non-Windows
                         state.should_move = true;
                         state.drag_start_pos = Some(event.position);
                     }),
@@ -440,6 +459,29 @@ fn toggle_maximize_win32(window: &mut gpui::Window) {
                     SW_MAXIMIZE
                 };
                 let _ = ShowWindowAsync(hwnd, cmd);
+            }
+        }
+    }
+}
+
+/// Send `WM_NCLBUTTONDOWN` with `HTTOP` to initiate a top-edge resize on Windows.
+///
+/// When GPUI dispatches NC mouse events through the element tree, a focusable
+/// parent element's auto-focus handler calls `prevent_default()`, which prevents
+/// `DefWindowProc` from being called. Since `DefWindowProc` is what initiates
+/// the native resize, we must post the message ourselves.
+#[cfg(target_os = "windows")]
+fn start_top_resize_win32(window: &mut gpui::Window) {
+    use raw_window_handle::HasWindowHandle;
+    if let Ok(handle) = window.window_handle() {
+        if let raw_window_handle::RawWindowHandle::Win32(win32) = handle.as_ref() {
+            unsafe {
+                use windows::Win32::Foundation::*;
+                use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+                use windows::Win32::UI::WindowsAndMessaging::*;
+                let hwnd = HWND(win32.hwnd.get() as *mut _);
+                let _ = ReleaseCapture();
+                let _ = PostMessageW(Some(hwnd), WM_NCLBUTTONDOWN, WPARAM(HTTOP as usize), LPARAM(0));
             }
         }
     }
