@@ -5,7 +5,7 @@ use crate::{
 };
 use gpui::{
     AnyElement, App, ClickEvent, Context, Hsla, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Pixels, Render, RenderOnce, StatefulInteractiveElement as _,
+    MouseButton, ParentElement, Pixels, Point, Render, RenderOnce, StatefulInteractiveElement as _,
     StyleRefinement, Styled, TitlebarOptions, Window, WindowControlArea, div,
     prelude::FluentBuilder as _, px,
 };
@@ -47,12 +47,12 @@ impl TitleBar {
     }
 
     /// Add custom for close window event, default is None, then click X button will call `window.remove_window()`.
-    /// Linux only, this will do nothing on other platforms.
+    /// This works on Linux and Windows. On macOS, the native traffic lights handle window close.
     pub fn on_close_window(
         mut self,
         f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
-        if cfg!(target_os = "linux") {
+        if !cfg!(target_os = "macos") {
             self.on_close_window = Some(Rc::new(Box::new(f)));
         }
         self
@@ -151,6 +151,7 @@ impl ControlIcon {
 impl RenderOnce for ControlIcon {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let is_linux = cfg!(target_os = "linux");
+        let is_macos = cfg!(target_os = "macos");
         let is_windows = cfg!(target_os = "windows");
         let hover_fg = self.hover_fg(cx);
         let hover_bg = self.hover_bg(cx);
@@ -164,8 +165,8 @@ impl RenderOnce for ControlIcon {
         div()
             .id(self.id())
             .flex()
-            .w(TITLE_BAR_HEIGHT)
-            .h_full()
+            .when(is_linux, |this| this.size_5().rounded_2xl())
+            .when(!is_linux, |this| this.w(TITLE_BAR_HEIGHT).h_full())
             .flex_shrink_0()
             .justify_center()
             .content_center()
@@ -176,7 +177,7 @@ impl RenderOnce for ControlIcon {
             .when(is_windows, |this| {
                 this.window_control_area(self.window_control_area())
             })
-            .when(is_linux, |this| {
+            .when(!is_macos, |this| {
                 this.on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
@@ -185,7 +186,12 @@ impl RenderOnce for ControlIcon {
                     cx.stop_propagation();
                     match icon {
                         Self::Minimize => window.minimize_window(),
-                        Self::Restore | Self::Maximize => window.zoom_window(),
+                        Self::Restore | Self::Maximize => {
+                            #[cfg(target_os = "windows")]
+                            toggle_maximize_win32(window);
+                            #[cfg(not(target_os = "windows"))]
+                            window.zoom_window();
+                        }
                         Self::Close { .. } => {
                             if let Some(f) = on_close_window.clone() {
                                 f(&ClickEvent::default(), window, cx);
@@ -216,6 +222,7 @@ impl RenderOnce for WindowControls {
             .items_center()
             .flex_shrink_0()
             .h_full()
+            .when(cfg!(target_os = "linux"), |this| this.gap_2().pr_3())
             .child(ControlIcon::minimize())
             .child(if window.is_maximized() {
                 ControlIcon::restore()
@@ -240,6 +247,11 @@ impl ParentElement for TitleBar {
 
 struct TitleBarState {
     should_move: bool,
+    drag_start_pos: Option<Point<Pixels>>,
+    #[cfg(target_os = "windows")]
+    last_mousedown_time: Option<std::time::Instant>,
+    #[cfg(target_os = "windows")]
+    last_mousedown_pos: Option<Point<Pixels>>,
 }
 
 // TODO: Remove this when GPUI has released v0.2.3
@@ -251,10 +263,16 @@ impl Render for TitleBarState {
 
 impl RenderOnce for TitleBar {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let is_linux = cfg!(target_os = "linux");
         let is_macos = cfg!(target_os = "macos");
 
-        let state = window.use_state(cx, |_, _| TitleBarState { should_move: false });
+        let state = window.use_state(cx, |_, _| TitleBarState {
+            should_move: false,
+            drag_start_pos: None,
+            #[cfg(target_os = "windows")]
+            last_mousedown_time: None,
+            #[cfg(target_os = "windows")]
+            last_mousedown_pos: None,
+        });
 
         // Main title bar container - all event handlers go here (like Zed's approach)
         h_flex()
@@ -272,27 +290,84 @@ impl RenderOnce for TitleBar {
             // Mouse event handlers for drag
             .on_mouse_down_out(window.listener_for(&state, |state, _, _, _| {
                 state.should_move = false;
+                state.drag_start_pos = None;
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                window.listener_for(&state, |state, _, _, _| {
+                window.listener_for(&state, |state, event: &gpui::MouseDownEvent, window, _| {
+                    // On Windows, detect double-clicks ourselves because GPUI's
+                    // click_count() doesn't work reliably with WindowControlArea::Drag
+                    // (WM_NCHITTEST returns HTCAPTION, bypassing normal click tracking).
+                    #[cfg(target_os = "windows")]
+                    {
+                        let now = std::time::Instant::now();
+                        let is_double_click = match (state.last_mousedown_time, state.last_mousedown_pos) {
+                            (Some(last_time), Some(last_pos)) => {
+                                let elapsed = now.duration_since(last_time);
+                                let delta = event.position - last_pos;
+                                let threshold = px(4.0);
+                                elapsed.as_millis() < 500
+                                    && delta.x > -threshold && delta.x < threshold
+                                    && delta.y > -threshold && delta.y < threshold
+                            }
+                            _ => false,
+                        };
+
+                        if is_double_click {
+                            state.should_move = false;
+                            state.drag_start_pos = None;
+                            state.last_mousedown_time = None;
+                            state.last_mousedown_pos = None;
+                            toggle_maximize_win32(window);
+                            return;
+                        }
+
+                        state.last_mousedown_time = Some(now);
+                        state.last_mousedown_pos = Some(event.position);
+                    }
+
+                    let _ = window; // suppress unused warning on non-Windows
                     state.should_move = true;
+                    state.drag_start_pos = Some(event.position);
                 }),
             )
             .on_mouse_up(
                 MouseButton::Left,
                 window.listener_for(&state, |state, _, _, _| {
                     state.should_move = false;
+                    state.drag_start_pos = None;
                 }),
             )
-            .on_mouse_move(window.listener_for(&state, |state, _, window, _| {
+            .on_mouse_move(window.listener_for(&state, |state, event: &gpui::MouseMoveEvent, window, _| {
                 if state.should_move {
-                    state.should_move = false;
-                    window.start_window_move();
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        state.should_move = false;
+                        window.start_window_move();
+                    }
+                    #[cfg(target_os = "windows")]
+                    {
+                        // Only start drag after exceeding a movement threshold (4px),
+                        // so that double-clicks aren't swallowed by the drag modal loop.
+                        if let Some(start) = state.drag_start_pos {
+                            let delta = event.position - start;
+                            let threshold = px(4.0);
+                            if delta.x > threshold
+                                || delta.x < -threshold
+                                || delta.y > threshold
+                                || delta.y < -threshold
+                            {
+                                state.should_move = false;
+                                state.drag_start_pos = None;
+                                start_window_move_win32(window);
+                            }
+                        }
+                    }
                 }
             }))
             // Double-click to maximize/restore
-            .when(is_linux, |this| {
+            // Linux: use GPUI's click_count(). Windows: handled in on_mouse_down above.
+            .when(cfg!(target_os = "linux"), |this| {
                 this.on_click(|event, window, _| {
                     if event.click_count() == 2 {
                         window.zoom_window();
@@ -306,8 +381,8 @@ impl RenderOnce for TitleBar {
                     }
                 })
             })
-            // Right-click context menu for Linux
-            .when(is_linux, |this| {
+            // Right-click context menu
+            .when(!is_macos, |this| {
                 this.on_mouse_down(MouseButton::Right, move |ev, window, _| {
                     window.show_window_menu(ev.position)
                 })
@@ -331,5 +406,51 @@ impl RenderOnce for TitleBar {
             .child(WindowControls {
                 on_close_window: self.on_close_window,
             })
+    }
+}
+
+/// Toggle between maximized and restored window state on Windows.
+///
+/// GPUI's `zoom_window()` only maximizes on Windows (calls SW_MAXIMIZE),
+/// it does not toggle like the macOS equivalent. This helper checks
+/// `is_maximized()` and calls SW_RESTORE or SW_MAXIMIZE accordingly.
+#[cfg(target_os = "windows")]
+fn toggle_maximize_win32(window: &mut gpui::Window) {
+    use raw_window_handle::HasWindowHandle;
+    if let Ok(handle) = window.window_handle() {
+        if let raw_window_handle::RawWindowHandle::Win32(win32) = handle.as_ref() {
+            unsafe {
+                use windows::Win32::Foundation::*;
+                use windows::Win32::UI::WindowsAndMessaging::*;
+                let hwnd = HWND(win32.hwnd.get() as *mut _);
+                let cmd = if window.is_maximized() {
+                    SW_RESTORE
+                } else {
+                    SW_MAXIMIZE
+                };
+                let _ = ShowWindowAsync(hwnd, cmd);
+            }
+        }
+    }
+}
+
+/// Send WM_NCLBUTTONDOWN + HTCAPTION to initiate a window drag on Windows.
+///
+/// GPUI's `start_window_move()` is a no-op on Windows, so we post the
+/// message directly to the HWND via the Win32 API.
+#[cfg(target_os = "windows")]
+fn start_window_move_win32(window: &mut gpui::Window) {
+    use raw_window_handle::HasWindowHandle;
+    if let Ok(handle) = window.window_handle() {
+        if let raw_window_handle::RawWindowHandle::Win32(win32) = handle.as_ref() {
+            unsafe {
+                use windows::Win32::Foundation::*;
+                use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+                use windows::Win32::UI::WindowsAndMessaging::*;
+                let hwnd = HWND(win32.hwnd.get() as *mut _);
+                let _ = ReleaseCapture();
+                let _ = PostMessageW(Some(hwnd), WM_NCLBUTTONDOWN, WPARAM(HTCAPTION as usize), LPARAM(0));
+            }
+        }
     }
 }
