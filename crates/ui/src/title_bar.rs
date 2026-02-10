@@ -379,7 +379,7 @@ impl RenderOnce for TitleBar {
                     state.drag_start_pos = None;
                 }),
             )
-            .on_mouse_move(window.listener_for(&state, |state, event: &gpui::MouseMoveEvent, window, _| {
+            .on_mouse_move(window.listener_for(&state, |state, _event: &gpui::MouseMoveEvent, window, _| {
                 if state.should_move {
                     #[cfg(not(target_os = "windows"))]
                     {
