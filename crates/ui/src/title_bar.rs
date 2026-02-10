@@ -157,6 +157,7 @@ impl RenderOnce for ControlIcon {
         let hover_bg = self.hover_bg(cx);
         let active_bg = self.active_bg(cx);
         let icon = self.clone();
+        let fg_muted = cx.theme().muted_foreground;
         let on_close_window = match &self {
             ControlIcon::Close { on_close_window } => on_close_window.clone(),
             _ => None,
@@ -165,15 +166,29 @@ impl RenderOnce for ControlIcon {
         div()
             .id(self.id())
             .flex()
-            .when(is_linux, |this| this.size_5().rounded_2xl())
-            .when(!is_linux, |this| this.w(TITLE_BAR_HEIGHT).h_full())
             .flex_shrink_0()
             .justify_center()
             .content_center()
             .items_center()
-            .text_color(cx.theme().foreground)
-            .hover(|style| style.bg(hover_bg).text_color(hover_fg))
-            .active(|style| style.bg(active_bg).text_color(hover_fg))
+            // Windows: tall rectangular buttons spanning the full title bar height
+            .when(!is_linux, |this| {
+                this.w(TITLE_BAR_HEIGHT)
+                    .h_full()
+                    .text_color(cx.theme().foreground)
+                    .hover(|style| style.bg(hover_bg).text_color(hover_fg))
+                    .active(|style| style.bg(active_bg).text_color(hover_fg))
+            })
+            // Linux: small rounded circle buttons (20×20px) with uniform muted colors
+            .when(is_linux, |this| {
+                let bg_muted = cx.theme().muted;
+                let fg = cx.theme().foreground;
+                this.size_5()
+                    .rounded_2xl()
+                    .cursor_pointer()
+                    .text_color(fg_muted)
+                    .hover(|style| style.bg(bg_muted).text_color(fg))
+                    .active(|style| style.bg(bg_muted).text_color(fg))
+            })
             .when(is_windows, |this| {
                 this.window_control_area(self.window_control_area())
             })
@@ -202,7 +217,11 @@ impl RenderOnce for ControlIcon {
                     }
                 })
             })
-            .child(Icon::new(self.icon()).small())
+            .child(
+                Icon::new(self.icon())
+                    .when(is_linux, |this| this.size_4().text_color(fg_muted))
+                    .when(!is_linux, |this| this.small())
+            )
     }
 }
 
@@ -213,6 +232,8 @@ struct WindowControls {
 
 impl RenderOnce for WindowControls {
     fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+        let is_linux = cfg!(target_os = "linux");
+
         if cfg!(target_os = "macos") {
             return div().id("window-controls");
         }
@@ -222,7 +243,8 @@ impl RenderOnce for WindowControls {
             .items_center()
             .flex_shrink_0()
             .h_full()
-            .when(cfg!(target_os = "linux"), |this| this.gap_2().pr_3())
+            // Linux: spaced rounded buttons with padding
+            .when(is_linux, |this| this.gap_2().pl_2().pr_3())
             .child(ControlIcon::minimize())
             .child(if window.is_maximized() {
                 ControlIcon::restore()
