@@ -210,7 +210,8 @@ impl StockTableDelegate {
                     .fixed(ColumnFixed::Left)
                     .resizable(true)
                     .min_width(40.)
-                    .max_width(100.),
+                    .max_width(100.)
+                    .text_center(),
                 Column::new("market", "Market")
                     .width(60.)
                     .fixed(ColumnFixed::Left)
@@ -373,6 +374,9 @@ impl TableDelegate for StockTableDelegate {
             .when(col_ix >= 3 && col_ix <= 10, |this| {
                 this.table_cell_size(self.size)
             })
+            .when(col.align == TextAlign::Center, |this| {
+                this.h_flex().w_full().justify_center()
+            })
             .when(col.align == TextAlign::Right, |this| {
                 this.h_flex().w_full().justify_end()
             })
@@ -434,7 +438,10 @@ impl TableDelegate for StockTableDelegate {
         let col = self.columns.get(col_ix).unwrap();
 
         match col.key.as_ref() {
-            "id" => stock.id.to_string().into_any_element(),
+            "id" => div()
+                .child(stock.id.to_string())
+                .when(col.align == TextAlign::Center, |this| this.text_center())
+                .into_any_element(),
             "market" => div()
                 .map(|this| {
                     if stock.counter.market == "US" {
@@ -852,6 +859,13 @@ impl TableStory {
         });
     }
 
+    fn toggle_cell_selection(&mut self, checked: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        self.table.update(cx, |table, cx| {
+            table.cell_selectable = *checked;
+            cx.notify();
+        });
+    }
+
     fn toggle_stripe(&mut self, checked: &bool, _: &mut Window, cx: &mut Context<Self>) {
         self.stripe = *checked;
         cx.notify();
@@ -879,12 +893,24 @@ impl TableStory {
                 println!("Column widths changed: {:?}", col_widths)
             }
             TableEvent::SelectColumn(ix) => println!("Select col: {}", ix),
+            TableEvent::SelectCell(row_ix, col_ix) => {
+                println!("Select cell: row={}, col={}", row_ix, col_ix)
+            }
+            TableEvent::DoubleClickedCell(row_ix, col_ix) => {
+                println!("Double clicked cell: row={}, col={}", row_ix, col_ix)
+            }
             TableEvent::DoubleClickedRow(ix) => println!("Double clicked row: {}", ix),
             TableEvent::SelectRow(ix) => println!("Select row: {}", ix),
             TableEvent::MoveColumn(origin_idx, target_idx) => {
                 println!("Move col index: {} -> {}", origin_idx, target_idx);
             }
             TableEvent::RightClickedRow(ix) => println!("Right clicked row: {:?}", ix),
+            TableEvent::RightClickedCell(row_ix, col_ix) => {
+                println!("Right clicked cell: row={}, col={}", row_ix, col_ix)
+            }
+            TableEvent::ClearSelection => {
+                println!("Selection cleared");
+            }
         }
     }
 
@@ -995,6 +1021,12 @@ impl Render for TableStory {
                             .on_click(cx.listener(Self::toggle_row_selection)),
                     )
                     .child(
+                        Checkbox::new("cell-selection")
+                            .label("Cell Selectable")
+                            .selected(table.cell_selectable)
+                            .on_click(cx.listener(Self::toggle_cell_selection)),
+                    )
+                    .child(
                         Checkbox::new("fixed")
                             .label("Column Fixed")
                             .selected(table.col_fixed)
@@ -1083,6 +1115,39 @@ impl Render for TableStory {
                             .small()
                             .label("Dump CSV")
                             .on_click(cx.listener(Self::dump_csv)),
+                    )
+                    .child(
+                        Button::new("select-cell-5-3")
+                            .outline()
+                            .small()
+                            .child("Select Cell (5, 3)")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.table.update(cx, |table, cx| {
+                                    table.set_selected_cell(5, 3, cx);
+                                })
+                            })),
+                    )
+                    .child(
+                        Button::new("select-cell-10-7")
+                            .outline()
+                            .small()
+                            .child("Select Cell (10, 7)")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.table.update(cx, |table, cx| {
+                                    table.set_selected_cell(10, 7, cx);
+                                })
+                            })),
+                    )
+                    .child(
+                        Button::new("clear-selection")
+                            .outline()
+                            .small()
+                            .child("Clear Selection")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.table.update(cx, |table, cx| {
+                                    table.clear_selection(cx);
+                                })
+                            })),
                     ),
             )
             .child(
@@ -1126,6 +1191,9 @@ impl Render for TableStory {
                                 .child(format!("Total Rows: {}", rows_count))
                                 .child(format!("Visible Rows: {:?}", delegate.visible_rows))
                                 .child(format!("Visible Cols: {:?}", delegate.visible_cols))
+                                .when_some(table.selected_cell(), |this, (row, col)| {
+                                    this.child(format!("Selected Cell: ({}, {})", row, col))
+                                })
                                 .when(delegate.eof, |this| this.child("All data loaded.")),
                         ),
                 ),

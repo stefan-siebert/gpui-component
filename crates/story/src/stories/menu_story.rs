@@ -232,7 +232,7 @@ impl Render for MenuStory {
                             .items_center()
                             .justify_center()
                             .min_h_20()
-                            .rounded_lg()
+                            .rounded(cx.theme().radius_lg)
                             .border_2()
                             .border_dashed()
                             .border_color(cx.theme().border)
@@ -287,7 +287,7 @@ impl Render for MenuStory {
                             .items_center()
                             .justify_center()
                             .min_h_20()
-                            .rounded_lg()
+                            .rounded(cx.theme().radius_lg)
                             .border_2()
                             .border_dashed()
                             .border_color(cx.theme().border)
@@ -312,7 +312,7 @@ impl Render for MenuStory {
                             .items_center()
                             .justify_center()
                             .min_h_20()
-                            .rounded_lg()
+                            .rounded(cx.theme().radius_lg)
                             .border_2()
                             .border_dashed()
                             .border_color(cx.theme().border)
@@ -341,6 +341,10 @@ impl Render for MenuStory {
                                     .max_h(px(300.))
                                     .label(format!("Total {} items", 100));
                                 for i in 0..100 {
+                                    if i % 5 == 0 {
+                                        this = this.separator();
+                                    }
+
                                     this = this.menu(
                                         SharedString::from(format!("Item {}", i)),
                                         Box::new(Info(i)),
