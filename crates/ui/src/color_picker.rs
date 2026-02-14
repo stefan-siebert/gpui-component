@@ -548,7 +548,7 @@ impl ColorPicker {
                             .min_w_16()
                             .text_xs()
                             .text_color(label_color)
-                            .child(t!("ColorPicker.Hue")),
+                            .child(SharedString::from(t!("ColorPicker.Hue"))),
                     )
                     .child(
                         div()
@@ -582,7 +582,7 @@ impl ColorPicker {
                             .min_w_16()
                             .text_xs()
                             .text_color(label_color)
-                            .child(t!("ColorPicker.Saturation")),
+                            .child(SharedString::from(t!("ColorPicker.Saturation"))),
                     )
                     .child(
                         div()
@@ -620,7 +620,7 @@ impl ColorPicker {
                             .min_w_16()
                             .text_xs()
                             .text_color(label_color)
-                            .child(t!("ColorPicker.Lightness")),
+                            .child(SharedString::from(t!("ColorPicker.Lightness"))),
                     )
                     .child(
                         div()
@@ -654,7 +654,7 @@ impl ColorPicker {
                             .min_w_16()
                             .text_xs()
                             .text_color(label_color)
-                            .child(t!("ColorPicker.Alpha")),
+                            .child(SharedString::from(t!("ColorPicker.Alpha"))),
                     )
                     .child(
                         div()
