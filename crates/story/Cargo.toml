@@ -8,6 +8,7 @@ edition.workspace = true
 inspector = ["gpui-component/inspector"]
 tree-sitter = ["gpui-component/tree-sitter-languages"]
 default = ["tree-sitter"]
+mcp = ["gpui-component/mcp"]
 
 [dependencies]
 anyhow.workspace = true

@@ -17,6 +17,7 @@ doctest = false
 [features]
 decimal = ["dep:rust_decimal"]
 inspector = ["gpui_macros/inspector", "gpui/inspector"]
+mcp = ["inspector", "dep:gpui-mcp-protocol"]
 
 # For syntax highlighting in Markdown and CodeEditor.
 tree-sitter-languages = [
@@ -83,6 +84,9 @@ uuid = "1.10"
 # Async primitives (cross-platform, including WASM)
 async-channel = "2.3.1"
 futures = "0.3"
+
+# MCP Integration
+gpui-mcp-protocol = { workspace = true, optional = true }
 
 # Chart
 num-traits = "0.2"

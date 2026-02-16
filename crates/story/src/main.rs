@@ -9,6 +9,8 @@ fn main() {
 
     app.run(move |cx| {
         init(cx);
+        #[cfg(feature = "mcp")]
+        gpui_component::mcp::init_mcp(cx);
         cx.activate(true);
 
         create_new_window(
