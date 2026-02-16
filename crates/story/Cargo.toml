@@ -6,6 +6,7 @@ edition.workspace = true
 
 [features]
 inspector = ["gpui-component/inspector"]
+mcp = ["gpui-component/mcp"]
 
 [dependencies]
 anyhow.workspace = true

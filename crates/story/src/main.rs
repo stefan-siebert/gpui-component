@@ -308,6 +308,8 @@ fn main() {
 
     app.run(move |cx| {
         gpui_component_story::init(cx);
+        #[cfg(feature = "mcp")]
+        gpui_component::mcp::init_mcp(cx);
         cx.activate(true);
 
         gpui_component_story::create_new_window(

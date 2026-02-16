@@ -2914,6 +2914,7 @@ dependencies = [
  "gpui",
  "gpui-component-macros",
  "gpui-macros",
+ "gpui-mcp-inspector",
  "html5ever 0.27.0",
  "indoc",
  "itertools 0.13.0",
@@ -3033,6 +3034,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.105",
+]
+
+[[package]]
+name = "gpui-mcp-inspector"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.14",
+ "uuid",
 ]
 
 [[package]]

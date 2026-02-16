@@ -11,6 +11,8 @@ mod icon;
 mod index_path;
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod inspector;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 mod root;
 mod styled;
 mod time;
