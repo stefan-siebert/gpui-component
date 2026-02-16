@@ -29,11 +29,11 @@ gpui-component-assets = { path = "crates/assets", version = "0.5.1" }
 gpui-mcp-protocol = { package = "gpui-mcp-inspector", path = "../gpui-mcp" }
 story = { path = "crates/story" }
 
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-gpui_web = { git = "https://github.com/zed-industries/zed" }
-gpui_macros = { git = "https://github.com/zed-industries/zed" }
-reqwest_client = { git = "https://github.com/zed-industries/zed" }
+gpui = { git = "https://github.com/stefan-siebert/zed", branch = "gpui-mcp-patches-v2" }
+gpui_platform = { git = "https://github.com/stefan-siebert/zed", branch = "gpui-mcp-patches-v2", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui_web = { git = "https://github.com/stefan-siebert/zed", branch = "gpui-mcp-patches-v2" }
+gpui_macros = { git = "https://github.com/stefan-siebert/zed", branch = "gpui-mcp-patches-v2" }
+reqwest_client = { git = "https://github.com/stefan-siebert/zed", branch = "gpui-mcp-patches-v2" }
 sum-tree = { version = "0.2.0", package = "zed-sum-tree" }
 # reqwest = { version = "0.12.15-zed", package = "zed-reqwest" }
 reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662463bda39148ba154100dd44d3fba5873a4", default-features = false, features = [
@@ -125,3 +125,8 @@ ignored = ["log", "anyhow", "serde"]
 [patch.crates-io]
 # Use stacker's psm version which may have better WASM support
 psm = { git = "https://github.com/rust-lang/stacker", branch = "master" }
+
+[patch."https://github.com/stefan-siebert/zed"]
+gpui = { path = "../gpui-fork/crates/gpui" }
+gpui_platform = { path = "../gpui-fork/crates/gpui_platform" }
+gpui_macros = { path = "../gpui-fork/crates/gpui_macros" }
