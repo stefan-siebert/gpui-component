@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, App, Bounds, Context, ElementId, InteractiveElement as _, IntoElement,
-    ParentElement, Pixels, Render, RenderOnce, StatefulInteractiveElement, StyleRefinement, Styled,
-    Task, Window, div, prelude::FluentBuilder as _,
+    ParentElement, Pixels, Point, Render, RenderOnce, StatefulInteractiveElement, StyleRefinement,
+    Styled, Task, Window, div, prelude::FluentBuilder as _,
 };
 use std::rc::Rc;
 use std::time::Duration;
@@ -28,6 +28,7 @@ pub struct HoverCard {
     open_delay: Duration,
     close_delay: Duration,
     appearance: bool,
+    content_offset: Point<Pixels>,
     on_open_change: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
 }
 
@@ -44,6 +45,7 @@ impl HoverCard {
             open_delay: Duration::from_secs_f64(0.6),
             close_delay: Duration::from_secs_f64(0.3),
             appearance: true,
+            content_offset: Point::default(),
             on_open_change: None,
         }
     }
@@ -92,6 +94,16 @@ impl HoverCard {
     /// Set whether to apply default appearance styles, default is `true`.
     pub fn appearance(mut self, appearance: bool) -> Self {
         self.appearance = appearance;
+        self
+    }
+
+    /// Set a pixel offset applied to the popover position, default is `(0, 0)`.
+    ///
+    /// This shifts the entire popover (including its occlude area) relative to
+    /// the trigger, which is useful for preventing the popover from blocking
+    /// adjacent interactive elements.
+    pub fn content_offset(mut self, offset: Point<Pixels>) -> Self {
+        self.content_offset = offset;
         self
     }
 
@@ -309,9 +321,12 @@ impl RenderOnce for HoverCard {
                 .children(self.children)
                 .refine_style(&self.style);
 
+        let mut offset_bounds = trigger_bounds;
+        offset_bounds.origin = offset_bounds.origin + self.content_offset;
+
         root.child(Popover::render_popover(
             self.anchor,
-            trigger_bounds,
+            offset_bounds,
             popover_content,
             window,
             cx,
