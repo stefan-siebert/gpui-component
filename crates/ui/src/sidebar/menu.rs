@@ -242,6 +242,12 @@ impl SidebarItem for SidebarMenuItem {
                 h_flex()
                     .size_full()
                     .id("item")
+                    .when(!is_disabled, |this| this.tab_index(0))
+                    .focus_visible({
+                        let accent = cx.theme().sidebar_accent;
+                        let fg = cx.theme().sidebar_accent_foreground;
+                        move |style| style.bg(accent.opacity(0.8)).text_color(fg)
+                    })
                     .overflow_x_hidden()
                     .flex_shrink_0()
                     .p_2()

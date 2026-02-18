@@ -201,6 +201,7 @@ pub struct PopoverState {
     trigger_bounds: Bounds<Pixels>,
     open: bool,
     on_open_change: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
+    previous_focus: Option<FocusHandle>,
 
     _dismiss_subscription: Option<Subscription>,
 }
@@ -213,6 +214,7 @@ impl PopoverState {
             trigger_bounds: Bounds::default(),
             open: default_open,
             on_open_change: None,
+            previous_focus: None,
             _dismiss_subscription: None,
         }
     }
@@ -239,6 +241,9 @@ impl PopoverState {
     fn toggle_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = !self.open;
         if self.open {
+            // Save current focus so we can restore it when the popover closes.
+            self.previous_focus = window.focused(cx);
+
             let state = cx.entity();
             let focus_handle = if let Some(tracked_focus_handle) = self.tracked_focus_handle.clone()
             {
@@ -259,6 +264,11 @@ impl PopoverState {
                 );
         } else {
             self._dismiss_subscription = None;
+
+            // Restore focus to the element that was focused before the popover opened.
+            if let Some(previous_focus) = self.previous_focus.take() {
+                previous_focus.focus(window, cx);
+            }
         }
 
         if let Some(callback) = self.on_open_change.as_ref() {
@@ -368,6 +378,27 @@ impl RenderOnce for Popover {
                         state.toggle_open(window, cx);
                     });
                     cx.notify(parent_view_id);
+                }
+            })
+            .on_key_up({
+                let state = state.clone();
+                move |event, window, cx| {
+                    // Only handle keyboard activation when the popover is closed.
+                    // When open, let key events pass through to popover content.
+                    if open {
+                        return;
+                    }
+                    let key = &event.keystroke.key;
+                    if (key == "space" || key == "enter")
+                        && !event.keystroke.modifiers.modified()
+                    {
+                        cx.stop_propagation();
+                        state.update(cx, |state, cx| {
+                            state.open = false;
+                            state.toggle_open(window, cx);
+                        });
+                        cx.notify(parent_view_id);
+                    }
                 }
             })
             .on_prepaint({

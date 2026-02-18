@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use crate::{
     IconName, Sizable, Size, StyledExt,
     group_box::GroupBoxVariant,
@@ -34,6 +36,12 @@ pub struct Settings {
     sidebar_style: StyleRefinement,
     default_selected_index: SelectIndex,
     header_style: StyleRefinement,
+    /// If set, override the selected page on every render.
+    force_page: Option<usize>,
+    /// Callback when the selected page changes (via sidebar click or keyboard).
+    on_page_change: Option<Rc<dyn Fn(usize, &mut App)>>,
+    /// Whether to auto-focus the search input on first render.
+    auto_focus_search: bool,
 }
 
 impl Settings {
@@ -48,6 +56,9 @@ impl Settings {
             sidebar_style: StyleRefinement::default(),
             default_selected_index: SelectIndex::default(),
             header_style: StyleRefinement::default(),
+            force_page: None,
+            on_page_change: None,
+            auto_focus_search: false,
         }
     }
 
@@ -92,6 +103,28 @@ impl Settings {
     /// Set the style refinement for the header.
     pub fn header_style(mut self, style: &StyleRefinement) -> Self {
         self.header_style = style.clone();
+        self
+    }
+
+    /// Force the selected page index on every render.
+    ///
+    /// Use this together with [`on_page_change`](Self::on_page_change) to drive
+    /// page selection from an external View.
+    pub fn force_page(mut self, page_ix: usize) -> Self {
+        self.force_page = Some(page_ix);
+        self
+    }
+
+    /// Set a callback invoked when the selected page changes (sidebar click or
+    /// keyboard navigation).
+    pub fn on_page_change(mut self, f: impl Fn(usize, &mut App) + 'static) -> Self {
+        self.on_page_change = Some(Rc::new(f));
+        self
+    }
+
+    /// Auto-focus the search input when the settings are first rendered.
+    pub fn auto_focus_search(mut self) -> Self {
+        self.auto_focus_search = true;
         self
     }
 
@@ -158,6 +191,7 @@ impl Settings {
     ) -> impl IntoElement {
         let selected_index = state.read(cx).selected_index;
         let search_input = state.read(cx).search_input.clone();
+        let on_page_change = self.on_page_change.clone();
 
         Sidebar::new("settings-sidebar")
             .w(relative(1.))
@@ -179,6 +213,7 @@ impl Settings {
                         .active(is_page_active)
                         .on_click({
                             let state = state.clone();
+                            let on_page_change = on_page_change.clone();
                             move |_, _, cx| {
                                 state.update(cx, |state, cx| {
                                     state.selected_index = SelectIndex {
@@ -186,7 +221,10 @@ impl Settings {
                                         ..Default::default()
                                     };
                                     cx.notify();
-                                })
+                                });
+                                if let Some(cb) = &on_page_change {
+                                    cb(page_ix, cx);
+                                }
                             }
                         })
                         .when(page.groups.len() > 1, |this| {
@@ -202,6 +240,7 @@ impl Settings {
 
                                         SidebarMenuItem::new(title).active(is_active).on_click({
                                             let state = state.clone();
+                                            let on_page_change = on_page_change.clone();
                                             move |_, _, cx| {
                                                 state.update(cx, |state, cx| {
                                                     state.selected_index = SelectIndex {
@@ -210,7 +249,10 @@ impl Settings {
                                                     };
                                                     state.deferred_scroll_group_ix = Some(group_ix);
                                                     cx.notify();
-                                                })
+                                                });
+                                                if let Some(cb) = &on_page_change {
+                                                    cb(page_ix, cx);
+                                                }
                                             }
                                         })
                                     }),
@@ -228,11 +270,13 @@ impl Sizable for Settings {
     }
 }
 
-pub(super) struct SettingsState {
-    pub(super) selected_index: SelectIndex,
+pub struct SettingsState {
+    pub selected_index: SelectIndex,
     /// If set, defer scrolling to this group index after rendering.
-    pub(super) deferred_scroll_group_ix: Option<usize>,
-    pub(super) search_input: Entity<InputState>,
+    pub deferred_scroll_group_ix: Option<usize>,
+    pub search_input: Entity<InputState>,
+    /// Track whether auto-focus has been applied.
+    auto_focused: bool,
 }
 
 /// Options for rendering setting item.
@@ -265,8 +309,34 @@ impl RenderOnce for Settings {
                 search_input,
                 selected_index: self.default_selected_index,
                 deferred_scroll_group_ix: None,
+                auto_focused: false,
             }
         });
+
+        // Auto-focus search input on first render
+        if self.auto_focus_search && !state.read(cx).auto_focused {
+            let search = state.read(cx).search_input.clone();
+            search.update(cx, |input, cx| {
+                input.focus(window, cx);
+            });
+            state.update(cx, |s, _cx| {
+                s.auto_focused = true;
+            });
+        }
+
+        // Force page selection if requested
+        if let Some(page_ix) = self.force_page {
+            let current = state.read(cx).selected_index.page_ix;
+            if current != page_ix {
+                state.update(cx, |s, cx| {
+                    s.selected_index = SelectIndex {
+                        page_ix,
+                        group_ix: None,
+                    };
+                    cx.notify();
+                });
+            }
+        }
 
         let query = state.read(cx).search_input.read(cx).value();
         let filtered_pages = self.filtered_pages(&query, cx);
