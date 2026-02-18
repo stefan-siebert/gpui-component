@@ -18,7 +18,10 @@ const CONTEXT: &str = "PopupMenu";
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("enter", Confirm { secondary: false }, Some(CONTEXT)),
+        KeyBinding::new("space", Confirm { secondary: false }, Some(CONTEXT)),
         KeyBinding::new("escape", Cancel, Some(CONTEXT)),
+        KeyBinding::new("tab", Cancel, Some(CONTEXT)),
+        KeyBinding::new("shift-tab", Cancel, Some(CONTEXT)),
         KeyBinding::new("up", SelectUp, Some(CONTEXT)),
         KeyBinding::new("down", SelectDown, Some(CONTEXT)),
         KeyBinding::new("left", SelectLeft, Some(CONTEXT)),

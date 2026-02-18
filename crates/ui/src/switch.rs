@@ -1,5 +1,6 @@
 use crate::{
-    h_flex, text::Text, tooltip::Tooltip, ActiveTheme, Disableable, Side, Sizable, Size, StyledExt,
+    h_flex, text::Text, tooltip::Tooltip, ActiveTheme, Disableable, FocusableExt, Side, Sizable,
+    Size, StyledExt,
 };
 use gpui::{
     div, prelude::FluentBuilder as _, px, Animation, AnimationExt as _, App, ElementId,
@@ -20,6 +21,8 @@ pub struct Switch {
     on_click: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
     size: Size,
     tooltip: Option<SharedString>,
+    tab_stop: bool,
+    tab_index: isize,
 }
 
 impl Switch {
@@ -36,6 +39,8 @@ impl Switch {
             label_side: Side::Right,
             size: Size::Medium,
             tooltip: None,
+            tab_stop: true,
+            tab_index: 0,
         }
     }
 
@@ -65,6 +70,18 @@ impl Switch {
         self.tooltip = Some(tooltip.into());
         self
     }
+
+    /// Set the tab stop for the switch, default is true.
+    pub fn tab_stop(mut self, tab_stop: bool) -> Self {
+        self.tab_stop = tab_stop;
+        self
+    }
+
+    /// Set the tab index for the switch, default is 0.
+    pub fn tab_index(mut self, tab_index: isize) -> Self {
+        self.tab_index = tab_index;
+        self
+    }
 }
 
 impl Styled for Switch {
@@ -92,6 +109,12 @@ impl RenderOnce for Switch {
         let checked = self.checked;
         let on_click = self.on_click.clone();
         let toggle_state = window.use_keyed_state(self.id.clone(), cx, |_, _| checked);
+
+        let focus_handle = window
+            .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        let is_focused = focus_handle.is_focused(window);
 
         let (bg, toggle_bg) = match checked {
             true => (cx.theme().primary, cx.theme().switch_thumb),
@@ -127,11 +150,22 @@ impl RenderOnce for Switch {
                 .id(self.id.clone())
                 .gap_2()
                 .items_start()
+                .when(!self.disabled, |this| {
+                    this.track_focus(
+                        &focus_handle
+                            .tab_stop(self.tab_stop)
+                            .tab_index(self.tab_index),
+                    )
+                })
+                .rounded(radius)
+                .focus_ring(is_focused, px(2.), window, cx)
                 .when(self.label_side.is_left(), |this| this.flex_row_reverse())
                 .child(
-                    // Switch Bar
+                    // Switch Bar (needs its own id for tooltip support)
                     div()
-                        .id(self.id.clone())
+                        .id(ElementId::Name(
+                            format!("switch-bar-{:?}", self.id).into(),
+                        ))
                         .w(bg_width)
                         .h(bg_height)
                         .rounded(radius)
@@ -196,6 +230,10 @@ impl RenderOnce for Switch {
                         },
                     ))
                 })
+                .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                    // Avoid focus on mouse down.
+                    window.prevent_default();
+                })
                 .when_some(
                     on_click
                         .as_ref()
@@ -203,7 +241,7 @@ impl RenderOnce for Switch {
                         .filter(|_| !self.disabled),
                     |this, on_click| {
                         let toggle_state = toggle_state.clone();
-                        this.on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                        this.on_click(move |_, window, cx| {
                             cx.stop_propagation();
                             _ = toggle_state.update(cx, |this, _| *this = checked);
                             on_click(&!checked, window, cx);

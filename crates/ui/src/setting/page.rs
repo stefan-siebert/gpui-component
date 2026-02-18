@@ -153,6 +153,10 @@ impl SettingPage {
                                         let page = self.clone();
                                         move |_, window, cx| {
                                             page.reset_all(window, cx);
+                                            // The reset button disappears after reset (no longer
+                                            // resettable), so focus would be lost. Move focus to
+                                            // the next available element.
+                                            window.focus_next(cx);
                                         }
                                     }),
                             )
