@@ -1748,6 +1748,22 @@ impl InputState {
         cx.notify()
     }
 
+    /// Select a range of text by byte offsets.
+    ///
+    /// The cursor will be placed at the end of the range.
+    /// Offsets are clamped to the text length.
+    pub fn select_range(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) {
+        let start = range.start.min(self.text.len());
+        let end = range.end.min(self.text.len());
+        self.selection_reversed = false;
+        self.selected_range = (start..end).into();
+        self.selected_word_range = None;
+        if self.selected_range.is_empty() {
+            self.update_preferred_column();
+        }
+        cx.notify();
+    }
+
     /// Unselects the currently selected text.
     pub fn unselect(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let offset = self.cursor();
