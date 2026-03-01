@@ -112,9 +112,6 @@ reqwest_client = { opt-level = 3 }
 markdown = { opt-level = 3 }
 xml5ever = { opt-level = 3 }
 
-[patch."https://github.com/stefan-siebert/zed"]
-gpui = { path = "../gpui-fork/crates/gpui" }
-
 [workspace.metadata.typos]
 files.extend-exclude = ["**/fixtures/*"]
 
