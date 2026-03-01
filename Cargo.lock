@@ -1165,7 +1165,6 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
-source = "git+https://github.com/stefan-siebert/zed?branch=gpui-mcp-patches#4886b82da52d9f5ce5d862c9b95bece55ba08fee"
 dependencies = [
  "indexmap",
  "rustc-hash 2.1.1",
@@ -1664,7 +1663,6 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
-source = "git+https://github.com/stefan-siebert/zed?branch=gpui-mcp-patches#4886b82da52d9f5ce5d862c9b95bece55ba08fee"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2802,7 +2800,6 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/stefan-siebert/zed?branch=gpui-mcp-patches#4886b82da52d9f5ce5d862c9b95bece55ba08fee"
 dependencies = [
  "anyhow",
  "as-raw-xcb-connection",
@@ -3053,13 +3050,15 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "gpui",
+ "gtk",
  "lb-wry",
+ "raw-window-handle",
+ "smol",
 ]
 
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
-source = "git+https://github.com/stefan-siebert/zed?branch=gpui-mcp-patches#4886b82da52d9f5ce5d862c9b95bece55ba08fee"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -3332,7 +3331,6 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
-source = "git+https://github.com/stefan-siebert/zed?branch=gpui-mcp-patches#4886b82da52d9f5ce5d862c9b95bece55ba08fee"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -4343,7 +4341,6 @@ dependencies = [
 [[package]]
 name = "media"
 version = "0.1.0"
-source = "git+https://github.com/stefan-siebert/zed?branch=gpui-mcp-patches#4886b82da52d9f5ce5d862c9b95bece55ba08fee"
 dependencies = [
  "anyhow",
  "bindgen 0.71.1",
@@ -5132,7 +5129,6 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "perf"
 version = "0.1.0"
-source = "git+https://github.com/stefan-siebert/zed?branch=gpui-mcp-patches#4886b82da52d9f5ce5d862c9b95bece55ba08fee"
 dependencies = [
  "collections",
  "serde",
@@ -5968,7 +5964,6 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
-source = "git+https://github.com/stefan-siebert/zed?branch=gpui-mcp-patches#4886b82da52d9f5ce5d862c9b95bece55ba08fee"
 dependencies = [
  "derive_refineable",
 ]
@@ -6404,7 +6399,6 @@ dependencies = [
 [[package]]
 name = "scheduler"
 version = "0.1.0"
-source = "git+https://github.com/stefan-siebert/zed?branch=gpui-mcp-patches#4886b82da52d9f5ce5d862c9b95bece55ba08fee"
 dependencies = [
  "async-task",
  "backtrace",
@@ -7052,7 +7046,6 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sum_tree"
 version = "0.1.0"
-source = "git+https://github.com/stefan-siebert/zed?branch=gpui-mcp-patches#4886b82da52d9f5ce5d862c9b95bece55ba08fee"
 dependencies = [
  "arrayvec",
  "log",
@@ -8395,7 +8388,6 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 [[package]]
 name = "util"
 version = "0.1.0"
-source = "git+https://github.com/stefan-siebert/zed?branch=gpui-mcp-patches#4886b82da52d9f5ce5d862c9b95bece55ba08fee"
 dependencies = [
  "anyhow",
  "async-fs",
@@ -8436,7 +8428,6 @@ dependencies = [
 [[package]]
 name = "util_macros"
 version = "0.1.0"
-source = "git+https://github.com/stefan-siebert/zed?branch=gpui-mcp-patches#4886b82da52d9f5ce5d862c9b95bece55ba08fee"
 dependencies = [
  "perf",
  "quote",
@@ -8865,9 +8856,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-wry",
- "gtk",
  "lb-wry",
- "raw-window-handle",
 ]
 
 [[package]]
@@ -10082,7 +10071,6 @@ dependencies = [
 [[package]]
 name = "zlog"
 version = "0.1.0"
-source = "git+https://github.com/stefan-siebert/zed?branch=gpui-mcp-patches#4886b82da52d9f5ce5d862c9b95bece55ba08fee"
 dependencies = [
  "anyhow",
  "chrono",
@@ -10093,7 +10081,6 @@ dependencies = [
 [[package]]
 name = "ztracing"
 version = "0.1.0"
-source = "git+https://github.com/stefan-siebert/zed?branch=gpui-mcp-patches#4886b82da52d9f5ce5d862c9b95bece55ba08fee"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -10104,7 +10091,6 @@ dependencies = [
 [[package]]
 name = "ztracing_macro"
 version = "0.1.0"
-source = "git+https://github.com/stefan-siebert/zed?branch=gpui-mcp-patches#4886b82da52d9f5ce5d862c9b95bece55ba08fee"
 
 [[package]]
 name = "zune-core"

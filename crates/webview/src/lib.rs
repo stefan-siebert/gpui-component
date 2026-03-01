@@ -6,12 +6,18 @@ use wry::{
 };
 
 use gpui::{
-    App, Bounds, ContentMask, DismissEvent, Element, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, GlobalElementId, Hitbox, InteractiveElement, IntoElement, LayoutId, MouseDownEvent,
-    ParentElement as _, Pixels, Render, Size, Style, Styled as _, Window, canvas, div,
+    App, Bounds, ContentMask, Context, DismissEvent, Element, ElementId, Entity, EventEmitter,
+    FocusHandle, Focusable, GlobalElementId, Hitbox, InteractiveElement, IntoElement, LayoutId,
+    MouseDownEvent, ParentElement as _, Pixels, Render, Size, Style, Styled as _, Task, Window,
+    canvas, div,
 };
 
+#[cfg(target_os = "linux")]
+mod linux;
+
 /// A webview based on wry WebView.
+///
+/// Supports macOS, Windows, and Linux (X11 only).
 ///
 /// [experimental]
 pub struct WebView {
@@ -19,6 +25,8 @@ pub struct WebView {
     webview: Rc<wry::WebView>,
     visible: bool,
     bounds: Bounds<Pixels>,
+    #[cfg(target_os = "linux")]
+    _gtk_pump_task: Option<Task<()>>,
 }
 
 impl Drop for WebView {
@@ -29,14 +37,75 @@ impl Drop for WebView {
 
 impl WebView {
     /// Create a new WebView from a wry WebView.
-    pub fn new(webview: wry::WebView, _: &mut Window, cx: &mut App) -> Self {
+    ///
+    /// On Linux, this starts a background task that pumps GTK events for WebKitGTK.
+    /// The caller is responsible for GTK initialization and platform-specific webview
+    /// construction. Consider using [`WebView::build`] instead for automatic handling.
+    pub fn new(webview: wry::WebView, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let _ = webview.set_bounds(Rect::default());
+
+        #[cfg(target_os = "linux")]
+        let gtk_pump_task = {
+            let task = cx.spawn(async move |_this, cx| {
+                loop {
+                    smol::Timer::after(std::time::Duration::from_millis(16)).await;
+                    cx.update(|_| {
+                        while gtk::events_pending() {
+                            gtk::main_iteration_do(false);
+                        }
+                    });
+                }
+            });
+            Some(task)
+        };
 
         Self {
             focus_handle: cx.focus_handle(),
             visible: true,
             bounds: Bounds::default(),
             webview: Rc::new(webview),
+            #[cfg(target_os = "linux")]
+            _gtk_pump_task: gtk_pump_task,
+        }
+    }
+
+    /// Build a WebView as a child of the given GPUI window.
+    ///
+    /// This handles platform-specific construction:
+    /// - On macOS/Windows: uses the native window handle directly
+    /// - On Linux (X11): initializes GTK, converts XCB handle to Xlib, starts GTK event pumping
+    ///
+    /// Wayland is not currently supported (wry limitation).
+    pub fn build(
+        builder: wry::WebViewBuilder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<Self> {
+        let webview = Self::build_webview(builder, window)?;
+        Ok(Self::new(webview, window, cx))
+    }
+
+    fn build_webview(
+        builder: wry::WebViewBuilder,
+        window: &mut Window,
+    ) -> anyhow::Result<wry::WebView> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::ensure_gtk_initialized();
+            let wrapper = linux::XlibWindowWrapper::from_window(window).map_err(|_| {
+                anyhow::anyhow!(
+                    "WebView requires an X11 window. Wayland is not supported. \
+                     Set WAYLAND_DISPLAY=\"\" to force X11 mode."
+                )
+            })?;
+            Ok(builder.build_as_child(&wrapper)?)
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            use raw_window_handle::HasWindowHandle;
+            let window_handle = window.window_handle()?;
+            Ok(builder.build_as_child(&window_handle)?)
         }
     }
 

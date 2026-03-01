@@ -20,4 +20,9 @@ doctest = false
 [dependencies]
 anyhow.workspace = true
 gpui.workspace = true
+raw-window-handle.workspace = true
 wry = { version = "0.53.3", package = "lb-wry" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+smol.workspace = true

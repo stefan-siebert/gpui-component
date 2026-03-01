@@ -19,36 +19,7 @@ impl Example {
             #[cfg(any(debug_assertions, feature = "inspector"))]
             let builder = builder.with_devtools(true);
 
-            #[cfg(not(any(
-                target_os = "windows",
-                target_os = "macos",
-                target_os = "ios",
-                target_os = "android"
-            )))]
-            let webview = {
-                use gtk::prelude::*;
-                use wry::WebViewBuilderExtUnix;
-                // borrowed from https://github.com/tauri-apps/wry/blob/dev/examples/gtk_multiwebview.rs
-                // doesn't work yet
-                // TODO: How to initialize this fixed?
-                let fixed = gtk::Fixed::builder().build();
-                fixed.show_all();
-                builder.build_gtk(&fixed).unwrap()
-            };
-            #[cfg(any(
-                target_os = "windows",
-                target_os = "macos",
-                target_os = "ios",
-                target_os = "android"
-            ))]
-            let webview = {
-                use raw_window_handle::HasWindowHandle;
-
-                let window_handle = window.window_handle().expect("No window handle");
-                builder.build_as_child(&window_handle).unwrap()
-            };
-
-            WebView::new(webview, window, cx)
+            WebView::build(builder, window, cx).expect("Failed to create WebView")
         });
 
         let address_input = cx.new(|cx| {
