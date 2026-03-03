@@ -258,12 +258,29 @@ impl DisplayMap {
     /// Convert byte offset to wrap display point (with soft wrap info).
     #[inline]
     pub(crate) fn offset_to_wrap_display_point(&self, offset: usize) -> WrapDisplayPoint {
+        // Fast path: no wrapping, no folds → wrap_row == buffer_row
+        if self.is_simple_layout() {
+            let text = self.wrap_map.text();
+            let point = text.offset_to_point(offset);
+            let line_start = text.line_start_offset(point.row);
+            let col = offset.saturating_sub(line_start);
+            return WrapDisplayPoint::new(point.row, 0, col);
+        }
         self.wrap_map.wrapper().offset_to_display_point(offset)
     }
 
     /// Convert wrap display point to byte offset.
     #[inline]
     pub(crate) fn wrap_display_point_to_offset(&self, point: WrapDisplayPoint) -> usize {
+        // Fast path: no wrapping, no folds → row maps directly to buffer line
+        if self.is_simple_layout() {
+            let text = self.wrap_map.text();
+            let line_count = text.lines_len();
+            let row = point.row.min(line_count.saturating_sub(1));
+            let line_start = text.line_start_offset(row);
+            let line_len = text.line_len(row);
+            return line_start + point.column.min(line_len);
+        }
         self.wrap_map.wrapper().display_point_to_offset(point)
     }
 
@@ -332,5 +349,16 @@ impl DisplayMap {
     #[inline]
     pub fn buffer_line_count(&self) -> usize {
         self.wrap_map.buffer_line_count()
+    }
+
+    /// Returns true when buffer_line == wrap_row == display_row (1:1:1 mapping).
+    ///
+    /// This holds when soft-wrapping is disabled AND no folds are active,
+    /// enabling O(1) arithmetic for visible range, cursor position, and
+    /// coordinate conversion instead of O(N) iteration.
+    #[inline]
+    pub fn is_simple_layout(&self) -> bool {
+        self.fold_map.folded_ranges().is_empty()
+            && self.wrap_map.wrap_row_count() == self.wrap_map.buffer_line_count()
     }
 }

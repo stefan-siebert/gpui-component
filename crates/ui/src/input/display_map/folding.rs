@@ -1,8 +1,6 @@
 use std::ops::Range;
 
 #[cfg(not(target_family = "wasm"))]
-use tree_sitter::Node;
-#[cfg(not(target_family = "wasm"))]
 pub use tree_sitter::Tree;
 
 #[cfg(target_family = "wasm")]
@@ -40,28 +38,14 @@ impl FoldRange {
 // ==================== Native Implementation (with tree-sitter) ====================
 
 #[cfg(not(target_family = "wasm"))]
-/// Check if a named node qualifies as a fold candidate.
+/// Extract fold ranges from a tree-sitter syntax tree.
 ///
-/// Uses a structural heuristic: any **named** node spanning ≥ MIN_FOLD_LINES
-/// is foldable. tree-sitter already parses code into semantic units (functions,
-/// classes, blocks, etc.), so named nodes naturally correspond to meaningful
-/// foldable regions across all languages without a per-language node-type list.
-fn is_foldable_node(node: &Node) -> bool {
-    // Skip root node (e.g. `source_file`) and unnamed tokens
-    if !node.is_named() || node.parent().is_none() {
-        return false;
-    }
-
-    let start = node.start_position().row;
-    let end = node.end_position().row;
-    end.saturating_sub(start) >= MIN_FOLD_LINES
-}
-
-#[cfg(not(target_family = "wasm"))]
-/// Extract fold ranges from a tree-sitter syntax tree (full traversal).
+/// Uses iterative `TreeCursor` traversal and prunes single-line subtrees
+/// (they cannot contain foldable nodes). This visits only multi-line nodes,
+/// making it fast even for very large files (millions of AST nodes).
 pub fn extract_fold_ranges(tree: &Tree) -> Vec<FoldRange> {
     let mut ranges = Vec::new();
-    collect_foldable_nodes(tree.root_node(), &mut ranges);
+    collect_foldable_nodes_iterative(tree, &mut ranges);
 
     ranges.sort_by_key(|r| r.start_line);
     ranges.dedup_by_key(|r| r.start_line);
@@ -75,7 +59,7 @@ pub fn extract_fold_ranges(tree: &Tree) -> Vec<FoldRange> {
 /// instead of O(all nodes in tree).
 pub fn extract_fold_ranges_in_range(tree: &Tree, byte_range: Range<usize>) -> Vec<FoldRange> {
     let mut ranges = Vec::new();
-    collect_foldable_nodes_in_range(tree.root_node(), &byte_range, &mut ranges);
+    collect_foldable_nodes_in_range_iterative(tree, &byte_range, &mut ranges);
 
     ranges.sort_by_key(|r| r.start_line);
     ranges.dedup_by_key(|r| r.start_line);
@@ -83,42 +67,92 @@ pub fn extract_fold_ranges_in_range(tree: &Tree, byte_range: Range<usize>) -> Ve
 }
 
 #[cfg(not(target_family = "wasm"))]
-/// Recursively collect foldable nodes, skipping subtrees outside byte_range.
-fn collect_foldable_nodes_in_range(
-    node: Node,
-    byte_range: &Range<usize>,
-    ranges: &mut Vec<FoldRange>,
-) {
-    if node.end_byte() <= byte_range.start || node.start_byte() >= byte_range.end {
-        return;
-    }
+/// Iterative tree traversal that prunes single-line subtrees.
+///
+/// A node spanning fewer than MIN_FOLD_LINES cannot itself be foldable,
+/// and neither can any of its descendants. Skipping those subtrees
+/// reduces the visited set from O(all nodes) to O(multi-line nodes).
+fn collect_foldable_nodes_iterative(tree: &Tree, ranges: &mut Vec<FoldRange>) {
+    let mut cursor = tree.walk();
 
-    if is_foldable_node(&node) {
-        ranges.push(FoldRange {
-            start_line: node.start_position().row,
-            end_line: node.end_position().row,
-        });
-    }
+    loop {
+        let node = cursor.node();
+        let start_row = node.start_position().row;
+        let end_row = node.end_position().row;
+        let multi_line = end_row.saturating_sub(start_row) >= MIN_FOLD_LINES;
 
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_foldable_nodes_in_range(child, byte_range, ranges);
+        if multi_line && node.is_named() && node.parent().is_some() {
+            ranges.push(FoldRange {
+                start_line: start_row,
+                end_line: end_row,
+            });
+        }
+
+        // Only descend into children if this subtree spans enough lines
+        if multi_line && cursor.goto_first_child() {
+            continue;
+        }
+
+        // Move to next sibling, or backtrack up
+        if !advance_cursor_to_next(&mut cursor) {
+            return;
+        }
     }
 }
 
 #[cfg(not(target_family = "wasm"))]
-/// Recursively collect foldable nodes from the syntax tree (full traversal).
-fn collect_foldable_nodes(node: Node, ranges: &mut Vec<FoldRange>) {
-    if is_foldable_node(&node) {
-        ranges.push(FoldRange {
-            start_line: node.start_position().row,
-            end_line: node.end_position().row,
-        });
-    }
+/// Iterative tree traversal within a byte range, pruning single-line and
+/// out-of-range subtrees.
+fn collect_foldable_nodes_in_range_iterative(
+    tree: &Tree,
+    byte_range: &Range<usize>,
+    ranges: &mut Vec<FoldRange>,
+) {
+    let mut cursor = tree.walk();
 
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_foldable_nodes(child, ranges);
+    loop {
+        let node = cursor.node();
+
+        // Skip subtrees entirely outside the byte range
+        if node.end_byte() <= byte_range.start || node.start_byte() >= byte_range.end {
+            if !advance_cursor_to_next(&mut cursor) {
+                return;
+            }
+            continue;
+        }
+
+        let start_row = node.start_position().row;
+        let end_row = node.end_position().row;
+        let multi_line = end_row.saturating_sub(start_row) >= MIN_FOLD_LINES;
+
+        if multi_line && node.is_named() && node.parent().is_some() {
+            ranges.push(FoldRange {
+                start_line: start_row,
+                end_line: end_row,
+            });
+        }
+
+        if multi_line && cursor.goto_first_child() {
+            continue;
+        }
+
+        if !advance_cursor_to_next(&mut cursor) {
+            return;
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+/// Advance the cursor to the next sibling, or backtrack to an ancestor's sibling.
+/// Returns false when the traversal is complete (back at root with no more siblings).
+fn advance_cursor_to_next(cursor: &mut tree_sitter::TreeCursor) -> bool {
+    loop {
+        if cursor.goto_next_sibling() {
+            return true;
+        }
+        if !cursor.goto_parent() {
+            return false;
+        }
     }
 }
 

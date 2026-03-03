@@ -147,10 +147,18 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("shift-right", SelectRight, Some(CONTEXT)),
         KeyBinding::new("shift-up", SelectUp, Some(CONTEXT)),
         KeyBinding::new("shift-down", SelectDown, Some(CONTEXT)),
-        KeyBinding::new("home", MoveHome, Some(CONTEXT)),
-        KeyBinding::new("end", MoveEnd, Some(CONTEXT)),
-        KeyBinding::new("shift-home", SelectToStartOfLine, Some(CONTEXT)),
-        KeyBinding::new("shift-end", SelectToEndOfLine, Some(CONTEXT)),
+        KeyBinding::new("home", MoveToStart, Some(CONTEXT)),
+        KeyBinding::new("end", MoveToEnd, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-home", MoveHome, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-end", MoveEnd, Some(CONTEXT)),
+        KeyBinding::new("shift-home", SelectToStart, Some(CONTEXT)),
+        KeyBinding::new("shift-end", SelectToEnd, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-home", SelectToStartOfLine, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-end", SelectToEndOfLine, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("ctrl-shift-a", SelectToStartOfLine, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
@@ -355,6 +363,10 @@ pub struct InputState {
     ///
     /// If true, will call some update (for example LSP, Syntax Highlight) before render.
     _pending_update: bool,
+    /// Second phase of _pending_update: fold candidates + LSP, run on the frame
+    /// after the highlighter so tree-sitter and fold extraction don't block the
+    /// same render frame.
+    _pending_fold_update: bool,
     /// A flag to indicate if we should ignore the next completion event.
     pub(super) silent_replace_text: bool,
 
@@ -366,6 +378,8 @@ pub struct InputState {
     _subscriptions: Vec<Subscription>,
 
     pub(super) _context_menu_task: Task<Result<()>>,
+    /// Background tree-sitter parse task for large files.
+    _highlight_task: Option<Task<()>>,
     pub(super) inline_completion: InlineCompletion,
 }
 
@@ -446,7 +460,9 @@ impl InputState {
             size: Size::default(),
             _subscriptions,
             _context_menu_task: Task::ready(Ok(())),
+            _highlight_task: None,
             _pending_update: false,
+            _pending_fold_update: false,
             inline_completion: InlineCompletion::default(),
         }
     }
@@ -491,6 +507,23 @@ impl InputState {
         self.mode = InputMode::code_editor(language);
         self.searchable = true;
         self
+    }
+
+    /// Upgrade an existing multi-line PlainText input to CodeEditor mode in-place.
+    ///
+    /// This preserves the current text and display_map (text_wrapper, wrap_map)
+    /// so no expensive re-computation is needed. Line numbers appear immediately.
+    /// Tree-sitter highlighting and fold candidates are deferred to the next
+    /// render via `_pending_update`.
+    pub fn upgrade_to_code_editor(
+        &mut self,
+        language: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.mode = InputMode::code_editor(language);
+        self.searchable = true;
+        self._pending_update = true;
+        cx.notify();
     }
 
     /// Set this input is searchable, default is false (Default true for Code Editor).
@@ -593,6 +626,7 @@ impl InputState {
         cx.notify();
     }
 
+    #[allow(unused)]
     fn reset_highlighter(&mut self, cx: &mut Context<Self>) {
         match &mut self.mode {
             InputMode::CodeEditor {
@@ -746,7 +780,9 @@ impl InputState {
         let text: SharedString = text.into();
         let range = 0..self.text.chars().map(|c| c.len_utf16()).sum();
         self.replace_text_in_range_silent(Some(range), &text, window, cx);
-        self.reset_highlighter(cx);
+        // Note: don't call reset_highlighter here — replace_text_in_range_silent
+        // already ran update_highlighter with the new text. Resetting would discard
+        // that work and force a redundant re-parse via _pending_update in render.
         self.disabled = was_disabled;
     }
 
@@ -1475,16 +1511,21 @@ impl InputState {
 
         let row = point.row;
 
-        let mut row_offset_y = px(0.);
-        for (ix, _wrap_line) in self.display_map.lines().iter().enumerate() {
-            if ix == row {
-                break;
+        // Fast path: no soft-wrap, no folds → row_offset_y = row * line_height
+        let mut row_offset_y = if self.display_map.is_simple_layout() {
+            row as f32 * line_height
+        } else {
+            let mut y = px(0.);
+            for (ix, _wrap_line) in self.display_map.lines().iter().enumerate() {
+                if ix == row {
+                    break;
+                }
+                let visible_wrap_rows =
+                    self.display_map.visible_wrap_row_count_for_buffer_line(ix);
+                y += line_height * visible_wrap_rows;
             }
-
-            // Only accumulate height for visible (non-folded) wrap rows
-            let visible_wrap_rows = self.display_map.visible_wrap_row_count_for_buffer_line(ix);
-            row_offset_y += line_height * visible_wrap_rows;
-        }
+            y
+        };
 
         // Apart from left alignment, just leave enough space for the cursor size on the right side.
         let safety_margin = if last_layout.text_align == TextAlign::Left {
@@ -2057,6 +2098,76 @@ impl InputState {
         self.display_map.set_fold_candidates(fold_ranges);
     }
 
+    /// Text size threshold above which tree-sitter parsing is done on a
+    /// background thread to avoid blocking the UI. Below this, parsing is
+    /// synchronous (fast enough for one frame at ~16ms).
+    const ASYNC_HIGHLIGHT_THRESHOLD: usize = 256 * 1024; // 256 KB
+
+    /// Spawn tree-sitter parsing on a background thread for large files.
+    /// The editor renders immediately without highlighting; when the
+    /// background parse completes, highlighting and fold candidates appear.
+    fn spawn_async_highlight(&mut self, cx: &mut Context<Self>) {
+        let Some(language) = self.mode.language_name().cloned() else {
+            return;
+        };
+        let text = self.text.clone(); // Rope clone is O(1) — COW
+        let is_folding = self.mode.is_folding();
+
+        self._highlight_task = Some(cx.spawn(async move |this, cx| {
+            // Phase 1: Background thread — create highlighter and parse tree-sitter
+            let highlighter = cx
+                .background_spawn(async move {
+                    let mut highlighter =
+                        crate::highlighter::SyntaxHighlighter::new(&language);
+                    highlighter.update(None, &text);
+                    highlighter
+                })
+                .await;
+
+            // Apply highlighting immediately — colours appear without waiting for folds
+            let tree = if is_folding {
+                highlighter.tree().cloned()
+            } else {
+                None
+            };
+
+            match this.update(cx, |state, cx| {
+                state.mode.set_highlighter(highlighter);
+                // NOTE: do NOT clear _highlight_task here — we are inside it
+                // and Phase 2 (fold extraction) still needs to run.
+                cx.notify();
+            }) {
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::error!("[highlight] failed to apply: {}", err);
+                    return;
+                }
+            }
+
+            // Phase 2: Background thread — extract fold candidates (non-blocking)
+            if let Some(tree) = tree {
+                let fold_ranges = cx
+                    .background_spawn(async move {
+                        crate::input::display_map::extract_fold_ranges(&tree)
+                    })
+                    .await;
+
+                _ = this.update(cx, |state, cx| {
+                    if !fold_ranges.is_empty() {
+                        state.display_map.set_fold_candidates(fold_ranges);
+                    }
+                    state._highlight_task = None;
+                    cx.notify();
+                });
+            } else {
+                // No folding — clear the task now
+                _ = this.update(cx, |state, _cx| {
+                    state._highlight_task = None;
+                });
+            }
+        }));
+    }
+
     /// Incrementally update fold candidates after a text edit.
     /// Only traverses the edited region of the syntax tree instead of the full tree.
     fn update_fold_candidates_incremental(&mut self, edit_range: &Range<usize>, new_text: &str) {
@@ -2270,20 +2381,27 @@ impl EntityInputHandler for InputState {
         if let Some(diagnostics) = self.mode.diagnostics_mut() {
             diagnostics.reset(&self.text)
         }
+
         // Adjust folds before updating wrap map: remove overlapping folds and shift others
         self.display_map
             .adjust_folds_for_edit(&old_text, &range, new_text);
         self.display_map
             .on_text_changed(&self.text, &range, &Rope::from(new_text), cx);
 
-        let bg = self
-            .mode
-            .update_highlighter(&range, &self.text, &new_text, true, cx);
-        if let Some(bg) = bg {
-            Self::dispatch_background_parse(bg, window, cx);
+        // For large bulk replacements (e.g. set_value on big files), defer the
+        // expensive tree-sitter parse and fold extraction to _pending_update in
+        // render, so the text becomes visible without blocking on highlighting.
+        let is_bulk = range.start == 0 && new_text.len() > 100_000;
+        if !is_bulk {
+            let bg = self
+                .mode
+                .update_highlighter(&range, &self.text, &new_text, true, cx);
+            if let Some(bg) = bg {
+                Self::dispatch_background_parse(bg, window, cx);
+            }
+            self.update_fold_candidates_incremental(&range, new_text);
         }
 
-        self.update_fold_candidates_incremental(&range, new_text);
         self.lsp.update(&self.text, window, cx);
         self.selected_range = (new_offset..new_offset).into();
         self.ime_marked_range.take();
@@ -2293,6 +2411,7 @@ impl EntityInputHandler for InputState {
         if !self.silent_replace_text {
             self.handle_completion_trigger(&range, &new_text, window, cx);
         }
+
         cx.emit(InputEvent::Change);
         cx.notify();
     }
@@ -2453,17 +2572,31 @@ impl Focusable for InputState {
 
 impl Render for InputState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Split deferred work across frames so rendering stays responsive:
+        // - Small files: synchronous parse (fast enough for one frame)
+        // - Large files: async parse on background thread (non-blocking)
+        // After highlighting: fold candidates + LSP on next frame
         if self._pending_update {
-            let bg = self
-                .mode
-                .update_highlighter(&(0..0), &self.text, "", false, cx);
-            if let Some(bg) = bg {
-                Self::dispatch_background_parse(bg, window, cx);
+            self._pending_update = false;
+            if self.text.len() < Self::ASYNC_HIGHLIGHT_THRESHOLD {
+                // Small file: synchronous parse within one frame
+                let bg = self
+                    .mode
+                    .update_highlighter(&(0..0), &self.text, "", false, cx);
+                if let Some(bg) = bg {
+                    Self::dispatch_background_parse(bg, window, cx);
+                }
+                self._pending_fold_update = true;
+                cx.notify();
+            } else {
+                // Large file: parse on background thread
+                self.spawn_async_highlight(cx);
+                // _pending_fold_update will be set when the task completes
             }
-
+        } else if self._pending_fold_update {
             self.update_fold_candidates();
             self.lsp.update(&self.text, window, cx);
-            self._pending_update = false;
+            self._pending_fold_update = false;
         }
 
         div()

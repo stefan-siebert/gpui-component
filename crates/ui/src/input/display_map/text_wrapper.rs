@@ -14,9 +14,9 @@ use crate::input::{
 /// A line with soft wrapped lines info.
 #[derive(Debug, Clone)]
 pub(crate) struct LineItem {
-    /// The original line text, without end `\n`.
-    line: Rope,
-    /// The soft wrapped lines relative byte range (0..line.len) of this line (Include first line).
+    /// Byte length of the original line, without end `\n`.
+    line_len: usize,
+    /// The soft wrapped lines relative byte range (0..line_len) of this line (Include first line).
     ///
     /// Not contains the line end `\n`.
     pub(crate) wrapped_lines: Vec<Range<usize>>,
@@ -26,7 +26,7 @@ impl LineItem {
     /// Get the bytes length of this line.
     #[inline]
     pub(crate) fn len(&self) -> usize {
-        self.line.len()
+        self.line_len
     }
 
     /// Get number of soft wrapped lines of this line (include the first line).
@@ -201,17 +201,19 @@ impl TextWrapper {
             .iter_lines()
             .enumerate()
         {
-            let line_str = line.to_string();
+            let line_byte_len = line.len();
             let mut wrapped_lines = vec![];
             let mut prev_boundary_ix = 0;
 
-            if line_str.len() > longest_row_len {
+            if line_byte_len > longest_row_len {
                 longest_row_ix = new_start_row + ix;
-                longest_row_len = line_str.len();
+                longest_row_len = line_byte_len;
             }
 
             // If wrap_width is Pixels::MAX, skip wrapping to disable word wrap
             if let Some(wrap_width) = wrap_width {
+                // Need string representation for text wrapping measurement
+                let line_str = line.to_string();
                 // Here only have wrapped line, if there is no wrap meet, the `line_wraps` result will empty.
                 for boundary in wrap_line(&line_str, wrap_width) {
                     wrapped_lines.push(prev_boundary_ix..boundary.ix);
@@ -219,13 +221,13 @@ impl TextWrapper {
                 }
             }
 
-            // Reset of the line
-            if !line_str[prev_boundary_ix..].is_empty() || prev_boundary_ix == 0 {
-                wrapped_lines.push(prev_boundary_ix..line.len());
+            // Rest of the line
+            if prev_boundary_ix < line_byte_len || prev_boundary_ix == 0 {
+                wrapped_lines.push(prev_boundary_ix..line_byte_len);
             }
 
             new_lines.push(LineItem {
-                line: Rope::from(line),
+                line_len: line_byte_len,
                 wrapped_lines,
             });
         }
@@ -799,22 +801,22 @@ mod tests {
         wrapper.lines = vec![
             // range: 0..15
             LineItem {
-                line: Rope::from("Hello, 世界!\r"),
+                line_len: "Hello, 世界!\r".len(),
                 wrapped_lines: vec![0..15],
             },
             // range: 16..36
             LineItem {
-                line: Rope::from("This is second line."),
+                line_len: "This is second line.".len(),
                 wrapped_lines: vec![0..10, 10..20],
             },
             // range: 37..56
             LineItem {
-                line: Rope::from("This is third line."),
+                line_len: "This is third line.".len(),
                 wrapped_lines: vec![0..9, 9..15, 15..20],
             },
             // range: 57..79
             LineItem {
-                line: Rope::from("这里是第 4 行。"),
+                line_len: "这里是第 4 行。".len(),
                 wrapped_lines: vec![0..22],
             },
         ];

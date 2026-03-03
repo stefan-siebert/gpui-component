@@ -236,8 +236,18 @@ impl InputMode {
                 parse_task,
                 ..
             } => {
-                if !force && highlighter.borrow().is_some() {
-                    return None;
+                if force {
+                    // Incremental update: only run if highlighter already exists.
+                    // If it doesn't exist yet (e.g. async parse in progress),
+                    // skip — the initial parse will handle it.
+                    if highlighter.borrow().is_none() {
+                        return None;
+                    }
+                } else {
+                    // Initial creation: skip if highlighter already exists.
+                    if highlighter.borrow().is_some() {
+                        return None;
+                    }
                 }
 
                 let mut highlighter_ref = highlighter.borrow_mut();
@@ -315,6 +325,21 @@ impl InputMode {
     pub(super) fn highlighter(&self) -> Option<&Rc<RefCell<Option<SyntaxHighlighter>>>> {
         match self {
             InputMode::CodeEditor { highlighter, .. } => Some(highlighter),
+            _ => None,
+        }
+    }
+
+    /// Set a pre-built highlighter (e.g. from an async background parse).
+    pub(super) fn set_highlighter(&self, new_highlighter: SyntaxHighlighter) {
+        if let InputMode::CodeEditor { highlighter, .. } = self {
+            highlighter.borrow_mut().replace(new_highlighter);
+        }
+    }
+
+    /// Get the language name for CodeEditor mode.
+    pub(super) fn language_name(&self) -> Option<&SharedString> {
+        match self {
+            InputMode::CodeEditor { language, .. } => Some(language),
             _ => None,
         }
     }

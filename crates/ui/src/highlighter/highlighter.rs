@@ -120,7 +120,7 @@ impl<'a> Iterator for ByteChunks<'a> {
 }
 
 #[derive(Debug, Default, Clone)]
-struct HighlightSummary {
+pub(crate) struct HighlightSummary {
     count: usize,
     start: usize,
     end: usize,
@@ -130,11 +130,11 @@ struct HighlightSummary {
 
 /// The highlight item, the range is offset of the token in the tree.
 #[derive(Debug, Default, Clone)]
-struct HighlightItem {
+pub(crate) struct HighlightItem {
     /// The byte range of the highlight in the text.
-    range: Range<usize>,
+    pub(crate) range: Range<usize>,
     /// The highlight name, like `function`, `string`, `comment`, etc.
-    name: SharedString,
+    pub(crate) name: SharedString,
 }
 
 impl HighlightItem {
@@ -364,6 +364,11 @@ impl SyntaxHighlighter {
 
     pub fn is_empty(&self) -> bool {
         self.text.len() == 0
+    }
+
+    /// Get the language name of this highlighter.
+    pub fn language(&self) -> &str {
+        &self.language
     }
 
     /// Get the parsed tree (if available)
@@ -699,16 +704,38 @@ impl SyntaxHighlighter {
         range: &Range<usize>,
         theme: &HighlightTheme,
     ) -> Vec<(Range<usize>, HighlightStyle)> {
+        let highlights = self.match_styles(range.clone());
+        Self::styles_from_items(&highlights, range, theme)
+    }
+
+    /// Run the tree-sitter query for a byte range, returning raw highlight items.
+    ///
+    /// Call this once for the entire visible range, then use `styles_from_items`
+    /// per-line to avoid creating a QueryCursor per line.
+    pub(crate) fn highlight_items(&self, range: Range<usize>) -> Vec<HighlightItem> {
+        self.match_styles(range)
+    }
+
+    /// Convert pre-computed highlight items into themed styles for a byte range.
+    ///
+    /// This is the same processing as `styles()` but uses pre-computed items
+    /// instead of running a new tree-sitter query.
+    pub(crate) fn styles_from_items(
+        highlights: &[HighlightItem],
+        range: &Range<usize>,
+        theme: &HighlightTheme,
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
         let mut styles = vec![];
         let start_offset = range.start;
 
-        let highlights = self.match_styles(range.clone());
-
-        // let mut iter_count = 0;
         for item in highlights {
-            // iter_count += 1;
             let node_range = &item.range;
             let name = &item.name;
+
+            // Skip items entirely outside this range
+            if node_range.end <= range.start || node_range.start >= range.end {
+                continue;
+            }
 
             // Avoid start larger than end
             let mut node_range = node_range.start.max(range.start)..node_range.end.min(range.end);
@@ -720,19 +747,11 @@ impl SyntaxHighlighter {
         }
 
         // If the matched styles is empty, return a default range.
-        if styles.len() == 0 {
+        if styles.is_empty() {
             return vec![(start_offset..range.end, HighlightStyle::default())];
         }
 
-        let styles = unique_styles(&range, styles);
-
-        // NOTE: DO NOT remove this comment, it is used for debugging.
-        // for style in &styles {
-        //     println!("---- style: {:?} - {:?}", style.0, style.1.color);
-        // }
-        // println!("--------------------------------");
-
-        styles
+        unique_styles(range, styles)
     }
 }
 
