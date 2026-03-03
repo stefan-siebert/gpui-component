@@ -172,6 +172,7 @@ impl RenderOnce for WindowBorder {
                     .when(!tiling.bottom, |div| div.pb(shadow_size))
                     .when(!tiling.left, |div| div.pl(shadow_size))
                     .when(!tiling.right, |div| div.pr(shadow_size))
+                    .on_mouse_move(|_e, window, _cx| window.refresh())
                     .on_mouse_down(MouseButton::Left, move |_, window, _| {
                         let Decorations::Client { tiling } = window.window_decorations() else {
                             return;
@@ -237,21 +238,38 @@ impl RenderOnce for WindowBorder {
 }
 
 fn resize_edge(pos: Point<Pixels>, shadow_size: Pixels, size: Size<Pixels>) -> Option<ResizeEdge> {
-    let edge = if pos.y < shadow_size && pos.x < shadow_size {
+    // Corner zones extend further along each edge than the shadow area itself,
+    // making corners much easier to grab (similar to GNOME/libadwaita behavior).
+    let corner_size = shadow_size * 3.0;
+
+    let near_top = pos.y < shadow_size;
+    let near_bottom = pos.y > size.height - shadow_size;
+    let near_left = pos.x < shadow_size;
+    let near_right = pos.x > size.width - shadow_size;
+
+    let edge = if near_top && pos.x < corner_size {
         ResizeEdge::TopLeft
-    } else if pos.y < shadow_size && pos.x > size.width - shadow_size {
+    } else if near_top && pos.x > size.width - corner_size {
         ResizeEdge::TopRight
-    } else if pos.y < shadow_size {
-        ResizeEdge::Top
-    } else if pos.y > size.height - shadow_size && pos.x < shadow_size {
+    } else if near_left && pos.y < corner_size {
+        ResizeEdge::TopLeft
+    } else if near_right && pos.y < corner_size {
+        ResizeEdge::TopRight
+    } else if near_bottom && pos.x < corner_size {
         ResizeEdge::BottomLeft
-    } else if pos.y > size.height - shadow_size && pos.x > size.width - shadow_size {
+    } else if near_bottom && pos.x > size.width - corner_size {
         ResizeEdge::BottomRight
-    } else if pos.y > size.height - shadow_size {
+    } else if near_left && pos.y > size.height - corner_size {
+        ResizeEdge::BottomLeft
+    } else if near_right && pos.y > size.height - corner_size {
+        ResizeEdge::BottomRight
+    } else if near_top {
+        ResizeEdge::Top
+    } else if near_bottom {
         ResizeEdge::Bottom
-    } else if pos.x < shadow_size {
+    } else if near_left {
         ResizeEdge::Left
-    } else if pos.x > size.width - shadow_size {
+    } else if near_right {
         ResizeEdge::Right
     } else {
         return None;
