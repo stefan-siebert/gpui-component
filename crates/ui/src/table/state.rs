@@ -1049,7 +1049,7 @@ where
 
         div()
             .when(is_flex_grow, |this| {
-                this.flex_grow().flex_shrink().min_w(col_group.column.min_width)
+                this.flex_1().min_w(col_group.column.min_width)
             })
             .when(!is_flex_grow, |this| {
                 this.w(col_width).flex_shrink_0()
@@ -1083,7 +1083,7 @@ where
                 let min_w = col_group
                     .map(|c| c.column.min_width)
                     .unwrap_or(px(20.0));
-                this.flex_grow().flex_shrink().overflow_hidden().min_w(min_w)
+                this.flex_1().overflow_hidden().min_w(min_w)
             });
         let selectable = self.col_selectable
             && self
@@ -1269,7 +1269,7 @@ where
 
         h_flex()
             .h_full()
-            .when(is_flex_grow, |this| this.flex_grow().flex_shrink())
+            .when(is_flex_grow, |this| this.flex_1())
             .child(
                 self.render_cell(None, col_ix, window, cx)
                     .id(("col-header", col_ix))

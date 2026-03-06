@@ -156,15 +156,14 @@ impl RenderOnce for ResizablePanelGroup {
             .on_prepaint({
                 let state = state.clone();
                 move |bounds, _, cx| {
-                    state.update(cx, |state, cx| {
-                        let size_changed =
-                            state.bounds.size.along(self.axis) != bounds.size.along(self.axis);
-
+                    state.update(cx, |state, _cx| {
+                        // Only save bounds; do NOT call adjust_to_container_size here.
+                        // Taffy's flex algorithm already computes correct panel sizes
+                        // in the same frame. Proportional rescaling + notify causes a
+                        // one-frame discrepancy (different algorithm) that manifests as
+                        // flicker at flex layout boundaries (e.g. min_width thresholds).
+                        // Individual panel prepaints sync sizes from actual bounds.
                         state.bounds = bounds;
-
-                        if size_changed {
-                            state.adjust_to_container_size(cx);
-                        }
                     })
                 }
             })

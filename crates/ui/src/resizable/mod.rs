@@ -127,16 +127,21 @@ impl ResizableState {
         cx: &mut Context<Self>,
     ) {
         let size = bounds.size.along(self.axis);
-        // This check is only necessary to stop the very first panel from resizing on its own
-        // it needs to be passed when the panel is freshly created so we get the initial size,
-        // but its also fine when it sometimes passes later.
         if self.sizes[panel_ix].as_f32() == PANEL_MIN_SIZE.as_f32() {
+            self.sizes[panel_ix] = size;
+            self.panels[panel_ix].size = Some(size);
+            cx.notify();
+        } else {
+            // Sync stored sizes from actual Taffy-computed bounds without
+            // triggering a re-render. This keeps sizes accurate for drag
+            // operations while avoiding the one-frame discrepancy caused by
+            // adjust_to_container_size's proportional scaling (which differs
+            // from Taffy's flex algorithm).
             self.sizes[panel_ix] = size;
             self.panels[panel_ix].size = Some(size);
         }
         self.panels[panel_ix].bounds = bounds;
         self.panels[panel_ix].size_range = size_range;
-        cx.notify();
     }
 
     pub(crate) fn remove_panel(&mut self, panel_ix: usize, cx: &mut Context<Self>) {
