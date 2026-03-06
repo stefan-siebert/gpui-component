@@ -48,6 +48,9 @@ pub struct Column {
     pub min_width: Pixels,
     /// The maximum width of the column.
     pub max_width: Pixels,
+    /// Whether this column should grow to fill remaining horizontal space.
+    /// When true, the column uses flex_grow instead of a fixed width.
+    pub flex_grow: bool,
 }
 
 impl Default for Column {
@@ -65,6 +68,7 @@ impl Default for Column {
             selectable: true,
             min_width: px(20.0),
             max_width: px(f32::MAX),
+            flex_grow: false,
         }
     }
 }
@@ -181,6 +185,13 @@ impl Column {
     /// ```
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = selectable;
+        self
+    }
+
+    /// Make this column grow to fill remaining horizontal space.
+    /// Uses flexbox flex_grow instead of a fixed width.
+    pub fn flex_grow(mut self) -> Self {
+        self.flex_grow = true;
         self
     }
 
