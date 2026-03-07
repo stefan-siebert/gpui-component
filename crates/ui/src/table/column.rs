@@ -48,9 +48,13 @@ pub struct Column {
     pub min_width: Pixels,
     /// The maximum width of the column.
     pub max_width: Pixels,
-    /// Whether this column should grow to fill remaining horizontal space.
-    /// When true, the column uses flex_grow instead of a fixed width.
-    pub flex_grow: bool,
+    /// Whether this column automatically fills remaining horizontal space.
+    ///
+    /// The table computes the width as `table_width - sum(other_columns)` each
+    /// frame, so the column adapts when the window is resized.  Manual column
+    /// resize via the drag handle is also supported — the user-set width is
+    /// kept until the table width changes again.
+    pub auto_width: bool,
 }
 
 impl Default for Column {
@@ -68,7 +72,7 @@ impl Default for Column {
             selectable: true,
             min_width: px(20.0),
             max_width: px(f32::MAX),
-            flex_grow: false,
+            auto_width: false,
         }
     }
 }
@@ -191,7 +195,17 @@ impl Column {
     /// Make this column grow to fill remaining horizontal space.
     /// Uses flexbox flex_grow instead of a fixed width.
     pub fn flex_grow(mut self) -> Self {
-        self.flex_grow = true;
+        self.auto_width = true;
+        self
+    }
+
+    /// Make this column automatically fill remaining horizontal space.
+    ///
+    /// The table computes `table_width - sum(other_columns)` each frame.
+    /// Manual resize via the drag handle is supported — the user-set width
+    /// is kept until the table width changes.
+    pub fn auto_width(mut self) -> Self {
+        self.auto_width = true;
         self
     }
 
