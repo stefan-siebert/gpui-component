@@ -1,9 +1,9 @@
-//! MCP (Model Context Protocol) Integration für GPUI Apps.
+//! MCP (Model Context Protocol) Integration for GPUI Apps.
 //!
-//! Startet einen IPC Server der es dem gpui-mcp-server ermöglicht,
-//! auf UI-Zustand zuzugreifen und Events zu dispatchen.
+//! Starts an IPC server that allows the gpui-mcp-server to
+//! access UI state and dispatch events.
 //!
-//! ## Benutzung
+//! ## Usage
 //!
 //! ```ignore
 //! fn main() {
@@ -11,7 +11,7 @@
 //!     app.run(|cx| {
 //!         gpui_component::init(cx);
 //!         gpui_component::mcp::init_mcp(cx);
-//!         // ... App-Code ...
+//!         // ... app code ...
 //!     });
 //! }
 //! ```
@@ -26,22 +26,20 @@ use gpui::{point, px, App, Keystroke, MouseButton as GpuiMouseButton, Pixels};
 use gpui_mcp_protocol::protocol::*;
 use serde_json::json;
 
-/// Maximale Anzahl gespeicherter Log-Einträge
+/// Maximum number of stored log entries
 const MAX_LOG_ENTRIES: usize = 500;
 
-/// Typ für Request-Nachrichten vom IPC-Thread an den Main-Thread
+/// Type for request messages from IPC thread to main thread
 type RequestMsg = (IpcRequest, mpsc::Sender<IpcResponse>);
 
-/// Globaler Log-Buffer, thread-safe
+/// Global log buffer, thread-safe
 static LOG_BUFFER: std::sync::LazyLock<Arc<Mutex<VecDeque<String>>>> =
     std::sync::LazyLock::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(MAX_LOG_ENTRIES))));
 
-/// Konvertiert gpui::Pixels zu f32
 fn px_to_f32(p: Pixels) -> f32 {
     f32::from(p)
 }
 
-/// Konvertiert gpui::Bounds<Pixels> zu protocol::Bounds
 fn convert_bounds(b: gpui::Bounds<Pixels>) -> Bounds {
     Bounds {
         x: px_to_f32(b.origin.x),
@@ -51,7 +49,7 @@ fn convert_bounds(b: gpui::Bounds<Pixels>) -> Bounds {
     }
 }
 
-/// Fügt einen Log-Eintrag hinzu (kann von überall aufgerufen werden)
+/// Add a log entry (can be called from anywhere)
 pub fn mcp_log(message: impl Into<String>) {
     if let Ok(mut buffer) = LOG_BUFFER.lock() {
         if buffer.len() >= MAX_LOG_ENTRIES {
@@ -61,17 +59,17 @@ pub fn mcp_log(message: impl Into<String>) {
     }
 }
 
-/// Initialisiert den MCP IPC Server.
+/// Initialize the MCP IPC server.
 ///
-/// Startet einen Unix Socket Listener auf einem Background-Thread und
-/// pollt eingehende Requests auf dem GPUI Main-Thread.
+/// Starts a Unix Socket listener on a background thread and
+/// polls incoming requests on the GPUI main thread.
 pub fn init_mcp(cx: &mut App) {
     let socket_path = std::env::var("GPUI_MCP_SOCKET")
         .unwrap_or_else(|_| "/tmp/gpui-mcp.sock".to_string());
 
     let (req_tx, req_rx) = mpsc::channel::<RequestMsg>();
 
-    // IPC Server auf Background-Thread starten
+    // Start IPC server on background thread
     let path = socket_path.clone();
     std::thread::spawn(move || {
         if let Err(e) = run_ipc_listener(&path, req_tx) {
@@ -79,17 +77,17 @@ pub fn init_mcp(cx: &mut App) {
         }
     });
 
-    mcp_log(format!("MCP IPC Server gestartet auf {}", socket_path));
+    mcp_log(format!("MCP IPC Server started on {}", socket_path));
     eprintln!("[MCP] IPC Server listening on {}", socket_path);
 
-    // Main-Thread Polling: empfängt Requests und handelt sie mit GPUI-Zugriff
+    // Main thread polling: receives requests and handles them with GPUI access
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor()
                 .timer(Duration::from_millis(10))
                 .await;
 
-            // Alle pending Requests abarbeiten
+            // Process all pending requests
             while let Ok((request, resp_tx)) = req_rx.try_recv() {
                 let ipc_response = cx.update(|cx| handle_request(&request, cx));
                 let _ = resp_tx.send(ipc_response);
@@ -99,12 +97,12 @@ pub fn init_mcp(cx: &mut App) {
     .detach();
 }
 
-/// Unix Socket Listener Loop (läuft auf Background-Thread)
+/// Unix Socket listener loop (runs on background thread)
 fn run_ipc_listener(
     socket_path: &str,
     req_tx: mpsc::Sender<RequestMsg>,
 ) -> anyhow::Result<()> {
-    // Alten Socket entfernen
+    // Remove old socket
     let _ = std::fs::remove_file(socket_path);
 
     let listener = UnixListener::bind(socket_path)?;
@@ -128,7 +126,7 @@ fn run_ipc_listener(
     Ok(())
 }
 
-/// Handelt eine einzelne IPC-Verbindung (läuft auf Connection-Thread)
+/// Handle a single IPC connection (runs on connection thread)
 fn handle_ipc_connection(
     stream: std::os::unix::net::UnixStream,
     req_tx: mpsc::Sender<RequestMsg>,
@@ -140,20 +138,17 @@ fn handle_ipc_connection(
         let line = line?;
         let request: IpcRequest = serde_json::from_str(&line)?;
 
-        // Oneshot-Channel für Response
         let (resp_tx, resp_rx) = mpsc::channel();
 
-        // Request an Main-Thread senden
         req_tx.send((request, resp_tx)).map_err(|e| {
             anyhow::anyhow!("Failed to send request to main thread: {}", e)
         })?;
 
-        // Auf Response warten (mit Timeout)
         let response = resp_rx
             .recv_timeout(Duration::from_secs(10))
             .unwrap_or_else(|_| IpcResponse {
                 id: String::new(),
-                result: Err("Request timeout".into()),
+                result: Err("Request timeout (10s)".into()),
             });
 
         let response_json = serde_json::to_string(&response)?;
@@ -165,7 +160,7 @@ fn handle_ipc_connection(
     Ok(())
 }
 
-/// Handelt einen IPC Request auf dem GPUI Main-Thread
+/// Handle an IPC request on the GPUI main thread
 fn handle_request(request: &IpcRequest, cx: &mut App) -> IpcResponse {
     let result = match request.method.as_str() {
         methods::GET_WINDOWS => handle_get_windows(cx),
@@ -173,10 +168,12 @@ fn handle_request(request: &IpcRequest, cx: &mut App) -> IpcResponse {
         methods::SEND_KEY => handle_send_key(&request.params, cx),
         methods::GET_APP_STATE => handle_get_app_state(cx),
         methods::GET_LOGS => handle_get_logs(),
-        methods::INSPECT_UI_TREE => handle_inspect_ui_tree(cx),
+        methods::INSPECT_UI_TREE => handle_inspect_ui_tree(&request.params, cx),
         methods::GET_ELEMENT => handle_get_element(&request.params, cx),
-        methods::TAKE_SCREENSHOT => handle_take_screenshot(&request.params),
-        methods::EXECUTE_ACTION => handle_execute_action(&request.params),
+        methods::TAKE_SCREENSHOT => handle_take_screenshot(&request.params, cx),
+        methods::EXECUTE_ACTION => handle_execute_action(&request.params, cx),
+        methods::LIST_ACTIONS => handle_list_actions(&request.params, cx),
+        methods::GET_FOCUS_INFO => handle_get_focus_info(&request.params, cx),
         _ => Err(format!("Unknown method: {}", request.method)),
     };
 
@@ -186,7 +183,35 @@ fn handle_request(request: &IpcRequest, cx: &mut App) -> IpcResponse {
     }
 }
 
-// ===== Handler Implementierungen =====
+// ===== Helpers =====
+
+/// Resolve a window handle from an optional window_id string.
+/// Falls back to: active window → first window.
+fn resolve_window(
+    window_id: Option<&str>,
+    cx: &mut App,
+) -> Result<gpui::AnyWindowHandle, String> {
+    if let Some(id_str) = window_id {
+        for handle in cx.windows() {
+            let wid = format!("{:?}", handle.window_id());
+            if wid == id_str {
+                return Ok(handle);
+            }
+        }
+        return Err(format!("Window not found: {}", id_str));
+    }
+
+    if let Some(handle) = cx.active_window() {
+        return Ok(handle);
+    }
+
+    cx.windows()
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No windows available".to_string())
+}
+
+// ===== Handler Implementations =====
 
 fn handle_get_windows(cx: &mut App) -> Result<serde_json::Value, String> {
     let active_window_id = cx.active_window().map(|w| w.window_id());
@@ -226,10 +251,7 @@ fn handle_click_element(
     };
 
     let position = point(px(event.x), px(event.y));
-
-    let Some(handle) = cx.active_window() else {
-        return Err("No active window".into());
-    };
+    let handle = resolve_window(event.window_id.as_deref(), cx)?;
 
     handle
         .update(cx, |_, window, cx| {
@@ -237,7 +259,7 @@ fn handle_click_element(
         })
         .map_err(|e| e.to_string())?;
 
-    mcp_log(format!("Click at ({}, {})", event.x, event.y));
+    mcp_log(format!("Click at ({}, {}) button={:?}", event.x, event.y, event.button));
     Ok(json!({ "success": true }))
 }
 
@@ -247,7 +269,6 @@ fn handle_send_key(
 ) -> Result<serde_json::Value, String> {
     let event: KeyEvent = serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
 
-    // Keystroke-String bauen: [ctrl-][alt-][shift-][cmd-]key
     let mut keystroke_str = String::new();
     if event.modifiers.ctrl {
         keystroke_str.push_str("ctrl-");
@@ -275,8 +296,8 @@ fn handle_send_key(
         })
         .map_err(|e| e.to_string())?;
 
-    mcp_log(format!("Key '{}' dispatched: {}", keystroke_str, dispatched));
-    Ok(json!({ "success": true, "dispatched": dispatched }))
+    mcp_log(format!("Key '{}' dispatched={}", keystroke_str, dispatched));
+    Ok(json!({ "success": true, "dispatched": dispatched, "keystroke": keystroke_str }))
 }
 
 fn handle_get_app_state(cx: &mut App) -> Result<serde_json::Value, String> {
@@ -293,12 +314,7 @@ fn handle_get_app_state(cx: &mut App) -> Result<serde_json::Value, String> {
                     json!({
                         "id": format!("{:?}", handle.window_id()),
                         "title": window.window_title(),
-                        "bounds": {
-                            "x": bounds.x,
-                            "y": bounds.y,
-                            "width": bounds.width,
-                            "height": bounds.height,
-                        },
+                        "bounds": bounds,
                     })
                 })
                 .ok()
@@ -318,14 +334,33 @@ fn handle_get_logs() -> Result<serde_json::Value, String> {
         .map(|buffer| buffer.iter().cloned().collect())
         .unwrap_or_default();
 
-    Ok(json!({ "logs": logs }))
+    Ok(json!({ "logs": logs, "count": logs.len() }))
 }
 
-fn handle_inspect_ui_tree(cx: &mut App) -> Result<serde_json::Value, String> {
+fn handle_inspect_ui_tree(
+    params: &serde_json::Value,
+    cx: &mut App,
+) -> Result<serde_json::Value, String> {
+    let opts: InspectUiTreeParams =
+        serde_json::from_value(params.clone()).unwrap_or(InspectUiTreeParams {
+            max_depth: 0,
+            window_id: None,
+            element_type_filter: None,
+        });
+
     let active_window_id = cx.active_window().map(|w| w.window_id());
 
-    let children: Vec<UiElement> = cx
-        .windows()
+    let windows: Vec<gpui::AnyWindowHandle> = if let Some(ref wid) = opts.window_id {
+        // Only the requested window
+        cx.windows()
+            .into_iter()
+            .filter(|h| format!("{:?}", h.window_id()) == *wid)
+            .collect()
+    } else {
+        cx.windows()
+    };
+
+    let children: Vec<UiElement> = windows
         .iter()
         .filter_map(|handle| {
             handle
@@ -334,9 +369,20 @@ fn handle_inspect_ui_tree(cx: &mut App) -> Result<serde_json::Value, String> {
                     let converted = convert_bounds(bounds);
                     let window_id_str = format!("{:?}", handle.window_id());
 
-                    // Collect inspector elements from the rendered frame
                     let inspector_elems = window.inspector_elements();
-                    let element_children = build_element_tree(&window_id_str, inspector_elems);
+                    let mut element_children =
+                        build_element_tree(&window_id_str, inspector_elems);
+
+                    // Apply depth limit (elements at depth 1 are window children)
+                    if opts.max_depth > 0 {
+                        truncate_tree(&mut element_children, 1, opts.max_depth);
+                    }
+
+                    // Apply type filter
+                    if let Some(ref filter) = opts.element_type_filter {
+                        let filter_lower = filter.to_lowercase();
+                        filter_tree(&mut element_children, &filter_lower);
+                    }
 
                     UiElement {
                         id: window_id_str,
@@ -362,6 +408,8 @@ fn handle_inspect_ui_tree(cx: &mut App) -> Result<serde_json::Value, String> {
         })
         .collect();
 
+    let total_elements = count_elements(&children);
+
     let tree = UiTree {
         root: UiElement {
             id: "app".to_string(),
@@ -386,31 +434,71 @@ fn handle_inspect_ui_tree(cx: &mut App) -> Result<serde_json::Value, String> {
             .as_secs(),
     };
 
-    serde_json::to_value(&tree).map_err(|e| e.to_string())
+    let mut result = serde_json::to_value(&tree).map_err(|e| e.to_string())?;
+    // Add metadata at top level for easier consumption
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert("total_elements".into(), json!(total_elements));
+    }
+    Ok(result)
 }
 
-/// Baut aus einer flachen Liste von InspectorElementInfo einen hierarchischen Baum auf.
-/// Nutzt die dot-separierte global_id (z.B. "view-1.panel.sidebar") als Hierarchie-Schlüssel.
+/// Count total elements in a tree
+fn count_elements(elements: &[UiElement]) -> usize {
+    elements
+        .iter()
+        .map(|e| 1 + count_elements(&e.children))
+        .sum()
+}
+
+/// Truncate tree at max_depth
+fn truncate_tree(elements: &mut Vec<UiElement>, current_depth: usize, max_depth: usize) {
+    if current_depth >= max_depth {
+        for elem in elements.iter_mut() {
+            let child_count = count_elements(&elem.children);
+            elem.children.clear();
+            if child_count > 0 {
+                elem.properties
+                    .insert("truncated_children".into(), json!(child_count));
+            }
+        }
+    } else {
+        for elem in elements.iter_mut() {
+            truncate_tree(&mut elem.children, current_depth + 1, max_depth);
+        }
+    }
+}
+
+/// Filter tree to only include elements matching the type filter (or their ancestors)
+fn filter_tree(elements: &mut Vec<UiElement>, filter_lower: &str) {
+    elements.retain_mut(|elem| {
+        // Recursively filter children first
+        filter_tree(&mut elem.children, filter_lower);
+
+        // Keep this element if it matches or has matching descendants
+        elem.element_type.to_lowercase().contains(filter_lower) || !elem.children.is_empty()
+    });
+}
+
+/// Build a hierarchical tree from GPUI's flat inspector element list.
+/// Uses dot-separated global_id as hierarchy key.
+/// Optimized: builds parent lookup via sorted prefix matching instead of O(n²) scan.
 fn build_element_tree(
     window_id: &str,
     elements: Vec<gpui::InspectorElementInfo>,
 ) -> Vec<UiElement> {
     use std::collections::HashMap;
 
-    // Jedes Element bekommt eine eindeutige ID: window_id/global_id[instance_id]
     struct FlatEntry {
         full_id: String,
         global_id: String,
         element: UiElement,
     }
 
-    // Flache Einträge erzeugen
     let mut entries: Vec<FlatEntry> = elements
         .into_iter()
         .map(|info| {
             let full_id = format!("{}/{}[{}]", window_id, info.global_id, info.instance_id);
 
-            // Element-Typ aus dem Dateinamen der Source-Location extrahieren
             let element_type = info
                 .source_location
                 .rsplit('/')
@@ -452,16 +540,14 @@ fn build_element_tree(
         })
         .collect();
 
-    // Nach global_id-Tiefe sortieren (weniger dots = höher in Hierarchie)
+    // Sort by depth (fewer dots = higher in hierarchy)
     entries.sort_by(|a, b| {
         let depth_a = a.global_id.matches('.').count();
         let depth_b = b.global_id.matches('.').count();
         depth_a.cmp(&depth_b).then(a.global_id.cmp(&b.global_id))
     });
 
-    // Hierarchie aufbauen: Element ist Kind eines anderen wenn dessen global_id
-    // ein Prefix des Kinds ist (mit dot-Trennung).
-    // Wir bauen bottom-up: Elemente mit der größten Tiefe werden zuerst als Kinder zugeordnet.
+    // Build hierarchy using sorted order for efficient parent lookup
     let mut id_to_element: HashMap<String, UiElement> = HashMap::new();
     let mut id_to_global: HashMap<String, String> = HashMap::new();
     let mut insertion_order: Vec<String> = Vec::new();
@@ -472,16 +558,13 @@ fn build_element_tree(
         insertion_order.push(entry.full_id.clone());
     }
 
-    // Kinder den Eltern zuordnen (von tiefstem zu flachstem)
-    // Für jedes Element suchen wir das nächste Eltern-Element (längster Prefix-Match)
+    // Assign children to parents (deepest first)
     let mut child_assigned: HashMap<String, bool> = HashMap::new();
 
-    // Von tiefstem zu flachstem durchgehen
     for i in (0..insertion_order.len()).rev() {
         let child_id = &insertion_order[i];
         let child_global = id_to_global[child_id].clone();
 
-        // Suche besten Eltern-Kandidat: längster global_id der ein echtes Prefix ist
         let mut best_parent: Option<String> = None;
         let mut best_prefix_len = 0;
 
@@ -492,7 +575,7 @@ fn build_element_tree(
             let candidate_id = &insertion_order[j];
             let candidate_global = &id_to_global[candidate_id];
 
-            if child_global.starts_with(candidate_global)
+            if child_global.starts_with(candidate_global.as_str())
                 && child_global.len() > candidate_global.len()
                 && child_global.as_bytes().get(candidate_global.len()) == Some(&b'.')
                 && candidate_global.len() > best_prefix_len
@@ -503,7 +586,6 @@ fn build_element_tree(
         }
 
         if let Some(parent_id) = best_parent {
-            // Kind aus der Map nehmen und dem Elternteil hinzufügen
             if let Some(child_elem) = id_to_element.remove(child_id) {
                 if let Some(parent_elem) = id_to_element.get_mut(&parent_id) {
                     parent_elem.children.push(child_elem);
@@ -513,7 +595,7 @@ fn build_element_tree(
         }
     }
 
-    // Rückgabe: nur Top-Level-Elemente (die keinem Elternteil zugeordnet wurden)
+    // Return only top-level elements
     insertion_order
         .iter()
         .filter(|id| !child_assigned.contains_key(*id))
@@ -529,12 +611,10 @@ fn handle_get_element(
         serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
     let query = &params.element_id;
 
-    // Suche über alle Windows — zuerst Window-Level, dann Inspector-Elemente
     for handle in cx.windows() {
         let result = handle.update(cx, |_, window, _cx| {
             let window_id_str = format!("{:?}", handle.window_id());
 
-            // Exakte Window-ID-Suche
             if &window_id_str == query {
                 let converted = convert_bounds(window.bounds());
                 let inspector_elems = window.inspector_elements();
@@ -556,14 +636,13 @@ fn handle_get_element(
                 });
             }
 
-            // Inspector-Element-Suche: exakte full_id oder global_id-Match
             for info in window.inspector_elements() {
                 let full_id =
                     format!("{}/{}[{}]", window_id_str, info.global_id, info.instance_id);
 
                 let matches = full_id == *query
                     || info.global_id == *query
-                    || info.global_id.ends_with(query);
+                    || info.global_id.ends_with(query.as_str());
 
                 if matches {
                     let element_type = info
@@ -615,33 +694,104 @@ fn handle_get_element(
 
 fn handle_take_screenshot(
     _params: &serde_json::Value,
+    _cx: &mut App,
 ) -> Result<serde_json::Value, String> {
-    // Placeholder: render_to_image ist nur hinter test-support Feature verfügbar
-    Ok(json!({
-        "error": "Screenshots are not yet supported (requires test-support feature)",
-        "png_base64": "",
-        "width": 0,
-        "height": 0,
-        "highlighted_elements": []
-    }))
+    // render_to_image is only implemented on macOS (Metal renderer) behind test-support feature.
+    // On Linux, use the mcp__gpui-inspector__take_screenshot tool which falls back to
+    // external tools like grim (Wayland) or import (X11).
+    Err("Screenshots not available via IPC. On Linux use an external screenshot tool (grim, import, gnome-screenshot). On macOS, enable the test-support feature.".to_string())
 }
 
 fn handle_execute_action(
     params: &serde_json::Value,
+    cx: &mut App,
 ) -> Result<serde_json::Value, String> {
-    let params: ExecuteActionParams =
+    let opts: ExecuteActionParams =
         serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
 
-    mcp_log(format!("Execute action: {} (args: {})", params.action, params.args));
+    // Build the action from its registered name
+    let action_data = if opts.args.is_null() || opts.args == json!({}) {
+        None
+    } else {
+        Some(opts.args.clone())
+    };
 
-    // Action-Dispatch über String-Name erfordert eine Action-Registry.
-    // Da wir Actions nicht dynamisch aus Strings konstruieren können,
-    // geben wir erstmal eine Info-Meldung zurück.
+    let action = cx
+        .build_action(&opts.action, action_data)
+        .map_err(|e| format!("Failed to build action '{}': {:?}", opts.action, e))?;
+
+    let handle = resolve_window(opts.window_id.as_deref(), cx)?;
+
+    handle
+        .update(cx, |_, window, cx| {
+            window.dispatch_action(action, cx);
+        })
+        .map_err(|e| format!("Failed to dispatch action: {}", e))?;
+
+    mcp_log(format!("Executed action: {}", opts.action));
+    Ok(json!({ "success": true, "action": opts.action }))
+}
+
+fn handle_list_actions(
+    params: &serde_json::Value,
+    cx: &mut App,
+) -> Result<serde_json::Value, String> {
+    let opts: ListActionsParams =
+        serde_json::from_value(params.clone()).unwrap_or(ListActionsParams { filter: None });
+
+    let all_names = cx.all_action_names();
+
+    let actions: Vec<&str> = if let Some(ref filter) = opts.filter {
+        let filter_lower = filter.to_lowercase();
+        all_names
+            .iter()
+            .filter(|name| name.to_lowercase().contains(&filter_lower))
+            .copied()
+            .collect()
+    } else {
+        all_names.to_vec()
+    };
+
     Ok(json!({
-        "status": "not_implemented",
-        "message": format!(
-            "Dynamic action dispatch not yet supported. Action: '{}', Args: {}",
-            params.action, params.args
-        )
+        "actions": actions,
+        "count": actions.len(),
+        "total_registered": all_names.len(),
     }))
+}
+
+fn handle_get_focus_info(
+    params: &serde_json::Value,
+    cx: &mut App,
+) -> Result<serde_json::Value, String> {
+    let opts: GetFocusInfoParams =
+        serde_json::from_value(params.clone()).unwrap_or(GetFocusInfoParams { window_id: None });
+
+    let handle = resolve_window(opts.window_id.as_deref(), cx)?;
+
+    let info = handle
+        .update(cx, |_, window, cx| {
+            let focused = window.focused(cx);
+            let window_id = format!("{:?}", handle.window_id());
+
+            match focused {
+                Some(focus_handle) => {
+                    json!({
+                        "has_focus": true,
+                        "focus_handle": format!("{:?}", focus_handle),
+                        "window_id": window_id,
+                        "window_title": window.window_title(),
+                    })
+                }
+                None => {
+                    json!({
+                        "has_focus": false,
+                        "window_id": window_id,
+                        "window_title": window.window_title(),
+                    })
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    Ok(info)
 }

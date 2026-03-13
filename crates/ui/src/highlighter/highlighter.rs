@@ -376,11 +376,6 @@ impl SyntaxHighlighter {
         self.tree.as_ref()
     }
 
-    /// Returns the language name for this highlighter.
-    pub fn language(&self) -> &SharedString {
-        &self.language
-    }
-
     /// Returns a reference to the current text.
     pub fn text(&self) -> &Rope {
         &self.text

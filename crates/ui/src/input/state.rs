@@ -2119,7 +2119,7 @@ impl InputState {
                 .background_spawn(async move {
                     let mut highlighter =
                         crate::highlighter::SyntaxHighlighter::new(&language);
-                    highlighter.update(None, &text);
+                    highlighter.update(None, &text, None);
                     highlighter
                 })
                 .await;

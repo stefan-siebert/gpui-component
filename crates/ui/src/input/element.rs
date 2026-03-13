@@ -125,25 +125,24 @@ impl TextElement {
             let text = state.display_map.text();
 
             // Helper: compute pixel position for a byte offset
-            let compute_pos =
-                |byte_offset: usize| -> Point<Pixels> {
-                    let pt = text.offset_to_point(byte_offset);
-                    let row = pt.row;
-                    let y = row as f32 * line_height;
+            let compute_pos = |byte_offset: usize| -> Point<Pixels> {
+                let pt = text.offset_to_point(byte_offset);
+                let row = pt.row;
+                let y = row as f32 * line_height;
 
-                    // If row is in visible range, use shaped line for precise X
-                    if row >= visible_range.start && row < visible_range.end {
-                        let line_idx = row - visible_range.start;
-                        if let Some(line) = lines.get(line_idx) {
-                            let line_start = text.line_start_offset(row);
-                            let local_offset = byte_offset.saturating_sub(line_start);
-                            if let Some(pos) = line.position_for_index(local_offset, last_layout) {
-                                return point(pos.x, y + pos.y);
-                            }
+                // If row is in visible range, use shaped line for precise X
+                if row >= visible_range.start && row < visible_range.end {
+                    let line_idx = row - visible_range.start;
+                    if let Some(line) = lines.get(line_idx) {
+                        let line_start = text.line_start_offset(row);
+                        let local_offset = byte_offset.saturating_sub(line_start);
+                        if let Some(pos) = line.position_for_index(local_offset, last_layout) {
+                            return point(pos.x, y + pos.y);
                         }
                     }
-                    point(px(0.), y)
-                };
+                }
+                point(px(0.), y)
+            };
 
             let cp = compute_pos(cursor);
             cursor_pos = Some(cp);
@@ -167,13 +166,14 @@ impl TextElement {
                 }
 
                 // Check if this buffer line has a LineLayout in the compact lines vec
-                let line_layout = if vi < visible_buffer_lines.len() && visible_buffer_lines[vi] == ix {
-                    let l = &lines[vi];
-                    vi += 1;
-                    Some(l)
-                } else {
-                    None
-                };
+                let line_layout =
+                    if vi < visible_buffer_lines.len() && visible_buffer_lines[vi] == ix {
+                        let l = &lines[vi];
+                        vi += 1;
+                        Some(l)
+                    } else {
+                        None
+                    };
 
                 if let Some(line) = line_layout {
                     if cursor_pos.is_none() {
@@ -1081,22 +1081,25 @@ impl TextElement {
         let mut styles = Vec::with_capacity(visible_buffer_lines.len());
 
         // Helper to flush a contiguous range of lines
-        let flush_range = |start_line: usize, end_line: usize, skip: bool, styles: &mut Vec<_>| {
-            let byte_start = text.line_start_offset(start_line);
-            let byte_end = if is_multi_line {
-                // +1 for `\n`
-                text.line_start_offset(end_line + 1)
-            } else {
-                text.line_end_offset(end_line)
-            };
-            let range_styles = if skip {
-                vec![(byte_start..byte_end, HighlightStyle::default())]
-            } else {
-                highlighter.styles(&(byte_start..byte_end), &cx.theme().highlight_theme)
-            };
+        let mut flush_range =
+            |start_line: usize, end_line: usize, skip: bool, styles: &mut Vec<_>| {
+                let byte_start = text.line_start_offset(start_line);
+                let byte_end = if is_multi_line {
+                    // +1 for `\n`
+                    text.line_start_offset(end_line + 1)
+                } else {
+                    text.line_end_offset(end_line)
+                };
+                let range_styles = if skip {
+                    vec![(byte_start..byte_end, HighlightStyle::default())]
+                } else if let Some(h) = highlighter.as_mut() {
+                    h.styles(&(byte_start..byte_end), &cx.theme().highlight_theme)
+                } else {
+                    vec![(byte_start..byte_end, HighlightStyle::default())]
+                };
 
-            *styles = gpui::combine_highlights(styles.clone(), range_styles).collect();
-        };
+                *styles = gpui::combine_highlights(styles.clone(), range_styles).collect();
+            };
 
         // Group contiguous visible lines into ranges and call styles() once per range
         let mut visible_iter = visible_buffer_lines.iter().peekable();
