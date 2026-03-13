@@ -693,13 +693,43 @@ fn handle_get_element(
 }
 
 fn handle_take_screenshot(
-    _params: &serde_json::Value,
-    _cx: &mut App,
+    params: &serde_json::Value,
+    cx: &mut App,
 ) -> Result<serde_json::Value, String> {
-    // render_to_image is only implemented on macOS (Metal renderer) behind test-support feature.
-    // On Linux, use the mcp__gpui-inspector__take_screenshot tool which falls back to
-    // external tools like grim (Wayland) or import (X11).
-    Err("Screenshots not available via IPC. On Linux use an external screenshot tool (grim, import, gnome-screenshot). On macOS, enable the test-support feature.".to_string())
+    let opts: TakeScreenshotParams =
+        serde_json::from_value(params.clone()).unwrap_or(TakeScreenshotParams {
+            highlight_elements: vec![],
+            window_id: None,
+        });
+
+    let handle = resolve_window(opts.window_id.as_deref(), cx)?;
+
+    let image = handle
+        .update(cx, |_, window, _cx| window.render_to_image())
+        .map_err(|e| format!("Failed to access window: {}", e))?
+        .map_err(|e| format!("Failed to render screenshot: {}", e))?;
+
+    let (width, height) = image.dimensions();
+
+    // Save as PNG to a temp file
+    let temp_path = std::env::temp_dir().join(format!("gpui-screenshot-{}.png", std::process::id()));
+    image
+        .save(&temp_path)
+        .map_err(|e| format!("Failed to save screenshot: {}", e))?;
+
+    mcp_log(format!(
+        "Screenshot captured: {}x{} -> {}",
+        width,
+        height,
+        temp_path.display()
+    ));
+
+    Ok(json!({
+        "width": width,
+        "height": height,
+        "format": "png",
+        "path": temp_path.to_string_lossy(),
+    }))
 }
 
 fn handle_execute_action(

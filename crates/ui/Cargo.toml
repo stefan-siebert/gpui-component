@@ -17,7 +17,7 @@ doctest = false
 [features]
 decimal = ["dep:rust_decimal"]
 inspector = ["gpui_macros/inspector", "gpui/inspector"]
-mcp = ["inspector", "dep:gpui-mcp-protocol"]
+mcp = ["inspector", "dep:gpui-mcp-protocol", "dep:image"]
 
 # For syntax highlighting in Markdown and CodeEditor.
 tree-sitter-languages = [
@@ -87,6 +87,7 @@ futures = "0.3"
 
 # MCP Integration
 gpui-mcp-protocol = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
 
 # Chart
 num-traits = "0.2"
