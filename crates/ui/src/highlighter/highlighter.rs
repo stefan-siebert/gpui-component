@@ -707,6 +707,8 @@ impl SyntaxHighlighter {
     ///
     /// Call this once for the entire visible range, then use `styles_from_items`
     /// per-line to avoid creating a QueryCursor per line.
+    // Allow: part of the public API for external consumers (e.g. Elane editor)
+    #[allow(dead_code)]
     pub(crate) fn highlight_items(&self, range: Range<usize>) -> Vec<HighlightItem> {
         self.match_styles(range)
     }
