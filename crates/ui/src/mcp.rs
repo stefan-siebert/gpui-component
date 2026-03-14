@@ -1188,6 +1188,13 @@ fn handle_get_focus_info(
             let focused = window.focused(cx);
             let window_id = format!("{:?}", handle.window_id());
 
+            // Get active key context stack
+            let key_contexts: Vec<String> = window
+                .context_stack()
+                .iter()
+                .map(|ctx| format!("{:?}", ctx))
+                .collect();
+
             match focused {
                 Some(focus_handle) => {
                     json!({
@@ -1195,6 +1202,7 @@ fn handle_get_focus_info(
                         "focus_handle": format!("{:?}", focus_handle),
                         "window_id": window_id,
                         "window_title": window.window_title(),
+                        "key_contexts": key_contexts,
                     })
                 }
                 None => {
@@ -1202,6 +1210,7 @@ fn handle_get_focus_info(
                         "has_focus": false,
                         "window_id": window_id,
                         "window_title": window.window_title(),
+                        "key_contexts": key_contexts,
                     })
                 }
             }
