@@ -656,6 +656,7 @@ fn find_subtree(elements: &[UiElement], query: &str) -> Option<UiElement> {
 
 /// Strip verbose fields for compact output mode.
 /// Removes bounds, content_mask, source_location, content_size, style_json.
+/// Shortens element IDs by stripping crate paths.
 fn strip_verbose_fields(elem: &mut UiElement) {
     elem.bounds = Bounds {
         x: 0.0,
@@ -668,9 +669,46 @@ fn strip_verbose_fields(elem: &mut UiElement) {
     elem.content_size = None;
     elem.properties.remove("content_mask");
     elem.properties.remove("instance_id");
+    elem.id = shorten_element_id(&elem.id);
 
     for child in &mut elem.children {
         strip_verbose_fields(child);
+    }
+}
+
+/// Shorten an element ID by stripping crate module paths from each segment.
+/// `view-123.gpui_component::resizable::panel::ResizablePanel.resizable-panel-0`
+/// becomes `view-123.ResizablePanel.resizable-panel-0`
+fn shorten_element_id(id: &str) -> String {
+    // Split off window prefix: "WindowId(1v1)/rest[0]"
+    let (window_prefix, rest) = id
+        .find('/')
+        .map(|i| (&id[..i], &id[i + 1..]))
+        .unwrap_or(("", id));
+
+    // Split off instance suffix: "rest[0]"
+    let (path, suffix) = rest
+        .rfind('[')
+        .map(|i| (&rest[..i], &rest[i..]))
+        .unwrap_or((rest, ""));
+
+    // Shorten each dot-separated segment
+    let shortened: Vec<&str> = path
+        .split('.')
+        .map(|segment| {
+            // If segment contains "::", take only the last part
+            if let Some(last) = segment.rsplit("::").next() {
+                last
+            } else {
+                segment
+            }
+        })
+        .collect();
+
+    if window_prefix.is_empty() {
+        format!("{}{}", shortened.join("."), suffix)
+    } else {
+        format!("{}/{}{}", window_prefix, shortened.join("."), suffix)
     }
 }
 
