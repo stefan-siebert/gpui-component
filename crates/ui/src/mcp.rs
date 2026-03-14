@@ -495,6 +495,7 @@ fn handle_inspect_ui_tree(
             element_type_filter: None,
             root_element_id: None,
             format: None,
+            text_filter: None,
         });
 
     let compact = opts.format.as_deref() == Some("compact");
@@ -539,6 +540,12 @@ fn handle_inspect_ui_tree(
                     if let Some(ref filter) = opts.element_type_filter {
                         let filter_lower = filter.to_lowercase();
                         filter_tree(&mut element_children, &filter_lower);
+                    }
+
+                    // Apply text content filter
+                    if let Some(ref text_filter) = opts.text_filter {
+                        let filter_lower = text_filter.to_lowercase();
+                        filter_tree_by_text(&mut element_children, &filter_lower);
                     }
 
                     // Apply compact format
@@ -749,6 +756,22 @@ fn filter_tree(elements: &mut Vec<UiElement>, filter_lower: &str) {
     });
 }
 
+/// Filter tree to only include elements with matching text content (or their ancestors)
+fn filter_tree_by_text(elements: &mut Vec<UiElement>, filter_lower: &str) {
+    elements.retain_mut(|elem| {
+        // Recursively filter children first
+        filter_tree_by_text(&mut elem.children, filter_lower);
+
+        // Keep this element if its text matches or has matching descendants
+        let has_matching_text = elem
+            .text_content
+            .iter()
+            .any(|t| t.to_lowercase().contains(filter_lower));
+
+        has_matching_text || !elem.children.is_empty()
+    });
+}
+
 /// Build a hierarchical tree from GPUI's flat inspector element list.
 /// Uses dot-separated global_id as hierarchy key.
 /// Optimized: builds parent lookup via sorted prefix matching instead of O(n²) scan.
@@ -882,14 +905,17 @@ fn handle_get_element(
         serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
     let query = &params.element_id;
 
+    // Build the full tree for each window and search by ID.
+    // This ensures the returned element includes its full subtree and text content.
     for handle in cx.windows() {
         let result = handle.update(cx, |_, window, _cx| {
             let window_id_str = format!("{:?}", handle.window_id());
+            let inspector_elems = window.inspector_elements();
+            let children = build_element_tree(&window_id_str, inspector_elems);
 
+            // Check if query matches the window itself
             if &window_id_str == query {
                 let converted = convert_bounds(window.bounds());
-                let inspector_elems = window.inspector_elements();
-                let children = build_element_tree(&window_id_str, inspector_elems);
                 return Some(UiElement {
                     id: window_id_str,
                     element_type: "Window".to_string(),
@@ -908,53 +934,8 @@ fn handle_get_element(
                 });
             }
 
-            for info in window.inspector_elements() {
-                let full_id =
-                    format!("{}/{}[{}]", window_id_str, info.global_id, info.instance_id);
-
-                let matches = full_id == *query
-                    || info.global_id == *query
-                    || info.global_id.ends_with(query.as_str());
-
-                if matches {
-                    let element_type = info
-                        .source_location
-                        .rsplit('/')
-                        .next()
-                        .and_then(|f| f.split('.').next())
-                        .unwrap_or("Element")
-                        .to_string();
-
-                    let bounds = convert_bounds(info.bounds);
-                    let mut properties = std::collections::HashMap::new();
-                    properties.insert("instance_id".into(), json!(info.instance_id));
-                    let cm = info.content_mask.bounds;
-                    properties.insert(
-                        "content_mask".into(),
-                        json!({
-                            "x": px_to_f32(cm.origin.x),
-                            "y": px_to_f32(cm.origin.y),
-                            "width": px_to_f32(cm.size.width),
-                            "height": px_to_f32(cm.size.height),
-                        }),
-                    );
-
-                    return Some(UiElement {
-                        id: full_id,
-                        element_type,
-                        bounds: bounds.clone(),
-                        visible: true,
-                        children: vec![],
-                        properties,
-                        source_location: Some(info.source_location),
-                        style_json: None,
-                        content_size: Some((bounds.width, bounds.height)),
-                        text_content: info.text_content,
-                    });
-                }
-            }
-
-            None
+            // Search the tree for the element
+            find_subtree(&children, query)
         });
 
         if let Ok(Some(element)) = result {
