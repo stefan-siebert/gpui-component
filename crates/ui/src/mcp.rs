@@ -36,6 +36,12 @@ type RequestMsg = (IpcRequest, mpsc::Sender<IpcResponse>);
 static LOG_BUFFER: std::sync::LazyLock<Arc<Mutex<VecDeque<String>>>> =
     std::sync::LazyLock::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(MAX_LOG_ENTRIES))));
 
+/// App-specific state provider callback.
+/// Registered once at startup via `mcp_set_app_state_provider`.
+static APP_STATE_PROVIDER: std::sync::LazyLock<
+    Mutex<Option<Box<dyn Fn(&App) -> serde_json::Value + Send>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(None));
+
 fn px_to_f32(p: Pixels) -> f32 {
     f32::from(p)
 }
@@ -46,6 +52,20 @@ fn convert_bounds(b: gpui::Bounds<Pixels>) -> Bounds {
         y: px_to_f32(b.origin.y),
         width: px_to_f32(b.size.width),
         height: px_to_f32(b.size.height),
+    }
+}
+
+/// Register an app-specific state provider for the MCP `get_app_state` tool.
+///
+/// The callback receives `&App` and should return a JSON value describing the
+/// application's semantic state. It runs on the main thread whenever
+/// `get_app_state` is called. Only one provider can be registered; calling
+/// this again replaces the previous one.
+pub fn mcp_set_app_state_provider(
+    provider: impl Fn(&App) -> serde_json::Value + Send + 'static,
+) {
+    if let Ok(mut guard) = APP_STATE_PROVIDER.lock() {
+        *guard = Some(Box::new(provider));
     }
 }
 
@@ -174,6 +194,7 @@ fn handle_request(request: &IpcRequest, cx: &mut App) -> IpcResponse {
         methods::EXECUTE_ACTION => handle_execute_action(&request.params, cx),
         methods::LIST_ACTIONS => handle_list_actions(&request.params, cx),
         methods::GET_FOCUS_INFO => handle_get_focus_info(&request.params, cx),
+        methods::TYPE_TEXT => handle_type_text(&request.params, cx),
         _ => Err(format!("Unknown method: {}", request.method)),
     };
 
@@ -250,7 +271,14 @@ fn handle_click_element(
         MouseButton::Middle => GpuiMouseButton::Middle,
     };
 
-    let position = point(px(event.x), px(event.y));
+    // If element_id is provided, resolve its bounds center
+    let (position, resolved_id) = if let Some(ref element_id) = event.element_id {
+        let (pos, id) = resolve_element_center(element_id, event.window_id.as_deref(), cx)?;
+        (pos, Some(id))
+    } else {
+        (point(px(event.x), px(event.y)), None)
+    };
+
     let handle = resolve_window(event.window_id.as_deref(), cx)?;
 
     handle
@@ -259,8 +287,68 @@ fn handle_click_element(
         })
         .map_err(|e| e.to_string())?;
 
-    mcp_log(format!("Click at ({}, {}) button={:?}", event.x, event.y, event.button));
-    Ok(json!({ "success": true }))
+    let x = f32::from(position.x);
+    let y = f32::from(position.y);
+    if let Some(id) = &resolved_id {
+        mcp_log(format!(
+            "Click element '{}' at ({}, {}) button={:?}",
+            id, x, y, event.button
+        ));
+    } else {
+        mcp_log(format!("Click at ({}, {}) button={:?}", x, y, event.button));
+    }
+
+    let mut result = json!({ "success": true, "x": x, "y": y });
+    if let Some(id) = resolved_id {
+        result
+            .as_object_mut()
+            .map(|o| o.insert("resolved_element".into(), json!(id)));
+    }
+    Ok(result)
+}
+
+/// Resolve the center point of an element by ID.
+/// Searches all windows (or a specific one) for the element and returns its bounds center.
+fn resolve_element_center(
+    query: &str,
+    window_id: Option<&str>,
+    cx: &mut App,
+) -> Result<(gpui::Point<Pixels>, String), String> {
+    let windows: Vec<gpui::AnyWindowHandle> = if let Some(wid) = window_id {
+        cx.windows()
+            .into_iter()
+            .filter(|h| format!("{:?}", h.window_id()) == wid)
+            .collect()
+    } else {
+        cx.windows()
+    };
+
+    for handle in &windows {
+        let result = handle.update(cx, |_, window, _cx| {
+            let window_id_str = format!("{:?}", handle.window_id());
+            for info in window.inspector_elements() {
+                let full_id =
+                    format!("{}/{}[{}]", window_id_str, info.global_id, info.instance_id);
+
+                let matches = full_id == query
+                    || info.global_id == query
+                    || info.global_id.ends_with(query);
+
+                if matches {
+                    let center_x = info.bounds.origin.x + info.bounds.size.width / 2.0;
+                    let center_y = info.bounds.origin.y + info.bounds.size.height / 2.0;
+                    return Some((point(center_x, center_y), full_id));
+                }
+            }
+            None
+        });
+
+        if let Ok(Some((pos, id))) = result {
+            return Ok((pos, id));
+        }
+    }
+
+    Err(format!("Element not found: {}", query))
 }
 
 fn handle_send_key(
@@ -300,6 +388,53 @@ fn handle_send_key(
     Ok(json!({ "success": true, "dispatched": dispatched, "keystroke": keystroke_str }))
 }
 
+fn handle_type_text(
+    params: &serde_json::Value,
+    cx: &mut App,
+) -> Result<serde_json::Value, String> {
+    let opts: TypeTextParams =
+        serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
+
+    let handle = resolve_window(opts.window_id.as_deref(), cx)?;
+
+    let mut dispatched_count = 0usize;
+    for ch in opts.text.chars() {
+        let keystroke_str = match ch {
+            ' ' => "space".to_string(),
+            '\n' => "enter".to_string(),
+            '\t' => "tab".to_string(),
+            c => c.to_string(),
+        };
+
+        let keystroke = match Keystroke::parse(&keystroke_str) {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
+
+        let ok = handle
+            .update(cx, |_, window, cx| {
+                window.dispatch_keystroke(keystroke, cx)
+            })
+            .map_err(|e| e.to_string())?;
+
+        if ok {
+            dispatched_count += 1;
+        }
+    }
+
+    mcp_log(format!(
+        "Typed {} chars ({} dispatched)",
+        opts.text.len(),
+        dispatched_count
+    ));
+    Ok(json!({
+        "success": true,
+        "text": opts.text,
+        "chars": opts.text.len(),
+        "dispatched": dispatched_count,
+    }))
+}
+
 fn handle_get_app_state(cx: &mut App) -> Result<serde_json::Value, String> {
     let active_window_id = cx.active_window().map(|w| format!("{:?}", w.window_id()));
     let window_count = cx.windows().len();
@@ -321,11 +456,23 @@ fn handle_get_app_state(cx: &mut App) -> Result<serde_json::Value, String> {
         })
         .collect();
 
-    Ok(json!({
+    let mut result = json!({
         "window_count": window_count,
         "active_window": active_window_id,
         "windows": windows,
-    }))
+    });
+
+    // Merge app-specific semantic state if a provider is registered
+    if let Ok(guard) = APP_STATE_PROVIDER.lock() {
+        if let Some(provider) = guard.as_ref() {
+            let app_state = provider(cx);
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("app".into(), app_state);
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 fn handle_get_logs() -> Result<serde_json::Value, String> {
@@ -346,8 +493,11 @@ fn handle_inspect_ui_tree(
             max_depth: 0,
             window_id: None,
             element_type_filter: None,
+            root_element_id: None,
+            format: None,
         });
 
+    let compact = opts.format.as_deref() == Some("compact");
     let active_window_id = cx.active_window().map(|w| w.window_id());
 
     let windows: Vec<gpui::AnyWindowHandle> = if let Some(ref wid) = opts.window_id {
@@ -373,6 +523,13 @@ fn handle_inspect_ui_tree(
                     let mut element_children =
                         build_element_tree(&window_id_str, inspector_elems);
 
+                    // If root_element_id is set, find that subtree
+                    if let Some(ref root_id) = opts.root_element_id {
+                        element_children = find_subtree(&element_children, root_id)
+                            .map(|e| vec![e])
+                            .unwrap_or_default();
+                    }
+
                     // Apply depth limit (elements at depth 1 are window children)
                     if opts.max_depth > 0 {
                         truncate_tree(&mut element_children, 1, opts.max_depth);
@@ -384,10 +541,26 @@ fn handle_inspect_ui_tree(
                         filter_tree(&mut element_children, &filter_lower);
                     }
 
+                    // Apply compact format
+                    if compact {
+                        for child in &mut element_children {
+                            strip_verbose_fields(child);
+                        }
+                    }
+
                     UiElement {
                         id: window_id_str,
                         element_type: "Window".to_string(),
-                        bounds: converted.clone(),
+                        bounds: if compact {
+                            Bounds {
+                                x: 0.0,
+                                y: 0.0,
+                                width: 0.0,
+                                height: 0.0,
+                            }
+                        } else {
+                            converted.clone()
+                        },
                         visible: true,
                         children: element_children,
                         properties: {
@@ -401,7 +574,12 @@ fn handle_inspect_ui_tree(
                         },
                         source_location: None,
                         style_json: None,
-                        content_size: Some((converted.width, converted.height)),
+                        content_size: if compact {
+                            None
+                        } else {
+                            Some((converted.width, converted.height))
+                        },
+                        text_content: vec![],
                     }
                 })
                 .ok()
@@ -426,6 +604,7 @@ fn handle_inspect_ui_tree(
             source_location: None,
             style_json: None,
             content_size: None,
+            text_content: vec![],
         },
         window_count: cx.windows().len(),
         timestamp: std::time::SystemTime::now()
@@ -440,6 +619,59 @@ fn handle_inspect_ui_tree(
         obj.insert("total_elements".into(), json!(total_elements));
     }
     Ok(result)
+}
+
+/// Find an element in the tree by ID (full_id, global_id portion, or suffix match).
+/// Returns a clone of the matched element with its full subtree.
+fn find_subtree(elements: &[UiElement], query: &str) -> Option<UiElement> {
+    for elem in elements {
+        // Match by full ID
+        if elem.id == query {
+            return Some(elem.clone());
+        }
+        // Match by global_id portion (strip window prefix and instance suffix)
+        let global_id = elem
+            .id
+            .find('/')
+            .map(|i| &elem.id[i + 1..])
+            .unwrap_or(&elem.id);
+        let global_id = global_id
+            .rfind('[')
+            .map(|i| &global_id[..i])
+            .unwrap_or(global_id);
+        if global_id == query {
+            return Some(elem.clone());
+        }
+        // Match by suffix
+        if global_id.ends_with(query) {
+            return Some(elem.clone());
+        }
+        // Recurse into children
+        if let Some(found) = find_subtree(&elem.children, query) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Strip verbose fields for compact output mode.
+/// Removes bounds, content_mask, source_location, content_size, style_json.
+fn strip_verbose_fields(elem: &mut UiElement) {
+    elem.bounds = Bounds {
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        height: 0.0,
+    };
+    elem.source_location = None;
+    elem.style_json = None;
+    elem.content_size = None;
+    elem.properties.remove("content_mask");
+    elem.properties.remove("instance_id");
+
+    for child in &mut elem.children {
+        strip_verbose_fields(child);
+    }
 }
 
 /// Count total elements in a tree
@@ -535,6 +767,7 @@ fn build_element_tree(
                     source_location: Some(info.source_location),
                     style_json: None,
                     content_size: Some((bounds.width, bounds.height)),
+                    text_content: info.text_content,
                 },
             }
         })
@@ -633,6 +866,7 @@ fn handle_get_element(
                     source_location: None,
                     style_json: None,
                     content_size: Some((converted.width, converted.height)),
+                    text_content: vec![],
                 });
             }
 
@@ -677,6 +911,7 @@ fn handle_get_element(
                         source_location: Some(info.source_location),
                         style_json: None,
                         content_size: Some((bounds.width, bounds.height)),
+                        text_content: info.text_content,
                     });
                 }
             }
@@ -752,14 +987,27 @@ fn handle_execute_action(
 
     let handle = resolve_window(opts.window_id.as_deref(), cx)?;
 
-    handle
+    let (window_id, window_title, has_focus) = handle
         .update(cx, |_, window, cx| {
+            let wid = format!("{:?}", handle.window_id());
+            let title = window.window_title();
+            let focused = window.focused(cx).is_some();
             window.dispatch_action(action, cx);
+            (wid, title, focused)
         })
         .map_err(|e| format!("Failed to dispatch action: {}", e))?;
 
-    mcp_log(format!("Executed action: {}", opts.action));
-    Ok(json!({ "success": true, "action": opts.action }))
+    mcp_log(format!(
+        "Executed action: {} on window {} (focused={})",
+        opts.action, window_id, has_focus
+    ));
+    Ok(json!({
+        "success": true,
+        "action": opts.action,
+        "window_id": window_id,
+        "window_title": window_title,
+        "window_had_focus": has_focus,
+    }))
 }
 
 fn handle_list_actions(
@@ -767,11 +1015,14 @@ fn handle_list_actions(
     cx: &mut App,
 ) -> Result<serde_json::Value, String> {
     let opts: ListActionsParams =
-        serde_json::from_value(params.clone()).unwrap_or(ListActionsParams { filter: None });
+        serde_json::from_value(params.clone()).unwrap_or(ListActionsParams {
+            filter: None,
+            include_bindings: false,
+        });
 
     let all_names = cx.all_action_names();
 
-    let actions: Vec<&str> = if let Some(ref filter) = opts.filter {
+    let filtered_names: Vec<&str> = if let Some(ref filter) = opts.filter {
         let filter_lower = filter.to_lowercase();
         all_names
             .iter()
@@ -781,6 +1032,63 @@ fn handle_list_actions(
     } else {
         all_names.to_vec()
     };
+
+    if !opts.include_bindings {
+        return Ok(json!({
+            "actions": filtered_names,
+            "count": filtered_names.len(),
+            "total_registered": all_names.len(),
+        }));
+    }
+
+    // Build rich action info with keybindings and documentation
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    let docs = cx.action_documentation();
+
+    let actions: Vec<serde_json::Value> = filtered_names
+        .iter()
+        .map(|name| {
+            // Find all keybindings for this action
+            let bindings: Vec<serde_json::Value> = keymap
+                .bindings()
+                .filter(|binding| binding.action().name() == *name)
+                .map(|binding| {
+                    let keystrokes: Vec<String> = binding
+                        .keystrokes()
+                        .iter()
+                        .map(|ks| format!("{}", ks))
+                        .collect();
+
+                    let context = binding
+                        .predicate()
+                        .map(|p| format!("{}", p));
+
+                    let mut entry = json!({
+                        "keys": keystrokes.join(" "),
+                    });
+                    if let Some(ctx) = context {
+                        entry.as_object_mut()
+                            .map(|o| o.insert("context".into(), json!(ctx)));
+                    }
+                    entry
+                })
+                .collect();
+
+            let mut entry = json!({
+                "action": name,
+                "bindings": bindings,
+            });
+
+            if let Some(doc) = docs.get(name) {
+                entry
+                    .as_object_mut()
+                    .map(|o| o.insert("description".into(), json!(doc)));
+            }
+
+            entry
+        })
+        .collect();
 
     Ok(json!({
         "actions": actions,
