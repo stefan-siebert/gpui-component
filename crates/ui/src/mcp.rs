@@ -935,36 +935,94 @@ fn handle_take_screenshot(
         serde_json::from_value(params.clone()).unwrap_or(TakeScreenshotParams {
             highlight_elements: vec![],
             window_id: None,
+            element_id: None,
         });
 
     let handle = resolve_window(opts.window_id.as_deref(), cx)?;
 
-    let image = handle
-        .update(cx, |_, window, _cx| window.render_to_image())
+    let (image, scale_factor) = handle
+        .update(cx, |_, window, _cx| {
+            let scale = window.scale_factor();
+            let img = window.render_to_image()?;
+            Ok::<_, anyhow::Error>((img, scale))
+        })
         .map_err(|e| format!("Failed to access window: {}", e))?
         .map_err(|e| format!("Failed to render screenshot: {}", e))?;
 
-    let (width, height) = image.dimensions();
+    // If element_id is set, resolve bounds and crop
+    let (final_image, element_info) = if let Some(ref element_id) = opts.element_id {
+        // Resolve element bounds (in logical pixels)
+        let (elem_bounds, resolved_id) = handle
+            .update(cx, |_, window, _cx| {
+                let window_id_str = format!("{:?}", handle.window_id());
+                for info in window.inspector_elements() {
+                    let full_id = format!(
+                        "{}/{}[{}]",
+                        window_id_str, info.global_id, info.instance_id
+                    );
+                    let matches = full_id == *element_id
+                        || info.global_id == *element_id
+                        || info.global_id.ends_with(element_id.as_str());
+                    if matches {
+                        return Some((info.bounds, full_id));
+                    }
+                }
+                None
+            })
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Element not found: {}", element_id))?;
+
+        // Convert logical bounds to device pixels for cropping
+        let x = (f32::from(elem_bounds.origin.x) * scale_factor).round() as u32;
+        let y = (f32::from(elem_bounds.origin.y) * scale_factor).round() as u32;
+        let w = (f32::from(elem_bounds.size.width) * scale_factor).round() as u32;
+        let h = (f32::from(elem_bounds.size.height) * scale_factor).round() as u32;
+
+        let (img_w, img_h) = image.dimensions();
+        let x = x.min(img_w.saturating_sub(1));
+        let y = y.min(img_h.saturating_sub(1));
+        let w = w.min(img_w.saturating_sub(x));
+        let h = h.min(img_h.saturating_sub(y));
+
+        use image::GenericImageView;
+        let cropped = image.view(x, y, w, h).to_image();
+        (cropped, Some(resolved_id))
+    } else {
+        (image, None)
+    };
+
+    let (width, height) = final_image.dimensions();
 
     // Save as PNG to a temp file
-    let temp_path = std::env::temp_dir().join(format!("gpui-screenshot-{}.png", std::process::id()));
-    image
+    let temp_path =
+        std::env::temp_dir().join(format!("gpui-screenshot-{}.png", std::process::id()));
+    final_image
         .save(&temp_path)
         .map_err(|e| format!("Failed to save screenshot: {}", e))?;
 
     mcp_log(format!(
-        "Screenshot captured: {}x{} -> {}",
+        "Screenshot captured: {}x{}{} -> {}",
         width,
         height,
+        element_info
+            .as_deref()
+            .map(|id| format!(" (element: {})", id))
+            .unwrap_or_default(),
         temp_path.display()
     ));
 
-    Ok(json!({
+    let mut result = json!({
         "width": width,
         "height": height,
         "format": "png",
         "path": temp_path.to_string_lossy(),
-    }))
+    });
+    if let Some(id) = element_info {
+        result
+            .as_object_mut()
+            .map(|o| o.insert("element_id".into(), json!(id)));
+    }
+    Ok(result)
 }
 
 fn handle_execute_action(
