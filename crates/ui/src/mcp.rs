@@ -18,9 +18,13 @@
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+use uds_windows::{UnixListener, UnixStream};
 
 use gpui::{point, px, App, Keystroke, MouseButton as GpuiMouseButton, Pixels};
 use gpui_mcp_protocol::protocol::*;
@@ -79,13 +83,23 @@ pub fn mcp_log(message: impl Into<String>) {
     }
 }
 
+/// Returns the default socket path for the current process.
+/// Uses PID-based naming for multi-instance support.
+fn default_socket_path() -> String {
+    let pid = std::process::id();
+    let dir = std::env::temp_dir();
+    dir.join(format!("gpui-mcp-{}.sock", pid))
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Initialize the MCP IPC server.
 ///
-/// Starts a Unix Socket listener on a background thread and
+/// Starts a Unix Domain Socket listener on a background thread and
 /// polls incoming requests on the GPUI main thread.
 pub fn init_mcp(cx: &mut App) {
     let socket_path = std::env::var("GPUI_MCP_SOCKET")
-        .unwrap_or_else(|_| "/tmp/gpui-mcp.sock".to_string());
+        .unwrap_or_else(|_| default_socket_path());
 
     let (req_tx, req_rx) = mpsc::channel::<RequestMsg>();
 
@@ -148,7 +162,7 @@ fn run_ipc_listener(
 
 /// Handle a single IPC connection (runs on connection thread)
 fn handle_ipc_connection(
-    stream: std::os::unix::net::UnixStream,
+    stream: UnixStream,
     req_tx: mpsc::Sender<RequestMsg>,
 ) -> anyhow::Result<()> {
     let reader = BufReader::new(&stream);
