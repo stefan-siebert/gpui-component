@@ -239,6 +239,21 @@ impl TabPanel {
         cx.notify();
     }
 
+    /// Activate an existing panel by switching to its tab.
+    ///
+    /// If the panel is not found in this TabPanel, this is a no-op.
+    pub fn activate_panel(
+        &mut self,
+        panel: &Arc<dyn PanelView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entity_id = panel.view().entity_id();
+        if let Some(ix) = self.panels.iter().position(|p| p.view().entity_id() == entity_id) {
+            self.set_active_ix(ix, window, cx);
+        }
+    }
+
     /// Add a panel to the end of the tabs
     pub fn add_panel(
         &mut self,

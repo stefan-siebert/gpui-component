@@ -398,6 +398,32 @@ impl DockItem {
         }
     }
 
+    /// Activate (switch to) an existing panel's tab.
+    ///
+    /// Recursively searches the dock item tree for a [`TabPanel`] that
+    /// contains the given panel and makes it the active tab.
+    /// No-op if the panel is not found.
+    pub fn activate_panel(
+        &self,
+        panel: &Arc<dyn PanelView>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        match self {
+            Self::Split { items, .. } => {
+                for item in items {
+                    item.activate_panel(panel, window, cx);
+                }
+            }
+            Self::Tabs { view, .. } => {
+                view.update(cx, |tab_panel, cx| {
+                    tab_panel.activate_panel(panel, window, cx);
+                });
+            }
+            _ => {}
+        }
+    }
+
     /// Add a panel to the dock item.
     pub fn add_panel(
         &mut self,
