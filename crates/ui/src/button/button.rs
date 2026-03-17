@@ -2,7 +2,9 @@ use std::rc::Rc;
 
 use crate::{
     ActiveTheme, Colorize as _, Disableable, FocusableExt as _, Icon, IconName, Selectable,
-    Sizable, Size, StyleSized, StyledExt, button::ButtonIcon, h_flex, tooltip::Tooltip,
+    Sizable, Size, StyleSized, StyledExt, button::ButtonIcon, h_flex,
+    platform_control_h_boost, platform_control_px_boost,
+    tooltip::Tooltip,
 };
 use gpui::{
     Action, AnyElement, App, ClickEvent, Corners, Div, Edges, ElementId, Hsla, InteractiveElement,
@@ -469,27 +471,37 @@ impl RenderOnce for Button {
                 this.shadow_xs()
             })
             .when(!style.no_padding(), |this| {
+                let hb = platform_control_h_boost();
+                let pb = platform_control_px_boost();
+
                 if self.label.is_none() && self.children.is_empty() {
                     // Icon Button
                     match self.size {
-                        Size::Size(px) => this.size(px),
-                        Size::XSmall => this.size_5(),
-                        Size::Small => this.size_6(),
-                        Size::Large | Size::Medium => this.size_8(),
+                        Size::Size(s) => this.size(s),
+                        Size::XSmall => this.size(px(20.) + hb),
+                        Size::Small => this.size(px(24.) + hb),
+                        Size::Large | Size::Medium => this.size(px(32.) + hb),
                     }
                 } else {
                     // Normal Button
                     match self.size {
                         Size::Size(size) => this.px(size * 0.2),
-                        Size::XSmall => this.h_5().px_1().when(self.compact, |this| this.min_w_5()),
+                        Size::XSmall => this
+                            .h(px(20.) + hb)
+                            .px(px(4.) + pb)
+                            .when(self.compact, |this| this.min_w(px(20.) + hb)),
                         Size::Small => this
-                            .h_6()
-                            .px_3()
-                            .when(self.compact, |this| this.min_w_6().px_1p5()),
+                            .h(px(24.) + hb)
+                            .px(px(12.) + pb)
+                            .when(self.compact, |this| {
+                                this.min_w(px(24.) + hb).px(px(6.) + pb)
+                            }),
                         _ => this
-                            .h_8()
-                            .px_4()
-                            .when(self.compact, |this| this.min_w_8().px_2()),
+                            .h(px(32.) + hb)
+                            .px(px(16.) + pb)
+                            .when(self.compact, |this| {
+                                this.min_w(px(32.) + hb).px(px(8.) + pb)
+                            }),
                     }
                 }
             })

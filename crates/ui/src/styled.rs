@@ -17,6 +17,44 @@ pub fn v_flex() -> Div {
     div().v_flex()
 }
 
+// ---------------------------------------------------------------------------
+// Platform-aware control sizing
+// ---------------------------------------------------------------------------
+//
+// Windows WinUI3 controls default to 32 px height; macOS native controls are
+// ~22-24 px.  These helpers add a per-platform boost so that each `Size` tier
+// maps to values that feel native on both platforms.
+
+/// Extra height for interactive controls on Windows.
+#[inline(always)]
+pub(crate) fn platform_control_h_boost() -> Pixels {
+    if cfg!(target_os = "windows") {
+        px(4.0)
+    } else {
+        px(0.0)
+    }
+}
+
+/// Extra horizontal padding for interactive controls on Windows.
+#[inline(always)]
+pub(crate) fn platform_control_px_boost() -> Pixels {
+    if cfg!(target_os = "windows") {
+        px(2.0)
+    } else {
+        px(0.0)
+    }
+}
+
+/// Extra vertical padding for interactive controls on Windows.
+#[inline(always)]
+pub(crate) fn platform_control_py_boost() -> Pixels {
+    if cfg!(target_os = "windows") {
+        px(2.0)
+    } else {
+        px(0.0)
+    }
+}
+
 /// Create a [`BoxShadow`] like CSS.
 ///
 /// e.g:
@@ -225,22 +263,45 @@ impl Size {
     /// Returns the height for table row.
     #[inline]
     pub fn table_row_height(&self) -> Pixels {
+        let b = platform_control_h_boost();
         match self {
-            Size::XSmall => px(26.),
-            Size::Small => px(30.),
+            Size::XSmall => px(26.) + b,
+            Size::Small => px(30.) + b,
             Size::Large => px(40.),
-            _ => px(32.),
+            _ => px(32.) + b,
         }
     }
 
     /// Returns the padding for a table cell.
     #[inline]
     pub fn table_cell_padding(&self) -> Edges<Pixels> {
+        let hb = platform_control_px_boost();
+        let vb = platform_control_py_boost();
         match self {
-            Size::XSmall => Edges { top: px(2.), bottom: px(2.), left: px(4.), right: px(4.) },
-            Size::Small => Edges { top: px(3.), bottom: px(3.), left: px(6.), right: px(6.) },
-            Size::Large => Edges { top: px(8.), bottom: px(8.), left: px(12.), right: px(12.) },
-            _ => Edges { top: px(4.), bottom: px(4.), left: px(8.), right: px(8.) },
+            Size::XSmall => Edges {
+                top: px(2.) + vb,
+                bottom: px(2.) + vb,
+                left: px(4.) + hb,
+                right: px(4.) + hb,
+            },
+            Size::Small => Edges {
+                top: px(3.) + vb,
+                bottom: px(3.) + vb,
+                left: px(6.) + hb,
+                right: px(6.) + hb,
+            },
+            Size::Large => Edges {
+                top: px(8.),
+                bottom: px(8.),
+                left: px(12.),
+                right: px(12.),
+            },
+            _ => Edges {
+                top: px(4.) + vb,
+                bottom: px(4.) + vb,
+                left: px(8.) + hb,
+                right: px(8.) + hb,
+            },
         }
     }
 
@@ -294,23 +355,25 @@ impl Size {
 
     /// Returns the horizontal input padding.
     pub fn input_px(&self) -> Pixels {
+        let b = platform_control_px_boost();
         match self {
-            Self::Large => px(16.),
-            Self::Medium => px(12.),
-            Self::Small => px(8.),
-            Self::XSmall => px(4.),
-            _ => px(8.),
+            Self::Large => px(16.) + b,
+            Self::Medium => px(12.) + b,
+            Self::Small => px(8.) + b,
+            Self::XSmall => px(4.) + b,
+            _ => px(8.) + b,
         }
     }
 
     /// Returns the vertical input padding.
     pub fn input_py(&self) -> Pixels {
+        let b = platform_control_py_boost();
         match self {
-            Size::Large => px(10.),
-            Size::Medium => px(8.),
-            Size::Small => px(2.),
-            Size::XSmall => px(0.),
-            _ => px(2.),
+            Size::Large => px(10.) + b,
+            Size::Medium => px(8.) + b,
+            Size::Small => px(2.) + b,
+            Size::XSmall => px(0.) + b,
+            _ => px(2.) + b,
         }
     }
 }
@@ -430,12 +493,13 @@ impl<T: Styled> StyleSized<T> for T {
 
     #[inline]
     fn input_h(self, size: Size) -> Self {
+        let b = platform_control_h_boost();
         match size {
-            Size::Large => self.h_11(),
-            Size::Medium => self.h_8(),
-            Size::Small => self.h_6(),
-            Size::XSmall => self.h_5(),
-            _ => self.h_6(),
+            Size::Large => self.h(px(44.)),
+            Size::Medium => self.h(px(32.) + b),
+            Size::Small => self.h(px(24.) + b),
+            Size::XSmall => self.h(px(20.) + b),
+            _ => self.h(px(24.) + b),
         }
     }
 
@@ -454,11 +518,12 @@ impl<T: Styled> StyleSized<T> for T {
 
     #[inline]
     fn list_py(self, size: Size) -> Self {
+        let b = platform_control_py_boost();
         match size {
-            Size::Large => self.py_2(),
-            Size::Medium => self.py_1(),
-            Size::Small => self.py_0p5(),
-            _ => self.py_1(),
+            Size::Large => self.py(px(8.) + b),
+            Size::Medium => self.py(px(4.) + b),
+            Size::Small => self.py(px(2.) + b),
+            _ => self.py(px(4.) + b),
         }
     }
 
