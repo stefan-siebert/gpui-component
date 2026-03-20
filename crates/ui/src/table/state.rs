@@ -1,4 +1,4 @@
-use std::{ops::Range, rc::Rc, time::Duration};
+use std::{ops::Range, time::Duration};
 
 use crate::{
     ActiveTheme, ElementExt, Icon, IconName, StyleSized as _, StyledExt, VirtualListScrollHandle,
@@ -1404,8 +1404,6 @@ where
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let view = cx.entity().clone();
-        let horizontal_scroll_handle = self.horizontal_scroll_handle.clone();
-
         // Reset fixed head columns bounds, if no fixed columns are present
         if left_columns_count == 0 {
             self.fixed_head_cols_bounds = Bounds::default();
