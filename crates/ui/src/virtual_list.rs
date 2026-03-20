@@ -233,15 +233,6 @@ impl VirtualList {
         self
     }
 
-    /// Specify for table.
-    ///
-    /// Table is special, because the `scroll_handle` is based on Table head (That is not a virtual list).
-    pub(crate) fn with_scroll_handle(mut self, scroll_handle: &VirtualListScrollHandle) -> Self {
-        self.base = div().id(self.id.clone()).size_full();
-        self.scroll_handle = scroll_handle.clone();
-        self
-    }
-
     fn scroll_to_deferred_item(
         &self,
         scroll_offset: Point<Pixels>,
