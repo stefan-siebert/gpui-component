@@ -1096,19 +1096,43 @@ where
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Div {
+        self.render_cell_inner(col_ix, false)
+    }
+
+    /// Like `render_cell` but auto_width columns always use `flex_1()` instead
+    /// of a computed pixel width. Used by the h_flex body row path where CSS
+    /// flexbox handles sizing directly, avoiding 1-frame column jitter during
+    /// window resize.
+    fn render_cell_flex(
+        &self,
+        col_ix: usize,
+    ) -> Div {
+        self.render_cell_inner(col_ix, true)
+    }
+
+    fn render_cell_inner(
+        &self,
+        col_ix: usize,
+        force_flex_auto: bool,
+    ) -> Div {
         let Some(col_group) = self.col_groups.get(col_ix) else {
             return div();
         };
 
         let col_width = col_group.width;
         let col_padding = col_group.column.paddings;
-        // On the first frame, auto-width columns haven't been computed yet.
-        // Use flex_1() so they fill the space correctly without a visible flash.
-        let auto_first_frame = col_group.column.auto_width && !self.auto_widths_ready();
+        // Use flex_1() for auto_width columns when:
+        // - force_flex_auto is true (h_flex body path, avoids resize jitter), or
+        // - first frame before auto_widths are computed (avoids visible flash)
+        let use_flex = if force_flex_auto {
+            col_group.column.auto_width
+        } else {
+            col_group.column.auto_width && !self.auto_widths_ready()
+        };
 
         div()
-            .when(auto_first_frame, |this| this.flex_1().min_w(col_group.column.min_width))
-            .when(!auto_first_frame, |this| this.w(col_width).flex_shrink_0())
+            .when(use_flex, |this| this.flex_1().min_w(col_group.column.min_width))
+            .when(!use_flex, |this| this.w(col_width).flex_shrink_0())
             .h_full()
             .overflow_hidden()
             .whitespace_nowrap()
@@ -1311,13 +1335,15 @@ where
         let movable = self.col_movable && col_group.column.movable;
         let paddings = col_group.column.paddings;
         let name = col_group.column.name.clone();
-        let auto_first_frame = col_group.column.auto_width && !self.auto_widths_ready();
+        let is_auto = col_group.column.auto_width;
 
         h_flex()
             .h_full()
-            .when(auto_first_frame, |this| this.flex_1())
+            // Always use flex_1 for auto_width columns so the header stays
+            // in sync with body cells (which also use flex_1 via render_cell_flex).
+            .when(is_auto, |this| this.flex_1())
             .child(
-                self.render_cell(None, col_ix, window, cx)
+                self.render_cell_flex(col_ix)
                     .id(("col-header", col_ix))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.on_col_head_click(col_ix, window, cx);
@@ -1435,19 +1461,18 @@ where
             })
             .child(
                 // Columns
+                // overflow_hidden (not overflow_scroll) so that flex_1 on
+                // auto_width columns can compute remaining space correctly.
                 h_flex()
                     .id("table-head")
                     .size_full()
-                    .overflow_scroll()
+                    .overflow_hidden()
                     .relative()
-                    .track_scroll(&horizontal_scroll_handle)
                     .bg(cx.theme().table_head)
                     .child({
-                        let auto_first_frame = !self.auto_widths_ready()
-                            && self.col_groups.iter().any(|c| c.column.auto_width);
                         h_flex()
                             .relative()
-                            .when(auto_first_frame, |this| this.min_w_full())
+                            .size_full()
                             .children(
                                 self.col_groups
                                     .clone()
@@ -1469,7 +1494,6 @@ where
         row_ix: usize,
         rows_count: usize,
         left_columns_count: usize,
-        col_sizes: Rc<Vec<gpui::Size<Pixels>>>,
         columns_count: usize,
         is_filled: bool,
         window: &mut Window,
@@ -1478,7 +1502,6 @@ where
         let horizontal_scroll_handle = self.horizontal_scroll_handle.clone();
         let is_stripe_row = self.options.stripe && row_ix % 2 != 0;
         let is_selected = self.selected_row == Some(row_ix);
-        let view = cx.entity().clone();
         let row_height = self.options.size.table_row_height();
 
         if row_ix < rows_count {
@@ -1599,139 +1622,92 @@ where
                             ),
                     )
                 })
-                .child({
-                    h_flex()
-                            .flex_1()
-                            .h_full()
-                            .overflow_hidden()
-                            .relative()
+                .children({
+                    // Render scrollable columns directly in h_flex using
+                    // render_cell_flex (flex_1 for auto_width columns).
+                    // This avoids the horizontal virtual_list's 1-frame
+                    // column width lag that causes jitter during resize.
+                    let mut cells = Vec::with_capacity(
+                        columns_count - left_columns_count,
+                    );
+
+                    (left_columns_count..columns_count).for_each(|col_ix| {
+                        let is_cell_selected = self.selected_cell
+                            == Some((row_ix, col_ix))
+                            && self.selection_mode.is_cell();
+                        let is_cell_right_clicked =
+                            self.right_clicked_cell == Some((row_ix, col_ix));
+                        let is_auto = self.col_groups.get(col_ix)
+                            .map(|c| c.column.auto_width)
+                            .unwrap_or(false);
+
+                        let el = self
+                            .render_col_wrap(Some(row_ix), col_ix, window, cx)
+                            // Propagate flex_1 to the wrapper so the auto_width
+                            // column fills remaining row space.
+                            .when(is_auto, |this| this.flex_1().min_w_0().overflow_hidden())
                             .child(
-                                crate::virtual_list::virtual_list(
-                                    view,
-                                    row_ix,
-                                    Axis::Horizontal,
-                                    col_sizes,
-                                    {
-                                        move |table, visible_range: Range<usize>, window, cx| {
-                                            table.update_visible_range_if_need(
-                                                visible_range.clone(),
-                                                Axis::Horizontal,
-                                                window,
-                                                cx,
-                                            );
-
-                                            let mut items = Vec::with_capacity(
-                                                visible_range.end - visible_range.start,
-                                            );
-
-                                            visible_range.for_each(|col_ix| {
-                                                let col_ix = col_ix + left_columns_count;
-                                                let is_cell_selected = table.selected_cell
-                                                    == Some((row_ix, col_ix))
-                                                    && table.selection_mode.is_cell();
-                                                let is_cell_right_clicked =
-                                                    table.right_clicked_cell
-                                                        == Some((row_ix, col_ix));
-
-                                                let el = table
-                                                    .render_col_wrap(
-                                                        Some(row_ix), col_ix, window, cx,
-                                                    )
-                                                    .child(
-                                                        table
-                                                            .render_cell(
-                                                                Some(row_ix),
-                                                                col_ix,
-                                                                window,
-                                                                cx,
-                                                            )
-                                                            .id(format!(
-                                                                "table-cell-{}:{}",
-                                                                row_ix, col_ix
-                                                            ))
-                                                            .relative()
-                                                            .child(table.measure_render_td(
-                                                                row_ix, col_ix, window, cx,
-                                                            ))
-                                                            .when(is_cell_selected, |this| {
-                                                                this.child(
-                                                                    div()
-                                                                        .absolute()
-                                                                        .inset_0()
-                                                                        .bg(cx
-                                                                            .theme()
-                                                                            .table_active)
-                                                                        .border_1()
-                                                                        .border_color(
-                                                                            cx.theme()
-                                                                                .table_active_border,
-                                                                        ),
-                                                                )
-                                                            })
-                                                            .when(
-                                                                is_cell_right_clicked
-                                                                    && !is_cell_selected,
-                                                                |this| {
-                                                                    this.child(
-                                                                        div()
-                                                                            .absolute()
-                                                                            .inset_0()
-                                                                            .border_1()
-                                                                            .border_color(
-                                                                                cx.theme()
-                                                                                    .table_active_border
-                                                                                    .opacity(0.5),
-                                                                            ),
-                                                                    )
-                                                                },
-                                                            )
-                                                            .when(
-                                                                table.cell_selectable,
-                                                                |this| {
-                                                                    this.on_click(cx.listener(
-                                                                        move |table,
-                                                                              e,
-                                                                              window,
-                                                                              cx| {
-                                                                            cx.stop_propagation();
-                                                                            table.on_cell_click(
-                                                                                e, row_ix, col_ix,
-                                                                                window, cx,
-                                                                            );
-                                                                        },
-                                                                    ))
-                                                                    .on_mouse_down(
-                                                                        MouseButton::Right,
-                                                                        cx.listener(
-                                                                            move |table,
-                                                                                  e,
-                                                                                  window,
-                                                                                  cx| {
-                                                                                table
-                                                                                .on_cell_right_click(
-                                                                                    e,
-                                                                                    row_ix,
-                                                                                    col_ix,
-                                                                                    window,
-                                                                                    cx,
-                                                                                );
-                                                                            },
-                                                                        ),
-                                                                    )
-                                                                },
-                                                            ),
+                                self.render_cell_flex(col_ix)
+                                    .id(format!("table-cell-{}:{}", row_ix, col_ix))
+                                    .relative()
+                                    .child(self.measure_render_td(
+                                        row_ix, col_ix, window, cx,
+                                    ))
+                                    .when(is_cell_selected, |this| {
+                                        this.child(
+                                            div()
+                                                .absolute()
+                                                .inset_0()
+                                                .bg(cx.theme().table_active)
+                                                .border_1()
+                                                .border_color(
+                                                    cx.theme().table_active_border,
+                                                ),
+                                        )
+                                    })
+                                    .when(
+                                        is_cell_right_clicked && !is_cell_selected,
+                                        |this| {
+                                            this.child(
+                                                div()
+                                                    .absolute()
+                                                    .inset_0()
+                                                    .border_1()
+                                                    .border_color(
+                                                        cx.theme()
+                                                            .table_active_border
+                                                            .opacity(0.5),
+                                                    ),
+                                            )
+                                        },
+                                    )
+                                    .when(self.cell_selectable, |this| {
+                                        this.on_click(cx.listener(
+                                            move |table, e, window, cx| {
+                                                cx.stop_propagation();
+                                                table.on_cell_click(
+                                                    e, row_ix, col_ix, window, cx,
+                                                );
+                                            },
+                                        ))
+                                        .on_mouse_down(
+                                            MouseButton::Right,
+                                            cx.listener(
+                                                move |table, e, window, cx| {
+                                                    table.on_cell_right_click(
+                                                        e, row_ix, col_ix, window,
+                                                        cx,
                                                     );
+                                                },
+                                            ),
+                                        )
+                                    }),
+                            );
 
-                                                items.push(el);
-                                            });
+                        cells.push(el);
+                    });
 
-                                            items
-                                        }
-                                    },
-                                )
-                                .with_scroll_handle(&self.horizontal_scroll_handle),
-                            )
-                            .child(self.delegate.render_last_empty_col(window, cx))
+                    cells
                 })
                 // Row selected style
                 // Note: Don't show row selection if a cell is selected
@@ -1982,19 +1958,6 @@ where
                                         // This keeps body column positions in sync with the
                                         // header on the same frame, avoiding column jitter
                                         // during window resize.
-                                        let row_height = table.options.size.table_row_height();
-                                        let col_sizes: Rc<Vec<gpui::Size<Pixels>>> = Rc::new(
-                                            table
-                                                .col_groups
-                                                .iter()
-                                                .skip(left_columns_count)
-                                                .map(|col| gpui::Size {
-                                                    width: col.width,
-                                                    height: row_height,
-                                                })
-                                                .collect(),
-                                        );
-
                                         table.load_more_if_need(
                                             rows_count,
                                             visible_range.end,
@@ -2032,7 +1995,6 @@ where
                                                 row_ix,
                                                 rows_count,
                                                 left_columns_count,
-                                                col_sizes.clone(),
                                                 columns_count,
                                                 is_filled,
                                                 window,
