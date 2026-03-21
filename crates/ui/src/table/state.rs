@@ -499,7 +499,7 @@ where
         self.col_groups = (0..self.delegate.columns_count(cx))
             .map(|col_ix| {
                 let column = self.delegate().column(col_ix, cx);
-                ColGroup { width: column.width, bounds: Bounds::default(), column }
+                ColGroup { width: column.width, bounds: Bounds::default(), original_min_width: column.min_width, column }
             })
             .collect();
     }
@@ -978,11 +978,19 @@ where
             return;
         }
 
-        let new_width = size.clamp(col_group.column.min_width, col_group.column.max_width);
+        // Clamp against the original min_width (not the potentially raised one)
+        // so the user can always drag back down to the original minimum.
+        let new_width = size.clamp(col_group.original_min_width, col_group.column.max_width);
 
         // Only update if it actually changed
         if col_group.width != new_width {
             col_group.width = new_width;
+            // For auto_width columns, update min_width so the column doesn't
+            // auto-shrink below the user's chosen size. If the user drags
+            // smaller, min_width follows down (but not below original).
+            if col_group.column.auto_width {
+                col_group.column.min_width = new_width;
+            }
             cx.notify();
         }
     }
@@ -1243,6 +1251,19 @@ where
                 cx.stop_propagation();
                 cx.new(|_| drag.clone())
             })
+            .on_click(cx.listener(move |view, e: &gpui::ClickEvent, _, cx| {
+                if e.click_count() == 2 {
+                    // Double-click resets auto_width column to its original min_width
+                    if let Some(col_group) = view.col_groups.get_mut(ix) {
+                        if col_group.column.auto_width {
+                            col_group.column.min_width = col_group.original_min_width;
+                            col_group.width = col_group.original_min_width;
+                            view.prev_table_width = px(0.); // force recalc
+                            cx.notify();
+                        }
+                    }
+                }
+            }))
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|view, _, _, cx| {
@@ -1638,12 +1659,15 @@ where
                         let is_auto = self.col_groups.get(col_ix)
                             .map(|c| c.column.auto_width)
                             .unwrap_or(false);
+                        let col_min_w = self.col_groups.get(col_ix)
+                            .map(|c| c.column.min_width)
+                            .unwrap_or(px(0.));
 
                         let el = self
                             .render_col_wrap(Some(row_ix), col_ix, window, cx)
                             // Propagate flex_1 to the wrapper so the auto_width
                             // column fills remaining row space.
-                            .when(is_auto, |this| this.flex_1().min_w_0().overflow_hidden())
+                            .when(is_auto, |this| this.flex_1().min_w(col_min_w).overflow_hidden())
                             .child(
                                 self.render_cell_flex(col_ix)
                                     .id(format!("table-cell-{}:{}", row_ix, col_ix))
@@ -1940,11 +1964,10 @@ where
                     this.children(empty_view)
                 } else {
                     this.child(
-                        // Note: size_full() was narrowed to h_full() — the explicit
-                        // w_full() caused resize flicker on Wayland by creating a
-                        // layout oscillation between the 100% width constraint and
-                        // flex_grow on this horizontal flex container.
-                        h_flex().id("table-body").flex_grow().h_full().child(
+                        // min_w_full() ensures the table body fills its parent
+                        // without creating the layout oscillation that w_full()
+                        // caused on Wayland (width: 100% vs flex_grow conflict).
+                        h_flex().id("table-body").flex_grow().h_full().min_w_full().child(
                             uniform_list(
                                 "table-uniform-list",
                                 render_rows_count,

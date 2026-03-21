@@ -253,6 +253,8 @@ pub(crate) struct ColGroup {
     pub(crate) width: Pixels,
     /// The bounds of the column in the table after it renders.
     pub(crate) bounds: Bounds<Pixels>,
+    /// Original min_width from the Column definition, before any user resize.
+    pub(crate) original_min_width: Pixels,
 }
 
 impl ColGroup {
