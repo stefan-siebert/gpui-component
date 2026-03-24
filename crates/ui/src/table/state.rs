@@ -1737,9 +1737,10 @@ where
                     this.when(is_selected && self.selection_mode.is_row(), |this| {
                         this.map(|this| {
                             if cx.theme().list.active_highlight {
+                                let is_first_visible = row_ix <= self.visible_range.rows.start;
                                 this.border_color(gpui::transparent_white()).child(
                                     div()
-                                        .top(if row_ix == 0 { px(0.) } else { px(-1.) })
+                                        .top(if is_first_visible { px(0.) } else { px(-1.) })
                                         .left(px(0.))
                                         .right(px(0.))
                                         .bottom(px(-1.))
@@ -1756,9 +1757,10 @@ where
                 })
                 // Row right click row style
                 .when(self.right_clicked_row == Some(row_ix), |this| {
+                    let is_first_visible = row_ix <= self.visible_range.rows.start;
                     this.border_color(gpui::transparent_white()).child(
                         div()
-                            .top(if row_ix == 0 { px(0.) } else { px(-1.) })
+                            .top(if is_first_visible { px(0.) } else { px(-1.) })
                             .left(px(0.))
                             .right(px(0.))
                             .bottom(px(-1.))
