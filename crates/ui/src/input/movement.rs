@@ -136,6 +136,14 @@ impl InputState {
     }
 
     pub(super) fn left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+        // In single-line mode, propagate when cursor is already at the start
+        if self.mode.is_single_line()
+            && self.selected_range.is_empty()
+            && self.cursor() == 0
+        {
+            cx.propagate();
+            return;
+        }
         self.pause_blink_cursor(cx);
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor()), None, cx);
@@ -145,6 +153,14 @@ impl InputState {
     }
 
     pub(super) fn right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+        // In single-line mode, propagate when cursor is already at the end
+        if self.mode.is_single_line()
+            && self.selected_range.is_empty()
+            && self.cursor() == self.text.len()
+        {
+            cx.propagate();
+            return;
+        }
         self.pause_blink_cursor(cx);
         if self.selected_range.is_empty() {
             self.move_to(self.next_boundary(self.selected_range.end), None, cx);
@@ -159,6 +175,7 @@ impl InputState {
         }
 
         if self.mode.is_single_line() {
+            cx.propagate();
             return;
         }
 
@@ -179,6 +196,7 @@ impl InputState {
         }
 
         if self.mode.is_single_line() {
+            cx.propagate();
             return;
         }
 
