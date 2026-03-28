@@ -55,6 +55,14 @@ pub struct Column {
     /// resize via the drag handle is also supported — the user-set width is
     /// kept until the table width changes again.
     pub auto_width: bool,
+    /// Number of columns this header cell spans (header-only, body cells are unaffected).
+    ///
+    /// When set to `N > 1`, the header renders a single cell covering columns
+    /// `col_ix` through `col_ix + N - 1`. The consumed columns are skipped in
+    /// the header row. Body cells (`render_td`) still render individually per column.
+    ///
+    /// Default is `1` (no spanning). Must be >= 1.
+    pub header_colspan: usize,
 }
 
 impl Default for Column {
@@ -73,6 +81,7 @@ impl Default for Column {
             min_width: px(20.0),
             max_width: px(f32::MAX),
             auto_width: false,
+            header_colspan: 1,
         }
     }
 }
@@ -206,6 +215,15 @@ impl Column {
     /// is kept until the table width changes.
     pub fn auto_width(mut self) -> Self {
         self.auto_width = true;
+        self
+    }
+
+    /// Set how many columns this header cell spans.
+    ///
+    /// Only affects the header row — body cells still render per-column.
+    /// Default is `1` (no spanning).
+    pub fn header_colspan(mut self, span: usize) -> Self {
+        self.header_colspan = span.max(1);
         self
     }
 

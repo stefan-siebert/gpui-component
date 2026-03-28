@@ -131,3 +131,5 @@ psm = { git = "https://github.com/rust-lang/stacker", branch = "master" }
 gpui = { path = "../gpui-fork/crates/gpui" }
 gpui_platform = { path = "../gpui-fork/crates/gpui_platform" }
 gpui_macros = { path = "../gpui-fork/crates/gpui_macros" }
+http_client = { path = "../gpui-fork/crates/http_client" }
+reqwest_client = { path = "../gpui-fork/crates/reqwest_client" }

@@ -1345,18 +1345,77 @@ where
         )
     }
 
+    /// Returns `(col_ix, colspan)` pairs for header rendering within the given
+    /// column index range, skipping columns consumed by a preceding colspan.
+    fn header_col_spans(&self, range: Range<usize>) -> Vec<(usize, usize)> {
+        let mut result = Vec::new();
+        let mut i = range.start;
+        while i < range.end {
+            let span = self
+                .col_groups
+                .get(i)
+                .map(|cg| cg.column.header_colspan)
+                .unwrap_or(1)
+                .min(range.end - i); // clamp to section boundary
+            result.push((i, span));
+            i += span;
+        }
+        result
+    }
+
     /// Render the column header.
     /// The children must be one by one items.
     /// Because the horizontal scroll handle will use the child_item_bounds to
     /// calculate the item position for itself's `scroll_to_item` method.
-    fn render_th(&mut self, col_ix: usize, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        colspan: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let entity_id = cx.entity_id();
         let col_group = self.col_groups.get(col_ix).expect("BUG: invalid col index");
 
-        let movable = self.col_movable && col_group.column.movable;
+        // Disable drag for spanned headers to avoid complex multi-column reorder.
+        let movable = self.col_movable && col_group.column.movable && colspan == 1;
         let paddings = col_group.column.paddings;
         let name = col_group.column.name.clone();
-        let is_auto = col_group.column.auto_width;
+
+        // Compute combined properties across the span.
+        let is_auto = self.col_groups[col_ix..col_ix + colspan]
+            .iter()
+            .any(|cg| cg.column.auto_width);
+
+        // Build the inner sizing div for the spanned header cell.
+        let cell_div = if colspan == 1 {
+            self.render_cell_flex(col_ix)
+        } else {
+            // Sum widths and min_widths across all spanned columns.
+            let total_width: Pixels = self.col_groups[col_ix..col_ix + colspan]
+                .iter()
+                .map(|cg| cg.width)
+                .sum();
+            let total_min_width: Pixels = self.col_groups[col_ix..col_ix + colspan]
+                .iter()
+                .map(|cg| cg.column.min_width)
+                .sum();
+
+            let cell = div()
+                .h_full()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .table_cell_size(self.options.size);
+
+            if is_auto {
+                cell.w(total_width).flex_1().min_w(total_min_width)
+            } else {
+                cell.w(total_width).flex_shrink_0()
+            }
+        };
+
+        // Resize handle on the last column of the span.
+        let resize_col_ix = col_ix + colspan - 1;
 
         h_flex()
             .h_full()
@@ -1364,7 +1423,7 @@ where
             // in sync with body cells (which also use flex_1 via render_cell_flex).
             .when(is_auto, |this| this.flex_1())
             .child(
-                self.render_cell_flex(col_ix)
+                cell_div
                     .id(("col-header", col_ix))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.on_col_head_click(col_ix, window, cx);
@@ -1381,7 +1440,7 @@ where
                                     self.options.size.table_cell_padding().right - paddings.right;
                                 this.pr(offset_pr.max(px(0.)))
                             })
-                            .children(self.render_sort_icon(col_ix, &col_group, window, cx)),
+                            .children(self.render_sort_icon(col_ix, col_group, window, cx)),
                     )
                     .when(movable, |this| {
                         this.on_drag(
@@ -1409,8 +1468,8 @@ where
                         ))
                     }),
             )
-            // resize handle
-            .child(self.render_resize_handle(col_ix, window, cx))
+            // resize handle on last column of span
+            .child(self.render_resize_handle(resize_col_ix, window, cx))
             // to save the bounds of this col.
             .on_prepaint({
                 let view = cx.entity().clone();
@@ -1454,12 +1513,11 @@ where
                         .h_full()
                         .bg(cx.theme().table_head)
                         .children(
-                            self.col_groups
-                                .clone()
+                            self.header_col_spans(0..left_columns_count)
                                 .into_iter()
-                                .filter(|col| col.column.fixed == Some(ColumnFixed::Left))
-                                .enumerate()
-                                .map(|(col_ix, _)| self.render_th(col_ix, window, cx)),
+                                .map(|(col_ix, colspan)| {
+                                    self.render_th(col_ix, colspan, window, cx)
+                                }),
                         )
                         .child(
                             // Fixed columns border
@@ -1492,16 +1550,14 @@ where
                         h_flex()
                             .relative()
                             .size_full()
-                            .children(
-                                self.col_groups
-                                    .clone()
+                            .children({
+                                let total_cols = self.col_groups.len();
+                                self.header_col_spans(left_columns_count..total_cols)
                                     .into_iter()
-                                    .skip(left_columns_count)
-                                    .enumerate()
-                                    .map(|(col_ix, _)| {
-                                        self.render_th(left_columns_count + col_ix, window, cx)
-                                    }),
-                            )
+                                    .map(|(col_ix, colspan)| {
+                                        self.render_th(col_ix, colspan, window, cx)
+                                    })
+                            })
                             .child(self.delegate.render_last_empty_col(window, cx))
                     }),
             )
