@@ -1408,7 +1408,7 @@ where
                 .table_cell_size(self.options.size);
 
             if is_auto {
-                cell.w(total_width).min_w(total_min_width)
+                cell.flex_1().min_w(total_min_width)
             } else {
                 cell.w(total_width).flex_shrink_0()
             }
