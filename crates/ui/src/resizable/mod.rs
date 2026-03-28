@@ -127,19 +127,24 @@ impl ResizableState {
         cx: &mut Context<Self>,
     ) {
         let size = bounds.size.along(self.axis);
+
         if self.sizes[panel_ix].as_f32() == PANEL_MIN_SIZE.as_f32() {
+            // First real layout: adopt Taffy's computed size as our basis.
             self.sizes[panel_ix] = size;
             self.panels[panel_ix].size = Some(size);
             cx.notify();
-        } else {
-            // Sync stored sizes from actual Taffy-computed bounds without
-            // triggering a re-render. This keeps sizes accurate for drag
-            // operations while avoiding the one-frame discrepancy caused by
-            // adjust_to_container_size's proportional scaling (which differs
-            // from Taffy's flex algorithm).
+        } else if self.resizing_panel_ix.is_some() {
+            // Active splitter drag: sync sizes from Taffy bounds so the drag
+            // calculation in resize_panel() has accurate values.
             self.sizes[panel_ix] = size;
             self.panels[panel_ix].size = Some(size);
         }
+        // When NOT dragging, keep the stored sizes (flex_basis) unchanged.
+        // Taffy's integer rounding gives the first panel an extra pixel on
+        // odd container widths. Feeding that back as flex_basis causes
+        // cumulative drift on every window resize frame.
+
+        // Always update bounds (used for drag hit-testing and positioning).
         self.panels[panel_ix].bounds = bounds;
         self.panels[panel_ix].size_range = size_range;
     }
