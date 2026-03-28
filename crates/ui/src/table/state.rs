@@ -1401,7 +1401,7 @@ where
                 .map(|cg| cg.column.min_width)
                 .sum();
 
-            let cell = div()
+            let cell = h_flex()
                 .h_full()
                 .overflow_hidden()
                 .whitespace_nowrap()
@@ -1430,7 +1430,8 @@ where
                     }))
                     .child(
                         h_flex()
-                            .size_full()
+                            .h_full()
+                            .flex_1()
                             .justify_between()
                             .items_center()
                             .child(self.delegate.render_th(col_ix, window, cx))
