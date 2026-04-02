@@ -12,7 +12,7 @@ use crate::{
     v_flex,
 };
 use gpui::{
-    AppContext, Axis, Bounds, ClickEvent, Context, Div, DragMoveEvent, EventEmitter, FocusHandle,
+    AnyElement, AppContext, Axis, Bounds, ClickEvent, Context, Div, DragMoveEvent, EventEmitter, FocusHandle,
     Focusable, InteractiveElement, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent,
     ParentElement, Pixels, Point, Render, ScrollStrategy, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled, Task, UniformListScrollHandle, Window, div,
@@ -1418,29 +1418,93 @@ where
         )
     }
 
+    /// Returns `(col_ix, colspan)` pairs for header rendering within the given
+    /// column index range, skipping columns consumed by a preceding colspan.
+    fn header_col_spans(&self, range: Range<usize>) -> Vec<(usize, usize)> {
+        let mut result = Vec::new();
+        let mut i = range.start;
+        while i < range.end {
+            let span = self
+                .col_groups
+                .get(i)
+                .map(|cg| cg.column.header_colspan)
+                .unwrap_or(1)
+                .min(range.end - i); // clamp to section boundary
+            result.push((i, span));
+            i += span;
+        }
+        result
+    }
+
     /// Render the column header.
     /// The children must be one by one items.
     /// Because the horizontal scroll handle will use the child_item_bounds to
     /// calculate the item position for itself's `scroll_to_item` method.
-    fn render_th(&mut self, col_ix: usize, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        colspan: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let entity_id = cx.entity_id();
         let col_group = self.col_groups.get(col_ix).expect("BUG: invalid col index");
 
-        let movable = self.col_movable && col_group.column.movable;
+        // Disable drag for spanned headers to avoid complex multi-column reorder.
+        let movable = self.col_movable && col_group.column.movable && colspan == 1;
         let paddings = col_group.column.paddings;
         let name = col_group.column.name.clone();
 
+        // Compute combined properties across the span.
+        let is_auto = self.col_groups[col_ix..col_ix + colspan]
+            .iter()
+            .any(|cg| cg.column.auto_width);
+
+        // Build the inner sizing div for the spanned header cell.
+        let cell_div = if colspan == 1 {
+            self.render_cell_flex(col_ix)
+        } else {
+            // Sum widths and min_widths across all spanned columns.
+            let total_width: Pixels = self.col_groups[col_ix..col_ix + colspan]
+                .iter()
+                .map(|cg| cg.width)
+                .sum();
+            let total_min_width: Pixels = self.col_groups[col_ix..col_ix + colspan]
+                .iter()
+                .map(|cg| cg.column.min_width)
+                .sum();
+
+            let cell = h_flex()
+                .h_full()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .table_cell_size(self.options.size);
+
+            if is_auto {
+                cell.flex_1().min_w(total_min_width)
+            } else {
+                cell.w(total_width).flex_shrink_0()
+            }
+        };
+
+        // Resize handle on the last column of the span.
+        let resize_col_ix = col_ix + colspan - 1;
+
         h_flex()
             .h_full()
+            // Always use flex_1 for auto_width columns so the header stays
+            // in sync with body cells (which also use flex_1 via render_cell_flex).
+            .when(is_auto, |this| this.flex_1())
             .child(
-                self.render_cell(None, col_ix, window, cx)
+                cell_div
                     .id(("col-header", col_ix))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.on_col_head_click(col_ix, window, cx);
                     }))
                     .child(
                         h_flex()
-                            .size_full()
+                            .h_full()
+                            .flex_1()
                             .justify_between()
                             .items_center()
                             .child(self.delegate.render_th(col_ix, window, cx))
@@ -1478,8 +1542,8 @@ where
                         ))
                     }),
             )
-            // resize handle
-            .child(self.render_resize_handle(col_ix, window, cx))
+            // resize handle on last column of span
+            .child(self.render_resize_handle(resize_col_ix, window, cx))
             // to save the bounds of this col.
             .on_prepaint({
                 let view = cx.entity().clone();
@@ -1501,7 +1565,7 @@ where
 
         let mut header = self.delegate_mut().render_header(window, cx);
         let style = header.style().clone();
-        let layout = self.header_layout.clone();
+        let has_group_headers = self.header_layout.len() > 1;
 
         header
             .h_flex()
@@ -1521,40 +1585,17 @@ where
                         .relative()
                         .h_full()
                         .bg(cx.theme().table_head)
-                        .child(
-                            v_flex().min_w_full().flex_shrink_0().children(layout.iter().enumerate().map(|(_row_ix, row_cells)| {
-                                h_flex()
-                                    .min_w_full()
-                                    .h(self.options.size.table_row_height())
-                                    .border_b_1()
-                                    .border_color(cx.theme().border)
-                                    .children(row_cells.iter().filter_map(|cell| {
-                                        if cell.start_leaf_col_ix < left_columns_count {
-                                            if cell.is_leaf {
-                                                if let Some(ix) = cell.leaf_col_ix {
-                                                    return Some(
-                                                        self.render_th(ix, window, cx)
-                                                            .into_any_element(),
-                                                    );
-                                                }
-                                            } else {
-                                                return Some(
-                                                    self.delegate_mut()
-                                                        .render_group_th(
-                                                            &cell.label,
-                                                            cell.col_span,
-                                                            cell.width,
-                                                            window,
-                                                            cx,
-                                                        )
-                                                        .into_any_element(),
-                                                );
-                                            }
-                                        }
-                                        None
-                                    }))
-                            }))
-                        )
+                        .children(if has_group_headers {
+                            self.render_group_header_cols(0..left_columns_count, window, cx)
+                        } else {
+                            self.header_col_spans(0..left_columns_count)
+                                .into_iter()
+                                .map(|(col_ix, colspan)| {
+                                    self.render_th(col_ix, colspan, window, cx)
+                                        .into_any_element()
+                                })
+                                .collect()
+                        })
                         .child(
                             // Fixed columns border
                             div()
@@ -1582,42 +1623,110 @@ where
                     .overflow_hidden()
                     .relative()
                     .bg(cx.theme().table_head)
-                    .child(
-                        v_flex().min_w_full().flex_shrink_0().children(layout.iter().enumerate().map(|(_row_ix, row_cells)| {
-                            h_flex()
-                                .min_w_full()
-                                .h(self.options.size.table_row_height())
-                                .border_b_1()
-                                .border_color(cx.theme().border)
-                                .children(row_cells.iter().filter_map(|cell| {
-                                    if cell.start_leaf_col_ix >= left_columns_count {
-                                        if cell.is_leaf {
-                                            if let Some(ix) = cell.leaf_col_ix {
-                                                return Some(
-                                                    self.render_th(ix, window, cx)
-                                                        .into_any_element(),
-                                                );
+                    .map(|this| {
+                        if has_group_headers {
+                            let layout = self.header_layout.clone();
+                            this.child(
+                                v_flex().min_w_full().flex_shrink_0().children(layout.iter().enumerate().map(|(_row_ix, row_cells)| {
+                                    h_flex()
+                                        .min_w_full()
+                                        .h(self.options.size.table_row_height())
+                                        .border_b_1()
+                                        .border_color(cx.theme().border)
+                                        .children(row_cells.iter().filter_map(|cell| {
+                                            if cell.start_leaf_col_ix >= left_columns_count {
+                                                if cell.is_leaf {
+                                                    if let Some(ix) = cell.leaf_col_ix {
+                                                        return Some(
+                                                            self.render_th(ix, 1, window, cx)
+                                                                .into_any_element(),
+                                                        );
+                                                    }
+                                                } else {
+                                                    return Some(
+                                                        self.delegate_mut()
+                                                            .render_group_th(
+                                                                &cell.label,
+                                                                cell.col_span,
+                                                                cell.width,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                            .into_any_element(),
+                                                    );
+                                                }
                                             }
-                                        } else {
-                                            return Some(
-                                                self.delegate_mut()
-                                                    .render_group_th(
-                                                        &cell.label,
-                                                        cell.col_span,
-                                                        cell.width,
-                                                        window,
-                                                        cx,
-                                                    )
-                                                    .into_any_element(),
-                                            );
-                                        }
-                                    }
-                                    None
+                                            None
+                                        }))
+                                        .child(self.delegate.render_last_empty_col(window, cx))
                                 }))
-                                .child(self.delegate.render_last_empty_col(window, cx))
-                        }))
-                    ),
+                            )
+                        } else {
+                            let total_cols = self.col_groups.len();
+                            this.child(
+                                h_flex()
+                                    .relative()
+                                    .size_full()
+                                    .children(
+                                        self.header_col_spans(left_columns_count..total_cols)
+                                            .into_iter()
+                                            .map(|(col_ix, colspan)| {
+                                                self.render_th(col_ix, colspan, window, cx)
+                                            }),
+                                    )
+                                    .child(self.delegate.render_last_empty_col(window, cx))
+                            )
+                        }
+                    }),
             )
+    }
+
+    /// Render multi-row group header columns for the given column range.
+    /// Used only when `group_headers()` returns Some.
+    fn render_group_header_cols(
+        &mut self,
+        range: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let layout = self.header_layout.clone();
+        vec![v_flex()
+            .min_w_full()
+            .flex_shrink_0()
+            .children(layout.iter().enumerate().map(|(_row_ix, row_cells)| {
+                h_flex()
+                    .min_w_full()
+                    .h(self.options.size.table_row_height())
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .children(row_cells.iter().filter_map(|cell| {
+                        if cell.start_leaf_col_ix >= range.start
+                            && cell.start_leaf_col_ix < range.end
+                        {
+                            if cell.is_leaf {
+                                if let Some(ix) = cell.leaf_col_ix {
+                                    return Some(
+                                        self.render_th(ix, 1, window, cx).into_any_element(),
+                                    );
+                                }
+                            } else {
+                                return Some(
+                                    self.delegate_mut()
+                                        .render_group_th(
+                                            &cell.label,
+                                            cell.col_span,
+                                            cell.width,
+                                            window,
+                                            cx,
+                                        )
+                                        .into_any_element(),
+                                );
+                            }
+                        }
+                        None
+                    }))
+            }))
+            .into_any_element()]
     }
 
     #[allow(clippy::too_many_arguments)]
