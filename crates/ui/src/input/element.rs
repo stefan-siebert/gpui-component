@@ -136,7 +136,7 @@ impl TextElement {
                     if let Some(line) = lines.get(line_idx) {
                         let line_start = text.line_start_offset(row);
                         let local_offset = byte_offset.saturating_sub(line_start);
-                        if let Some(pos) = line.position_for_index(local_offset, last_layout) {
+                        if let Some(pos) = line.position_for_index(local_offset, last_layout, false) {
                             return point(pos.x, y + pos.y);
                         }
                     }
@@ -178,20 +178,20 @@ impl TextElement {
                 if let Some(line) = line_layout {
                     if cursor_pos.is_none() {
                         let offset = cursor.saturating_sub(prev_lines_offset);
-                        if let Some(pos) = line.position_for_index(offset, last_layout) {
+                        if let Some(pos) = line.position_for_index(offset, last_layout, state.cursor_line_end_affinity) {
                             current_row = Some(row);
                             cursor_pos = Some(line_origin + pos);
                         }
                     }
                     if cursor_start.is_none() {
                         let offset = selected_range.start.saturating_sub(prev_lines_offset);
-                        if let Some(pos) = line.position_for_index(offset, last_layout) {
+                        if let Some(pos) = line.position_for_index(offset, last_layout, false) {
                             cursor_start = Some(line_origin + pos);
                         }
                     }
                     if cursor_end.is_none() {
                         let offset = selected_range.end.saturating_sub(prev_lines_offset);
-                        if let Some(pos) = line.position_for_index(offset, last_layout) {
+                        if let Some(pos) = line.position_for_index(offset, last_layout, false) {
                             cursor_end = Some(line_origin + pos);
                         }
                     }
@@ -350,17 +350,25 @@ impl TextElement {
 
             let line_origin = point(px(0.), offset_y);
 
-            let line_cursor_start =
-                line.position_for_index(start_ix.saturating_sub(prev_lines_offset), last_layout);
-            let line_cursor_end =
-                line.position_for_index(end_ix.saturating_sub(prev_lines_offset), last_layout);
+            let line_cursor_start = line.position_for_index(
+                start_ix.saturating_sub(prev_lines_offset),
+                last_layout,
+                false,
+            );
+            let line_cursor_end = line.position_for_index(
+                end_ix.saturating_sub(prev_lines_offset),
+                last_layout,
+                false,
+            );
 
             if line_cursor_start.is_some() || line_cursor_end.is_some() {
                 let start = line_cursor_start
-                    .unwrap_or_else(|| line.position_for_index(0, last_layout).unwrap());
+                    .unwrap_or_else(|| line.position_for_index(0, last_layout, false).unwrap());
 
-                let end = line_cursor_end
-                    .unwrap_or_else(|| line.position_for_index(line.len(), last_layout).unwrap());
+                let end = line_cursor_end.unwrap_or_else(|| {
+                    line.position_for_index(line.len(), last_layout, false)
+                        .unwrap()
+                });
 
                 // Split the selection into multiple items
                 let wrapped_lines =
@@ -1311,28 +1319,24 @@ impl Element for TextElement {
         let is_empty = text.len() == 0;
         let placeholder = self.placeholder.clone();
 
-        let mut bounds = bounds;
-
+        let text_style = window.text_style();
+        let fg = text_style.color;
         let (display_text, text_color) = if is_empty {
             (
                 &Rope::from(placeholder.as_str()),
                 cx.theme().muted_foreground,
             )
         } else if state.masked {
-            (
-                &Rope::from("*".repeat(text.chars().count())),
-                cx.theme().foreground,
-            )
+            (&Rope::from("*".repeat(text.chars().count())), fg)
         } else {
-            (&text, cx.theme().foreground)
+            (&text, fg)
         };
-
-        let text_style = window.text_style();
 
         // Calculate the width of the line numbers
         let (line_number_width, line_number_len) =
             Self::layout_line_numbers(&state, &text, text_size, &text_style, window);
 
+        let mut bounds = bounds;
         let wrap_width = if multi_line && state.soft_wrap {
             Some(bounds.size.width - line_number_width - RIGHT_MARGIN)
         } else {

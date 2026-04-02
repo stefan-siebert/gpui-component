@@ -3,7 +3,7 @@ use gpui::{
     ParentElement, Pixels, Point, Render, RenderOnce, StatefulInteractiveElement, StyleRefinement,
     Styled, Task, Window, div, prelude::FluentBuilder as _,
 };
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc};
 use instant::Duration;
 
 use crate::{Anchor, ElementExt, StyledExt as _, popover::Popover};
@@ -288,6 +288,9 @@ impl RenderOnce for HoverCard {
             return div().id("empty");
         };
 
+        let anchor = self.anchor;
+        let position = Rc::new(Cell::new(Popover::resolved_corner(anchor, trigger_bounds)));
+
         let root = div().id(self.id).child(
             div()
                 .id("trigger")
@@ -297,7 +300,9 @@ impl RenderOnce for HoverCard {
                 }))
                 .on_prepaint({
                     let state = state.clone();
+                    let position = position.clone();
                     move |bounds, _, cx| {
+                        position.set(Popover::resolved_corner(anchor, bounds));
                         state.update(cx, |state, _| {
                             state.trigger_bounds = bounds;
                         });
@@ -321,12 +326,9 @@ impl RenderOnce for HoverCard {
                 .children(self.children)
                 .refine_style(&self.style);
 
-        let mut offset_bounds = trigger_bounds;
-        offset_bounds.origin = offset_bounds.origin + self.content_offset;
-
         root.child(Popover::render_popover(
             self.anchor,
-            offset_bounds,
+            position,
             popover_content,
             window,
             cx,

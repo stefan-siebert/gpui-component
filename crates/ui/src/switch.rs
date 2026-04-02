@@ -3,7 +3,7 @@ use crate::{
     Size, StyledExt,
 };
 use gpui::{
-    div, prelude::FluentBuilder as _, px, Animation, AnimationExt as _, App, ElementId,
+    div, prelude::FluentBuilder as _, px, Animation, AnimationExt as _, App, ElementId, Hsla,
     InteractiveElement, IntoElement, ParentElement as _, RenderOnce, SharedString,
     StatefulInteractiveElement, StyleRefinement, Styled, Window,
 };
@@ -20,6 +20,7 @@ pub struct Switch {
     label_side: Side,
     on_click: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
     size: Size,
+    color: Option<Hsla>,
     tooltip: Option<SharedString>,
     tab_stop: bool,
     tab_index: isize,
@@ -38,6 +39,7 @@ impl Switch {
             on_click: None,
             label_side: Side::Right,
             size: Size::Medium,
+            color: None,
             tooltip: None,
             tab_stop: true,
             tab_index: 0,
@@ -62,6 +64,13 @@ impl Switch {
         F: Fn(&bool, &mut Window, &mut App) + 'static,
     {
         self.on_click = Some(Rc::new(handler));
+        self
+    }
+
+    /// Set the background color of the switch when checked.
+    /// Defaults to `cx.theme().primary`.
+    pub fn color(mut self, color: impl Into<Hsla>) -> Self {
+        self.color = Some(color.into());
         self
     }
 
@@ -116,8 +125,9 @@ impl RenderOnce for Switch {
             .clone();
         let is_focused = focus_handle.is_focused(window);
 
+        let checked_bg = self.color.unwrap_or(cx.theme().primary);
         let (bg, toggle_bg) = match checked {
-            true => (cx.theme().primary, cx.theme().switch_thumb),
+            true => (checked_bg, cx.theme().switch_thumb),
             false => (cx.theme().switch, cx.theme().switch_thumb),
         };
 

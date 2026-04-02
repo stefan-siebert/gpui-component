@@ -166,6 +166,16 @@ impl TableVisibleRange {
 ///     }
 /// });
 /// ```
+#[derive(Clone)]
+pub(crate) struct HeaderCell {
+    pub label: SharedString,
+    pub width: Pixels,
+    col_span: usize,
+    is_leaf: bool,
+    leaf_col_ix: Option<usize>,
+    start_leaf_col_ix: usize,
+}
+
 pub struct TableState<D: TableDelegate> {
     focus_handle: FocusHandle,
     delegate: D,
@@ -176,6 +186,7 @@ pub struct TableState<D: TableDelegate> {
     fixed_head_cols_bounds: Bounds<Pixels>,
 
     col_groups: Vec<ColGroup>,
+    header_layout: Vec<Vec<HeaderCell>>,
 
     /// Whether the table can loop selection, default is true.
     ///
@@ -185,7 +196,7 @@ pub struct TableState<D: TableDelegate> {
     pub col_selectable: bool,
     /// Whether the table can select row.
     pub row_selectable: bool,
-    /// Whether the table can select cell, default is true.
+    /// Whether the table can select cell, default is false.
     ///
     /// When enabled:
     /// - Users can click on individual cells to select them
@@ -238,6 +249,7 @@ where
             options: TableOptions::default(),
             delegate,
             col_groups: Vec::new(),
+            header_layout: Vec::new(),
             horizontal_scroll_handle: VirtualListScrollHandle::new(),
             vertical_scroll_handle: UniformListScrollHandle::new(),
             selection_mode: SelectionMode::Row,
@@ -313,7 +325,7 @@ where
         self
     }
 
-    /// Set to enable/disable cell selection, default is true.
+    /// Set to enable/disable cell selection, default is false.
     ///
     /// When enabled:
     /// - Individual cells become selectable by clicking
@@ -487,6 +499,14 @@ where
         (headers, rows)
     }
 
+    /// Re-compute the header layout from the current delegate.
+    ///
+    /// Call this after changing delegate state that affects `group_headers`.
+    pub fn refresh_header_layout(&mut self, cx: &mut Context<Self>) {
+        self.update_header_layout(cx);
+        cx.notify();
+    }
+
     fn prepare_col_groups(&mut self, cx: &mut Context<Self>) {
         self.set_col_groups_from_delegate(cx);
         cx.notify();
@@ -502,6 +522,8 @@ where
                 ColGroup { width: column.width, bounds: Bounds::default(), original_min_width: column.min_width, column }
             })
             .collect();
+
+        self.update_header_layout(cx);
     }
 
     /// Recompute widths of `auto_width` columns to fill remaining table space.
@@ -556,6 +578,56 @@ where
     /// On the very first frame, bounds aren't available yet.
     fn auto_widths_ready(&self) -> bool {
         self.prev_table_width > px(0.)
+    }
+
+    fn update_header_layout(&mut self, cx: &mut Context<Self>) {
+        let group_rows = self.delegate.group_headers(cx);
+
+        let mut layout = match group_rows.as_ref() {
+            Some(rows) => Vec::with_capacity(rows.len() + 1),
+            None => Vec::with_capacity(1),
+        };
+
+        if let Some(group_rows) = group_rows {
+            for row in group_rows {
+                let mut cell_row = Vec::with_capacity(row.len());
+                let mut current_leaf_ix = 0;
+                for group in row {
+                    let mut width = px(0.);
+                    let start_leaf_col_ix = current_leaf_ix;
+                    for i in 0..group.span {
+                        if current_leaf_ix + i < self.col_groups.len() {
+                            width += self.col_groups[current_leaf_ix + i].width;
+                        }
+                    }
+                    current_leaf_ix += group.span;
+                    cell_row.push(HeaderCell {
+                        label: group.label.clone(),
+                        width,
+                        col_span: group.span,
+                        is_leaf: false,
+                        leaf_col_ix: None,
+                        start_leaf_col_ix,
+                    });
+                }
+                layout.push(cell_row);
+            }
+        }
+
+        let mut leaf_row = Vec::with_capacity(self.col_groups.len());
+        for (ix, group) in self.col_groups.iter().enumerate() {
+            leaf_row.push(HeaderCell {
+                label: group.column.name.clone(),
+                width: group.width,
+                col_span: 1,
+                is_leaf: true,
+                leaf_col_ix: Some(ix),
+                start_leaf_col_ix: ix,
+            });
+        }
+        layout.push(leaf_row);
+
+        self.header_layout = layout;
     }
 
     fn fixed_left_cols_count(&self) -> usize {
@@ -970,27 +1042,28 @@ where
             return;
         }
 
-        let Some(col_group) = self.col_groups.get_mut(ix) else {
-            return;
-        };
+        let mut changed = false;
+        if let Some(col_group) = self.col_groups.get_mut(ix) {
+            if col_group.is_resizable() {
+                // Clamp against the original min_width (not the potentially raised one)
+                // so the user can always drag back down to the original minimum.
+                let new_width = size.clamp(col_group.original_min_width, col_group.column.max_width);
 
-        if !col_group.is_resizable() {
-            return;
+                if col_group.width != new_width {
+                    col_group.width = new_width;
+                    // For auto_width columns, update min_width so the column doesn't
+                    // auto-shrink below the user's chosen size. If the user drags
+                    // smaller, min_width follows down (but not below original).
+                    if col_group.column.auto_width {
+                        col_group.column.min_width = new_width;
+                    }
+                    changed = true;
+                }
+            }
         }
 
-        // Clamp against the original min_width (not the potentially raised one)
-        // so the user can always drag back down to the original minimum.
-        let new_width = size.clamp(col_group.original_min_width, col_group.column.max_width);
-
-        // Only update if it actually changed
-        if col_group.width != new_width {
-            col_group.width = new_width;
-            // For auto_width columns, update min_width so the column doesn't
-            // auto-shrink below the user's chosen size. If the user drags
-            // smaller, min_width follows down (but not below original).
-            if col_group.column.auto_width {
-                col_group.column.min_width = new_width;
-            }
+        if changed {
+            self.update_header_layout(cx);
             cx.notify();
         }
     }
@@ -1345,93 +1418,29 @@ where
         )
     }
 
-    /// Returns `(col_ix, colspan)` pairs for header rendering within the given
-    /// column index range, skipping columns consumed by a preceding colspan.
-    fn header_col_spans(&self, range: Range<usize>) -> Vec<(usize, usize)> {
-        let mut result = Vec::new();
-        let mut i = range.start;
-        while i < range.end {
-            let span = self
-                .col_groups
-                .get(i)
-                .map(|cg| cg.column.header_colspan)
-                .unwrap_or(1)
-                .min(range.end - i); // clamp to section boundary
-            result.push((i, span));
-            i += span;
-        }
-        result
-    }
-
     /// Render the column header.
     /// The children must be one by one items.
     /// Because the horizontal scroll handle will use the child_item_bounds to
     /// calculate the item position for itself's `scroll_to_item` method.
-    fn render_th(
-        &mut self,
-        col_ix: usize,
-        colspan: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    fn render_th(&mut self, col_ix: usize, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let entity_id = cx.entity_id();
         let col_group = self.col_groups.get(col_ix).expect("BUG: invalid col index");
 
-        // Disable drag for spanned headers to avoid complex multi-column reorder.
-        let movable = self.col_movable && col_group.column.movable && colspan == 1;
+        let movable = self.col_movable && col_group.column.movable;
         let paddings = col_group.column.paddings;
         let name = col_group.column.name.clone();
 
-        // Compute combined properties across the span.
-        let is_auto = self.col_groups[col_ix..col_ix + colspan]
-            .iter()
-            .any(|cg| cg.column.auto_width);
-
-        // Build the inner sizing div for the spanned header cell.
-        let cell_div = if colspan == 1 {
-            self.render_cell_flex(col_ix)
-        } else {
-            // Sum widths and min_widths across all spanned columns.
-            let total_width: Pixels = self.col_groups[col_ix..col_ix + colspan]
-                .iter()
-                .map(|cg| cg.width)
-                .sum();
-            let total_min_width: Pixels = self.col_groups[col_ix..col_ix + colspan]
-                .iter()
-                .map(|cg| cg.column.min_width)
-                .sum();
-
-            let cell = h_flex()
-                .h_full()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .table_cell_size(self.options.size);
-
-            if is_auto {
-                cell.flex_1().min_w(total_min_width)
-            } else {
-                cell.w(total_width).flex_shrink_0()
-            }
-        };
-
-        // Resize handle on the last column of the span.
-        let resize_col_ix = col_ix + colspan - 1;
-
         h_flex()
             .h_full()
-            // Always use flex_1 for auto_width columns so the header stays
-            // in sync with body cells (which also use flex_1 via render_cell_flex).
-            .when(is_auto, |this| this.flex_1())
             .child(
-                cell_div
+                self.render_cell(None, col_ix, window, cx)
                     .id(("col-header", col_ix))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.on_col_head_click(col_ix, window, cx);
                     }))
                     .child(
                         h_flex()
-                            .h_full()
-                            .flex_1()
+                            .size_full()
                             .justify_between()
                             .items_center()
                             .child(self.delegate.render_th(col_ix, window, cx))
@@ -1441,7 +1450,7 @@ where
                                     self.options.size.table_cell_padding().right - paddings.right;
                                 this.pr(offset_pr.max(px(0.)))
                             })
-                            .children(self.render_sort_icon(col_ix, col_group, window, cx)),
+                            .children(self.render_sort_icon(col_ix, &col_group, window, cx)),
                     )
                     .when(movable, |this| {
                         this.on_drag(
@@ -1469,8 +1478,8 @@ where
                         ))
                     }),
             )
-            // resize handle on last column of span
-            .child(self.render_resize_handle(resize_col_ix, window, cx))
+            // resize handle
+            .child(self.render_resize_handle(col_ix, window, cx))
             // to save the bounds of this col.
             .on_prepaint({
                 let view = cx.entity().clone();
@@ -1492,14 +1501,13 @@ where
 
         let mut header = self.delegate_mut().render_header(window, cx);
         let style = header.style().clone();
+        let layout = self.header_layout.clone();
 
         header
             .h_flex()
             .w_full()
-            .h(self.options.size.table_row_height())
             .flex_shrink_0()
-            .border_b_1()
-            .border_color(cx.theme().border)
+            .bg(cx.theme().table_head)
             .text_color(cx.theme().table_head_foreground)
             .refine_style(&style)
             .when(self.cell_selectable, |this| {
@@ -1513,12 +1521,39 @@ where
                         .relative()
                         .h_full()
                         .bg(cx.theme().table_head)
-                        .children(
-                            self.header_col_spans(0..left_columns_count)
-                                .into_iter()
-                                .map(|(col_ix, colspan)| {
-                                    self.render_th(col_ix, colspan, window, cx)
-                                }),
+                        .child(
+                            v_flex().min_w_full().flex_shrink_0().children(layout.iter().enumerate().map(|(_row_ix, row_cells)| {
+                                h_flex()
+                                    .min_w_full()
+                                    .h(self.options.size.table_row_height())
+                                    .border_b_1()
+                                    .border_color(cx.theme().border)
+                                    .children(row_cells.iter().filter_map(|cell| {
+                                        if cell.start_leaf_col_ix < left_columns_count {
+                                            if cell.is_leaf {
+                                                if let Some(ix) = cell.leaf_col_ix {
+                                                    return Some(
+                                                        self.render_th(ix, window, cx)
+                                                            .into_any_element(),
+                                                    );
+                                                }
+                                            } else {
+                                                return Some(
+                                                    self.delegate_mut()
+                                                        .render_group_th(
+                                                            &cell.label,
+                                                            cell.col_span,
+                                                            cell.width,
+                                                            window,
+                                                            cx,
+                                                        )
+                                                        .into_any_element(),
+                                                );
+                                            }
+                                        }
+                                        None
+                                    }))
+                            }))
                         )
                         .child(
                             // Fixed columns border
@@ -1547,20 +1582,41 @@ where
                     .overflow_hidden()
                     .relative()
                     .bg(cx.theme().table_head)
-                    .child({
-                        h_flex()
-                            .relative()
-                            .size_full()
-                            .children({
-                                let total_cols = self.col_groups.len();
-                                self.header_col_spans(left_columns_count..total_cols)
-                                    .into_iter()
-                                    .map(|(col_ix, colspan)| {
-                                        self.render_th(col_ix, colspan, window, cx)
-                                    })
-                            })
-                            .child(self.delegate.render_last_empty_col(window, cx))
-                    }),
+                    .child(
+                        v_flex().min_w_full().flex_shrink_0().children(layout.iter().enumerate().map(|(_row_ix, row_cells)| {
+                            h_flex()
+                                .min_w_full()
+                                .h(self.options.size.table_row_height())
+                                .border_b_1()
+                                .border_color(cx.theme().border)
+                                .children(row_cells.iter().filter_map(|cell| {
+                                    if cell.start_leaf_col_ix >= left_columns_count {
+                                        if cell.is_leaf {
+                                            if let Some(ix) = cell.leaf_col_ix {
+                                                return Some(
+                                                    self.render_th(ix, window, cx)
+                                                        .into_any_element(),
+                                                );
+                                            }
+                                        } else {
+                                            return Some(
+                                                self.delegate_mut()
+                                                    .render_group_th(
+                                                        &cell.label,
+                                                        cell.col_span,
+                                                        cell.width,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                    .into_any_element(),
+                                            );
+                                        }
+                                    }
+                                    None
+                                }))
+                                .child(self.delegate.render_last_empty_col(window, cx))
+                        }))
+                    ),
             )
     }
 
@@ -1924,11 +1980,11 @@ where
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
+        let header_rows = self.header_layout.len().max(1);
         Some(
             div()
-                .occlude()
                 .absolute()
-                .top(self.options.size.table_row_height())
+                .top(self.options.size.table_row_height() * header_rows as f32)
                 .right_0()
                 .bottom_0()
                 .w(Scrollbar::width())
@@ -1942,7 +1998,6 @@ where
         _: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
-            .occlude()
             .absolute()
             .left(self.fixed_head_cols_bounds.size.width)
             .right_0()

@@ -4,7 +4,7 @@ use gpui::{
     ParentElement, Pixels, Point, Render, RenderOnce, Stateful, StyleRefinement, Styled,
     Subscription, Window, deferred, div, prelude::FluentBuilder as _, px,
 };
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc};
 
 use crate::{
     Anchor, ElementExt, Selectable, StyledExt as _, actions::Cancel, anchored,
@@ -170,7 +170,7 @@ impl Popover {
         self
     }
 
-    fn resolved_corner(anchor: Anchor, trigger_bounds: Bounds<Pixels>) -> Point<Pixels> {
+    pub(crate) fn resolved_corner(anchor: Anchor, trigger_bounds: Bounds<Pixels>) -> Point<Pixels> {
         let offset = if anchor.is_center() {
             gpui::point(trigger_bounds.size.width.half(), px(0.))
         } else {
@@ -201,10 +201,10 @@ impl Styled for Popover {
 pub struct PopoverState {
     focus_handle: FocusHandle,
     pub(crate) tracked_focus_handle: Option<FocusHandle>,
+    previous_focus_handle: Option<FocusHandle>,
     trigger_bounds: Bounds<Pixels>,
     open: bool,
     on_open_change: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
-    previous_focus: Option<FocusHandle>,
 
     _dismiss_subscription: Option<Subscription>,
 }
@@ -214,10 +214,10 @@ impl PopoverState {
         Self {
             focus_handle: cx.focus_handle(),
             tracked_focus_handle: None,
+            previous_focus_handle: None,
             trigger_bounds: Bounds::default(),
             open: default_open,
             on_open_change: None,
-            previous_focus: None,
             _dismiss_subscription: None,
         }
     }
@@ -251,11 +251,13 @@ impl PopoverState {
     }
 
     fn toggle_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_open(!self.open, cx);
+        let opening = !self.open;
+        if opening {
+            // Save the focused element before opening, so we can restore it on close.
+            self.previous_focus_handle = window.focused(cx);
+        }
+        self.set_open(opening, cx);
         if self.open {
-            // Save current focus so we can restore it when the popover closes.
-            self.previous_focus = window.focused(cx);
-
             let state = cx.entity();
             let focus_handle = if let Some(tracked_focus_handle) = self.tracked_focus_handle.clone()
             {
@@ -276,10 +278,11 @@ impl PopoverState {
                 );
         } else {
             self._dismiss_subscription = None;
-
             // Restore focus to the element that was focused before the popover opened.
-            if let Some(previous_focus) = self.previous_focus.take() {
-                previous_focus.focus(window, cx);
+            if let Some(prev) = self.previous_focus_handle.take() {
+                if self.focus_handle.contains_focused(window, cx) {
+                    prev.focus(window, cx);
+                }
             }
         }
 
@@ -311,7 +314,7 @@ impl EventEmitter<DismissEvent> for PopoverState {}
 impl Popover {
     pub(crate) fn render_popover<E>(
         anchor: Anchor,
-        trigger_bounds: Bounds<Pixels>,
+        position: Rc<Cell<Point<Pixels>>>,
         content: E,
         _: &mut Window,
         _: &mut App,
@@ -323,7 +326,7 @@ impl Popover {
             anchored()
                 .snap_to_window_with_margin(px(8.))
                 .anchor(anchor)
-                .position(Self::resolved_corner(anchor, trigger_bounds))
+                .position_fn(move || position.get())
                 .child(div().relative().child(content)),
         )
         .with_priority(1)
@@ -376,6 +379,10 @@ impl RenderOnce for Popover {
 
         let parent_view_id = window.current_view();
 
+        // Shared cell so the deferred Anchored element can read the real trigger bounds at
+        // prepaint time (after trigger's on_prepaint has already fired with the correct bounds).
+        let position = Rc::new(Cell::new(Self::resolved_corner(self.anchor, trigger_bounds)));
+
         let el = div()
             .id(self.id)
             .child((trigger)(open, window, cx))
@@ -415,10 +422,15 @@ impl RenderOnce for Popover {
             })
             .on_prepaint({
                 let state = state.clone();
+                let position = position.clone();
+                let anchor = self.anchor;
                 move |bounds, _, cx| {
+                    // Update the shared cell so the deferred Anchored element reads the correct
+                    // position when its prepaint runs (deferred prepaint happens after this).
+                    position.set(Self::resolved_corner(anchor, bounds));
                     state.update(cx, |state, _| {
                         state.trigger_bounds = bounds;
-                    })
+                    });
                 }
             });
 
@@ -450,7 +462,7 @@ impl RenderOnce for Popover {
 
         el.child(Self::render_popover(
             self.anchor,
-            trigger_bounds,
+            position,
             popover_content,
             window,
             cx,
