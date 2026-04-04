@@ -180,7 +180,7 @@ impl SettingItem {
                         v_flex()
                             .map(|this| {
                                 if layout.is_horizontal() {
-                                    this.flex_1().max_w_3_5()
+                                    this.flex_1().max_w_3_5().min_w_0()
                                 } else {
                                     this.w_full()
                                 }
@@ -197,12 +197,23 @@ impl SettingItem {
                                 )
                             }),
                     )
-                    .child(div().id("field").child(Self::render_field(
-                        field,
-                        RenderOptions { layout, ..*options },
-                        window,
-                        cx,
-                    )))
+                    .child(
+                        div()
+                            .id("field")
+                            .map(|this| {
+                                if layout.is_horizontal() {
+                                    this.flex_1().h_flex().justify_end()
+                                } else {
+                                    this
+                                }
+                            })
+                            .child(Self::render_field(
+                                field,
+                                RenderOptions { layout, ..*options },
+                                window,
+                                cx,
+                            )),
+                    )
                     .into_any_element(),
                 SettingItem::Element { render } => {
                     (render)(&options, window, cx).into_any_element()
