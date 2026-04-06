@@ -63,6 +63,8 @@ impl RenderOnce for Checkerboard {
                                         border_widths: gpui::Edges::default(),
                                         border_color: gpui::transparent_black(),
                                         border_style: gpui::BorderStyle::default(),
+                                        effect_type: 0,
+                                        effect_params: [0.0; 4],
                                     });
                                 }
                             }

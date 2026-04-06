@@ -5,9 +5,9 @@ use crate::{
 };
 use gpui::{
     AnyElement, App, ClickEvent, Context, Hsla, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Pixels, Point, Render, RenderOnce, StatefulInteractiveElement as _,
-    StyleRefinement, Styled, TitlebarOptions, Window, WindowControlArea, div,
-    prelude::FluentBuilder as _, px,
+    MAX_BUTTONS_PER_SIDE, MouseButton, ParentElement, Pixels, Point, Render, RenderOnce,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, TitlebarOptions, Window,
+    WindowButton, WindowButtonLayout, WindowControlArea, div, prelude::FluentBuilder as _, px,
 };
 use smallvec::SmallVec;
 
@@ -25,6 +25,10 @@ pub struct TitleBar {
     style: StyleRefinement,
     children: SmallVec<[AnyElement; 1]>,
     on_close_window: Option<Rc<Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>>>,
+    button_layout: Option<WindowButtonLayout>,
+    /// Optional centered title overlay — rendered absolutely across the full
+    /// titlebar width so it stays visually centered regardless of controls.
+    title_overlay: Option<AnyElement>,
 }
 
 impl TitleBar {
@@ -34,6 +38,8 @@ impl TitleBar {
             style: StyleRefinement::default(),
             children: SmallVec::new(),
             on_close_window: None,
+            button_layout: None,
+            title_overlay: None,
         }
     }
 
@@ -55,6 +61,26 @@ impl TitleBar {
         if !cfg!(target_os = "macos") {
             self.on_close_window = Some(Rc::new(Box::new(f)));
         }
+        self
+    }
+
+    /// Set the window button layout for platform-aware control placement.
+    ///
+    /// On Linux, this determines which window control buttons appear on
+    /// which side of the titlebar. Pass `cx.button_layout()` to follow the
+    /// desktop environment's configuration (GNOME, KDE, COSMIC, etc.).
+    ///
+    /// If not set, falls back to `cx.button_layout()` at render time.
+    /// If that also returns `None`, defaults to right-side controls.
+    pub fn button_layout(mut self, layout: Option<WindowButtonLayout>) -> Self {
+        self.button_layout = layout;
+        self
+    }
+
+    /// Set a centered title element that stays at the visual center of the
+    /// titlebar regardless of window control placement (left or right).
+    pub fn title(mut self, element: impl IntoElement) -> Self {
+        self.title_overlay = Some(element.into_any_element());
         self
     }
 }
@@ -100,11 +126,20 @@ impl ControlIcon {
     }
 
     fn icon(&self) -> IconName {
-        match self {
-            Self::Minimize => IconName::WindowMinimize,
-            Self::Restore => IconName::WindowRestore,
-            Self::Maximize => IconName::WindowMaximize,
-            Self::Close { .. } => IconName::WindowClose,
+        if cfg!(target_os = "linux") {
+            match self {
+                Self::Minimize => IconName::GenericMinimize,
+                Self::Restore => IconName::GenericRestore,
+                Self::Maximize => IconName::GenericMaximize,
+                Self::Close { .. } => IconName::GenericClose,
+            }
+        } else {
+            match self {
+                Self::Minimize => IconName::WindowMinimize,
+                Self::Restore => IconName::WindowRestore,
+                Self::Maximize => IconName::WindowMaximize,
+                Self::Close { .. } => IconName::WindowClose,
+            }
         }
     }
 
@@ -227,31 +262,42 @@ impl RenderOnce for ControlIcon {
 
 #[derive(IntoElement)]
 struct WindowControls {
+    id: &'static str,
+    buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
     on_close_window: Option<Rc<Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>>>,
 }
 
 impl RenderOnce for WindowControls {
     fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
         let is_linux = cfg!(target_os = "linux");
+        let is_maximized = window.is_maximized();
+        let on_close = self.on_close_window;
 
-        if cfg!(target_os = "macos") {
-            return div().id("window-controls");
-        }
+        let icons: Vec<ControlIcon> = self
+            .buttons
+            .iter()
+            .filter_map(|b| *b)
+            .map(|button| match button {
+                WindowButton::Minimize => ControlIcon::minimize(),
+                WindowButton::Maximize => {
+                    if is_maximized {
+                        ControlIcon::restore()
+                    } else {
+                        ControlIcon::maximize()
+                    }
+                }
+                WindowButton::Close => ControlIcon::close(on_close.clone()),
+            })
+            .collect();
 
         h_flex()
-            .id("window-controls")
+            .id(self.id)
             .items_center()
             .flex_shrink_0()
             .h_full()
             // Linux: spaced rounded buttons with padding
-            .when(is_linux, |this| this.gap_2().pl_2().pr_3())
-            .child(ControlIcon::minimize())
-            .child(if window.is_maximized() {
-                ControlIcon::restore()
-            } else {
-                ControlIcon::maximize()
-            })
-            .child(ControlIcon::close(self.on_close_window))
+            .when(is_linux, |this| this.gap_2().px_3())
+            .children(icons)
     }
 }
 
@@ -286,6 +332,42 @@ impl Render for TitleBarState {
 impl RenderOnce for TitleBar {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let is_macos = cfg!(target_os = "macos");
+        let is_linux = cfg!(target_os = "linux");
+
+        // Determine effective button layout for window controls placement.
+        // On macOS: native traffic lights, no custom controls needed.
+        // On Linux: follow DE configuration via XDG Desktop Portal.
+        // On Windows: always right-side controls.
+        let button_layout = if is_macos {
+            None
+        } else if is_linux {
+            Some(
+                self.button_layout
+                    .or_else(|| cx.button_layout())
+                    .unwrap_or(WindowButtonLayout {
+                        left: [None; MAX_BUTTONS_PER_SIDE],
+                        right: [
+                            Some(WindowButton::Minimize),
+                            Some(WindowButton::Maximize),
+                            Some(WindowButton::Close),
+                        ],
+                    }),
+            )
+        } else {
+            // Windows: always right-side
+            Some(WindowButtonLayout {
+                left: [None; MAX_BUTTONS_PER_SIDE],
+                right: [
+                    Some(WindowButton::Minimize),
+                    Some(WindowButton::Maximize),
+                    Some(WindowButton::Close),
+                ],
+            })
+        };
+
+        let has_left_controls = button_layout
+            .as_ref()
+            .is_some_and(|l| l.left.iter().any(|b| b.is_some()));
 
         let state = window.use_state(cx, |_, _| TitleBarState {
             should_move: false,
@@ -304,7 +386,8 @@ impl RenderOnce for TitleBar {
             .window_control_area(WindowControlArea::Drag)
             .w_full()
             .h(TITLE_BAR_HEIGHT)
-            .pl(TITLE_BAR_LEFT_PADDING)
+            // Left padding: skip if left window controls will provide spacing
+            .when(!has_left_controls, |this| this.pl(TITLE_BAR_LEFT_PADDING))
             .border_b_1()
             .border_color(cx.theme().title_bar_border)
             .bg(cx.theme().title_bar)
@@ -430,7 +513,34 @@ impl RenderOnce for TitleBar {
             })
             // content_stretch ensures empty space in children is still clickable
             .content_stretch()
-            // Children container - plain div, no event handlers
+            // Title overlay — absolutely centered across the full titlebar width.
+            // Rendered first (z-bottom); interactive elements render on top.
+            .when_some(self.title_overlay, |el, title| {
+                el.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(title),
+                )
+            })
+            // Left window controls (e.g. GNOME with close on left)
+            .when_some(
+                button_layout.filter(|l| l.left.iter().any(|b| b.is_some())),
+                |el, layout| {
+                    el.child(WindowControls {
+                        id: "window-controls-left",
+                        buttons: layout.left,
+                        on_close_window: self.on_close_window.clone(),
+                    })
+                },
+            )
+            // Children container — in the flex flow, respects control spacing
             .child(
                 div()
                     .flex()
@@ -443,10 +553,17 @@ impl RenderOnce for TitleBar {
                     .when(window.is_fullscreen(), |this| this.pl_3())
                     .children(self.children),
             )
-            // Window controls (minimize, maximize, close)
-            .child(WindowControls {
-                on_close_window: self.on_close_window,
-            })
+            // Right window controls (standard: minimize, maximize, close)
+            .when_some(
+                button_layout.filter(|l| l.right.iter().any(|b| b.is_some())),
+                |el, layout| {
+                    el.child(WindowControls {
+                        id: "window-controls-right",
+                        buttons: layout.right,
+                        on_close_window: self.on_close_window.clone(),
+                    })
+                },
+            )
     }
 }
 
