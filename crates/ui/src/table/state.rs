@@ -1571,6 +1571,15 @@ where
             .h_flex()
             .w_full()
             .flex_shrink_0()
+            // Single-row header: restore the explicit height + bottom border
+            // that the multi-row header refactor removed. The multi-row path
+            // draws per-row borders inside its v_flex, so we only apply here
+            // when there are no group headers.
+            .when(!has_group_headers, |this| {
+                this.h(self.options.size.table_row_height())
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+            })
             .bg(cx.theme().table_head)
             .text_color(cx.theme().table_head_foreground)
             .refine_style(&style)
