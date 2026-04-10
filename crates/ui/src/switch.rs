@@ -1,5 +1,5 @@
 use crate::{
-    h_flex, text::Text, tooltip::Tooltip, ActiveTheme, Disableable, FocusableExt, Side, Sizable,
+    h_flex, text::Text, tooltip::Tooltip, ActiveTheme, Disableable, Side, Sizable,
     Size, StyledExt,
 };
 use gpui::{
@@ -167,8 +167,6 @@ impl RenderOnce for Switch {
                             .tab_index(self.tab_index),
                     )
                 })
-                .rounded(radius)
-                .focus_ring(is_focused, px(2.), window, cx)
                 .when(self.label_side.is_left(), |this| this.flex_row_reverse())
                 .child(
                     // Switch Bar (needs its own id for tooltip support)
@@ -182,7 +180,11 @@ impl RenderOnce for Switch {
                         .flex()
                         .items_center()
                         .border(inset)
-                        .border_color(cx.theme().transparent)
+                        .border_color(if is_focused {
+                            cx.theme().ring
+                        } else {
+                            cx.theme().transparent
+                        })
                         .bg(bg)
                         .when_some(self.tooltip.clone(), |this, tooltip| {
                             this.tooltip(move |window, cx| {
