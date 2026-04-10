@@ -25,6 +25,7 @@ pub struct BreadcrumbItem {
     style: StyleRefinement,
     label: SharedString,
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+    on_hover: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
     disabled: bool,
     is_last: bool,
     max_label_chars: Option<usize>,
@@ -38,6 +39,7 @@ impl BreadcrumbItem {
             style: StyleRefinement::default(),
             label: label.into(),
             on_click: None,
+            on_hover: None,
             disabled: false,
             is_last: false,
             max_label_chars: None,
@@ -63,6 +65,14 @@ impl BreadcrumbItem {
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_click = Some(Rc::new(on_click));
+        self
+    }
+
+    pub fn on_hover(
+        mut self,
+        on_hover: impl Fn(&bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_hover = Some(Rc::new(on_hover));
         self
     }
 
@@ -142,6 +152,11 @@ impl RenderOnce for BreadcrumbItem {
                 this.text_color(cx.theme().muted_foreground)
             })
             .refine_style(&self.style)
+            .when_some(self.on_hover, |this, on_hover| {
+                this.on_hover(move |hovered, window, cx| {
+                    on_hover(hovered, window, cx);
+                })
+            })
             .when(!self.disabled, |this| {
                 this.when_some(self.on_click, |this, on_click| {
                     this.cursor_pointer().on_click(move |event, window, cx| {
