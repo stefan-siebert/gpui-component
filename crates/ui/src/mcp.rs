@@ -1342,11 +1342,16 @@ fn handle_list_actions(
         serde_json::from_value(params.clone()).unwrap_or(ListActionsParams {
             filter: None,
             include_bindings: false,
+            only_available: false,
+            window_id: None,
         });
 
-    let all_names = cx.all_action_names();
+    // Take an owned copy of action names so we can release the immutable
+    // borrow on cx before calling resolve_window() / handle.update() for
+    // the only_available path.
+    let all_names: Vec<&'static str> = cx.all_action_names().to_vec();
 
-    let filtered_names: Vec<&str> = if let Some(ref filter) = opts.filter {
+    let filtered_names: Vec<&'static str> = if let Some(ref filter) = opts.filter {
         let filter_lower = filter.to_lowercase();
         all_names
             .iter()
@@ -1354,10 +1359,52 @@ fn handle_list_actions(
             .copied()
             .collect()
     } else {
-        all_names.to_vec()
+        all_names.clone()
     };
 
-    if !opts.include_bindings {
+    // Resolve available actions if requested: walk the focus chain's key
+    // contexts and collect action names whose binding predicate matches.
+    // `only_available` implies we must return bindings, since filtering
+    // depends on them.
+    let available_action_names: Option<std::collections::HashSet<String>> = if opts.only_available
+    {
+        let handle = resolve_window(opts.window_id.as_deref(), cx)?;
+        let contexts: Vec<gpui::KeyContext> = handle
+            .update(cx, |_, window, _cx| window.context_stack())
+            .map_err(|e| e.to_string())?;
+
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        let mut names = std::collections::HashSet::new();
+        for binding in keymap.bindings() {
+            let matches = match binding.predicate() {
+                None => true, // global binding — always active
+                Some(pred) => pred.eval(&contexts),
+            };
+            if matches {
+                names.insert(binding.action().name().to_string());
+            }
+        }
+        Some(names)
+    } else {
+        None
+    };
+
+    let filtered_names: Vec<&str> = if let Some(ref available) = available_action_names {
+        filtered_names
+            .into_iter()
+            .filter(|name| available.contains(*name))
+            .collect()
+    } else {
+        filtered_names
+    };
+
+    // only_available implies include_bindings (the result is only useful
+    // with the binding info attached — otherwise the LLM can't see WHY
+    // each action is available).
+    let include_bindings = opts.include_bindings || opts.only_available;
+
+    if !include_bindings {
         return Ok(json!({
             "actions": filtered_names,
             "count": filtered_names.len(),
