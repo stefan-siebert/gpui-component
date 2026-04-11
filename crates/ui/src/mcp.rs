@@ -284,10 +284,29 @@ fn resolve_window(
         .ok_or_else(|| "No windows available".to_string())
 }
 
+/// Returns the id of the window that driver tools will target when no
+/// explicit window_id is provided. Priority mirrors `resolve_window(None, _)`:
+/// OS-focused window → first window → None.
+///
+/// This is what MCP consumers actually care about for the `active_window` /
+/// `is_active` fields: "which window will my commands hit?" — which differs
+/// from `cx.active_window()` when the app itself is OS-backgrounded (e.g.
+/// an Elane window exists but the LLM's terminal has OS focus). In that
+/// case `cx.active_window()` returns None but the first available window
+/// is still the correct dispatch target.
+fn default_target_window_id(cx: &mut App) -> Option<gpui::WindowId> {
+    if let Some(handle) = cx.active_window() {
+        return Some(handle.window_id());
+    }
+    cx.windows().into_iter().next().map(|h| h.window_id())
+}
+
 // ===== Handler Implementations =====
 
 fn handle_get_windows(cx: &mut App) -> Result<serde_json::Value, String> {
-    let active_window_id = cx.active_window().map(|w| w.window_id());
+    // `is_active` reports "this window is the default dispatch target",
+    // not "this window has OS focus". See `default_target_window_id`.
+    let active_window_id = default_target_window_id(cx);
 
     let windows: Vec<WindowInfo> = cx
         .windows()
@@ -426,9 +445,11 @@ fn handle_send_key(
 
     let keystroke = Keystroke::parse(&keystroke_str).map_err(|e| format!("{:?}", e))?;
 
-    let Some(handle) = cx.active_window() else {
-        return Err("No active window".into());
-    };
+    // Use resolve_window() for consistent fallback behavior with the other
+    // driver handlers (click/type/screenshot/execute_action). This lets the
+    // LLM drive the app even when it's OS-backgrounded — the app's own
+    // window is still a valid dispatch target.
+    let handle = resolve_window(event.window_id.as_deref(), cx)?;
 
     let dispatched = handle
         .update(cx, |_, window, cx| {
@@ -488,7 +509,9 @@ fn handle_type_text(
 }
 
 fn handle_get_app_state(cx: &mut App) -> Result<serde_json::Value, String> {
-    let active_window_id = cx.active_window().map(|w| format!("{:?}", w.window_id()));
+    // `active_window` reports the default dispatch target, which falls back
+    // to "first window" when the app is OS-backgrounded. See `default_target_window_id`.
+    let active_window_id = default_target_window_id(cx).map(|id| format!("{:?}", id));
     let window_count = cx.windows().len();
 
     let windows: Vec<serde_json::Value> = cx
@@ -551,7 +574,8 @@ fn handle_inspect_ui_tree(
         });
 
     let compact = opts.format.as_deref() == Some("compact");
-    let active_window_id = cx.active_window().map(|w| w.window_id());
+    // `is_active` reports default dispatch target, not OS focus. See `default_target_window_id`.
+    let active_window_id = default_target_window_id(cx);
 
     let windows: Vec<gpui::AnyWindowHandle> = if let Some(ref wid) = opts.window_id {
         // Only the requested window
