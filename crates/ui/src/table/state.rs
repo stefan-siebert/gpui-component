@@ -220,6 +220,8 @@ pub struct TableState<D: TableDelegate> {
     selection_mode: SelectionMode,
     right_clicked_row: Option<usize>,
     right_clicked_cell: Option<(usize, usize)>,
+    /// Column index hit by the last left-click (resolved from mouse position).
+    last_clicked_col: Option<usize>,
     selected_col: Option<usize>,
     selected_cell: Option<(usize, usize)>,
 
@@ -255,6 +257,7 @@ where
             selection_mode: SelectionMode::Row,
             selected_row: None,
             right_clicked_row: None,
+            last_clicked_col: None,
             right_clicked_cell: None,
             selected_col: None,
             selected_cell: None,
@@ -396,6 +399,13 @@ where
     /// Returns the row that has been right clicked.
     pub fn right_clicked_row(&self) -> Option<usize> {
         self.right_clicked_row
+    }
+
+    /// Returns the column index hit by the last left-click, resolved from
+    /// the mouse position against column bounds. `None` if no click occurred
+    /// yet or the position didn't match any column.
+    pub fn last_clicked_col(&self) -> Option<usize> {
+        self.last_clicked_col
     }
 
     /// Returns the selected column index.
@@ -685,6 +695,17 @@ where
         if !self.row_selectable {
             return;
         }
+
+        // Determine which column was clicked from the mouse position
+        let click_x = e.position().x;
+        self.last_clicked_col = self
+            .col_groups
+            .iter()
+            .position(|cg| {
+                let left = cg.bounds.origin.x;
+                let right = left + cg.bounds.size.width;
+                click_x >= left && click_x < right
+            });
 
         self.set_selected_row(row_ix, cx);
 
