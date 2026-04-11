@@ -301,6 +301,34 @@ fn default_target_window_id(cx: &mut App) -> Option<gpui::WindowId> {
     cx.windows().into_iter().next().map(|h| h.window_id())
 }
 
+/// Attach post-dispatch state (`app_state` + `focus_info`) to a driver
+/// response.
+///
+/// The MCP driver handlers (`execute_action`, `send_key`, `click_element`,
+/// `type_text`) are almost always followed by a `get_app_state` +
+/// `get_focus_info` call to answer "what changed?". Inlining both into
+/// the driver response halves the round-trips for the most common pattern.
+///
+/// `window_id` is the window the action targeted; it's used to scope
+/// `focus_info` to the same window. Pass `None` to use the default target.
+fn attach_post_state(
+    mut response: serde_json::Value,
+    window_id: Option<&str>,
+    cx: &mut App,
+) -> serde_json::Value {
+    let app_state = handle_get_app_state(cx).unwrap_or(serde_json::Value::Null);
+
+    let focus_params = json!({ "window_id": window_id });
+    let focus_info = handle_get_focus_info(&focus_params, cx).unwrap_or(serde_json::Value::Null);
+
+    if let Some(obj) = response.as_object_mut() {
+        obj.insert("app_state".into(), app_state);
+        obj.insert("focus_info".into(), focus_info);
+    }
+
+    response
+}
+
 // ===== Handler Implementations =====
 
 fn handle_get_windows(cx: &mut App) -> Result<serde_json::Value, String> {
@@ -375,7 +403,7 @@ fn handle_click_element(
             .as_object_mut()
             .map(|o| o.insert("resolved_element".into(), json!(id)));
     }
-    Ok(result)
+    Ok(attach_post_state(result, event.window_id.as_deref(), cx))
 }
 
 /// Resolve the center point of an element by ID.
@@ -458,7 +486,12 @@ fn handle_send_key(
         .map_err(|e| e.to_string())?;
 
     mcp_log(format!("Key '{}' dispatched={}", keystroke_str, dispatched));
-    Ok(json!({ "success": true, "dispatched": dispatched, "keystroke": keystroke_str }))
+    let response = json!({
+        "success": true,
+        "dispatched": dispatched,
+        "keystroke": keystroke_str,
+    });
+    Ok(attach_post_state(response, event.window_id.as_deref(), cx))
 }
 
 fn handle_type_text(
@@ -500,12 +533,13 @@ fn handle_type_text(
         opts.text.len(),
         dispatched_count
     ));
-    Ok(json!({
+    let response = json!({
         "success": true,
         "text": opts.text,
         "chars": opts.text.len(),
         "dispatched": dispatched_count,
-    }))
+    });
+    Ok(attach_post_state(response, opts.window_id.as_deref(), cx))
 }
 
 fn handle_get_app_state(cx: &mut App) -> Result<serde_json::Value, String> {
@@ -1140,13 +1174,25 @@ fn handle_execute_action(
 
     let handle = resolve_window(opts.window_id.as_deref(), cx)?;
 
+    // Use FocusHandle::dispatch_action (synchronous) when the window has
+    // a focused element — Window::dispatch_action uses cx.defer() which
+    // would run the action *after* attach_post_state reads state, leaving
+    // the MCP response stale. The direct path goes through
+    // dispatch_action_on_node immediately so the action's side effects are
+    // visible in the same handler tick.
     let (window_id, window_title, has_focus) = handle
         .update(cx, |_, window, cx| {
             let wid = format!("{:?}", handle.window_id());
             let title = window.window_title();
-            let focused = window.focused(cx).is_some();
-            window.dispatch_action(action, cx);
-            (wid, title, focused)
+            let focused = window.focused(cx);
+            let has_focus = focused.is_some();
+            match focused {
+                Some(focus_handle) => {
+                    focus_handle.dispatch_action(action.as_ref(), window, cx)
+                }
+                None => window.dispatch_action(action, cx),
+            }
+            (wid, title, has_focus)
         })
         .map_err(|e| format!("Failed to dispatch action: {}", e))?;
 
@@ -1154,13 +1200,14 @@ fn handle_execute_action(
         "Executed action: {} on window {} (focused={})",
         opts.action, window_id, has_focus
     ));
-    Ok(json!({
+    let response = json!({
         "success": true,
         "action": opts.action,
         "window_id": window_id,
         "window_title": window_title,
         "window_had_focus": has_focus,
-    }))
+    });
+    Ok(attach_post_state(response, opts.window_id.as_deref(), cx))
 }
 
 fn handle_list_actions(
