@@ -10,11 +10,21 @@
 //!     let app = Application::new();
 //!     app.run(|cx| {
 //!         gpui_component::init(cx);
-//!         gpui_component::mcp::init_mcp(cx);
+//!         // Pick a stable identifier for your app — the gpui-mcp-server
+//!         // uses it to target this app specifically when multiple GPUI
+//!         // apps are running.
+//!         gpui_component::mcp::init_mcp(cx, "my-app");
 //!         // ... app code ...
 //!     });
 //! }
 //! ```
+//!
+//! ## Socket naming
+//!
+//! The socket is created at `{temp_dir}/gpui-mcp-{app_name}-{pid}.sock`.
+//! Including both the app name and the PID lets multiple GPUI apps — and
+//! multiple instances of the same app — coexist without collision, while
+//! still allowing the `gpui-mcp-server` to discover and filter by app.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
@@ -83,23 +93,51 @@ pub fn mcp_log(message: impl Into<String>) {
     }
 }
 
-/// Returns the default socket path for the current process.
-/// Uses PID-based naming for multi-instance support.
-fn default_socket_path() -> String {
+/// Sanitize an app name for use in a socket filename.
+///
+/// Allowed characters: `[a-zA-Z0-9_-]`. Anything else is replaced with `_`.
+/// An empty result falls back to `"gpui-app"`.
+fn sanitize_app_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "gpui-app".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Returns the socket path for the given app and current process.
+///
+/// Format: `{tmp_dir}/gpui-mcp-{app_name}-{pid}.sock`.
+fn socket_path_for(app_name: &str) -> String {
+    let sanitized = sanitize_app_name(app_name);
     let pid = std::process::id();
     let dir = std::env::temp_dir();
-    dir.join(format!("gpui-mcp-{}.sock", pid))
+    dir.join(format!("gpui-mcp-{}-{}.sock", sanitized, pid))
         .to_string_lossy()
         .into_owned()
 }
 
-/// Initialize the MCP IPC server.
+/// Initialize the MCP IPC server for this GPUI app.
+///
+/// `app_name` should be a stable identifier for the application (e.g.
+/// `"elane"`, `"my-editor"`). It is used to namespace the socket file so
+/// the `gpui-mcp-server` can discover and filter by app when multiple GPUI
+/// apps are running at the same time.
 ///
 /// Starts a Unix Domain Socket listener on a background thread and
 /// polls incoming requests on the GPUI main thread.
-pub fn init_mcp(cx: &mut App) {
-    let socket_path = std::env::var("GPUI_MCP_SOCKET")
-        .unwrap_or_else(|_| default_socket_path());
+pub fn init_mcp(cx: &mut App, app_name: &str) {
+    let socket_path = socket_path_for(app_name);
 
     let (req_tx, req_rx) = mpsc::channel::<RequestMsg>();
 
@@ -1232,4 +1270,36 @@ fn handle_get_focus_info(
         .map_err(|e| e.to_string())?;
 
     Ok(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_passes_valid_chars_through() {
+        assert_eq!(sanitize_app_name("elane"), "elane");
+        assert_eq!(sanitize_app_name("my-editor"), "my-editor");
+        assert_eq!(sanitize_app_name("app_v2"), "app_v2");
+        assert_eq!(sanitize_app_name("Story-123"), "Story-123");
+    }
+
+    #[test]
+    fn sanitize_replaces_invalid_chars() {
+        assert_eq!(sanitize_app_name("my app"), "my_app");
+        assert_eq!(sanitize_app_name("app/name"), "app_name");
+        assert_eq!(sanitize_app_name("app.with.dots"), "app_with_dots");
+    }
+
+    #[test]
+    fn sanitize_empty_falls_back() {
+        assert_eq!(sanitize_app_name(""), "gpui-app");
+    }
+
+    #[test]
+    fn socket_path_contains_app_and_pid() {
+        let path = socket_path_for("elane");
+        let pid = std::process::id();
+        assert!(path.ends_with(&format!("gpui-mcp-elane-{}.sock", pid)));
+    }
 }
