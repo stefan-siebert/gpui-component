@@ -301,6 +301,120 @@ fn default_target_window_id(cx: &mut App) -> Option<gpui::WindowId> {
     cx.windows().into_iter().next().map(|h| h.window_id())
 }
 
+/// Extract the last `.`-separated segment of a `global_id` — the actual
+/// element name without its full ancestry path. e.g.
+/// `"view-1.window_border.WindowBorder.backdrop.root.table"` → `"table"`.
+fn short_name_of(global_id: &str) -> &str {
+    global_id.rsplit('.').next().unwrap_or(global_id)
+}
+
+/// Collect up to `limit` elements that loosely match `query`, suggested
+/// when an exact element lookup fails.
+///
+/// Matches case-insensitively on either the element's `short_name` (the
+/// leaf segment of its global_id) or its rendered `text_content`. Results
+/// are deduplicated by `short_name` so the LLM isn't drowning in repeats
+/// of the same element type. The LLM can use the returned `short_name`
+/// directly as a suffix match to retry the original call.
+fn collect_match_candidates(
+    query: &str,
+    window_id: Option<&str>,
+    cx: &mut App,
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    let query_lower = query.to_lowercase();
+    let windows: Vec<gpui::AnyWindowHandle> = if let Some(wid) = window_id {
+        cx.windows()
+            .into_iter()
+            .filter(|h| format!("{:?}", h.window_id()) == wid)
+            .collect()
+    } else {
+        cx.windows()
+    };
+
+    let mut candidates: Vec<serde_json::Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for handle in &windows {
+        if candidates.len() >= limit {
+            break;
+        }
+        let found = handle
+            .update(cx, |_, window, _cx| {
+                let mut batch: Vec<(String, serde_json::Value)> = Vec::new();
+                for info in window.inspector_elements() {
+                    let short = short_name_of(&info.global_id).to_string();
+                    let short_lower = short.to_lowercase();
+                    let gid_lower = info.global_id.to_lowercase();
+                    let text_joined = info.text_content.join(" ");
+                    let text_lower = text_joined.to_lowercase();
+
+                    // Prioritize leaf-name matches (most actionable for the
+                    // LLM), then full-path matches (catches type-parameter
+                    // names like FileTableDelegate), then text matches.
+                    let short_match = short_lower.contains(&query_lower);
+                    let path_match = !short_match && gid_lower.contains(&query_lower);
+                    let text_match = !short_match
+                        && !path_match
+                        && !text_joined.is_empty()
+                        && text_lower.contains(&query_lower);
+
+                    if short_match || path_match || text_match {
+                        let matched_on = if short_match {
+                            "name"
+                        } else if path_match {
+                            "path"
+                        } else {
+                            "text"
+                        };
+                        batch.push((
+                            short,
+                            json!({
+                                "text": if text_joined.is_empty() {
+                                    serde_json::Value::Null
+                                } else {
+                                    json!(text_joined)
+                                },
+                                "matched_on": matched_on,
+                            }),
+                        ));
+                    }
+                }
+                batch
+            })
+            .unwrap_or_default();
+
+        for (short_name, details) in found {
+            if candidates.len() >= limit {
+                break;
+            }
+            if !seen.insert(short_name.clone()) {
+                continue;
+            }
+            let mut entry = details;
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("short_name".into(), json!(short_name));
+            }
+            candidates.push(entry);
+        }
+    }
+    candidates
+}
+
+/// Format an element-not-found error with candidate suggestions embedded
+/// as a JSON payload. The LLM can parse the JSON after the "Error: "
+/// prefix that `handle_tool_call` adds to failed responses.
+fn not_found_error(query: &str, candidates: Vec<serde_json::Value>) -> String {
+    if candidates.is_empty() {
+        return format!("Element not found: {}", query);
+    }
+    json!({
+        "message": format!("Element not found: {}", query),
+        "candidates": candidates,
+    })
+    .to_string()
+}
+
 /// Attach post-dispatch state (`app_state` + `focus_info`) to a driver
 /// response.
 ///
@@ -447,7 +561,8 @@ fn resolve_element_center(
         }
     }
 
-    Err(format!("Element not found: {}", query))
+    let candidates = collect_match_candidates(query, window_id, cx, 5);
+    Err(not_found_error(query, candidates))
 }
 
 fn handle_send_key(
@@ -1053,7 +1168,8 @@ fn handle_get_element(
         }
     }
 
-    Err(format!("Element not found: {}", params.element_id))
+    let candidates = collect_match_candidates(&params.element_id, None, cx, 5);
+    Err(not_found_error(&params.element_id, candidates))
 }
 
 fn handle_take_screenshot(
@@ -1081,7 +1197,7 @@ fn handle_take_screenshot(
     // If element_id is set, resolve bounds and crop
     let (final_image, element_info) = if let Some(ref element_id) = opts.element_id {
         // Resolve element bounds (in logical pixels)
-        let (elem_bounds, resolved_id) = handle
+        let bounds_result = handle
             .update(cx, |_, window, _cx| {
                 let window_id_str = format!("{:?}", handle.window_id());
                 for info in window.inspector_elements() {
@@ -1098,8 +1214,16 @@ fn handle_take_screenshot(
                 }
                 None
             })
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Element not found: {}", element_id))?;
+            .map_err(|e| e.to_string())?;
+
+        let (elem_bounds, resolved_id) = match bounds_result {
+            Some(v) => v,
+            None => {
+                let candidates =
+                    collect_match_candidates(element_id, opts.window_id.as_deref(), cx, 5);
+                return Err(not_found_error(element_id, candidates));
+            }
+        };
 
         // Convert logical bounds to device pixels for cropping
         let x = (f32::from(elem_bounds.origin.x) * scale_factor).round() as u32;
