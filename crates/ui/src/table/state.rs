@@ -77,6 +77,19 @@ pub enum TableEvent {
     /// The first `usize` is the original index of the column,
     /// and the second `usize` is the new index of the column.
     MoveColumn(usize, usize),
+    /// A row was left-clicked with full context: row index, column index
+    /// (from click position), click count (1 = single, 2 = double), and
+    /// whether the row was already selected before this click.
+    ///
+    /// This is a richer alternative to `SelectRow` + `DoubleClickedRow` for
+    /// consumers that need column-aware or re-click-aware logic (e.g.
+    /// click-to-rename on a specific column).
+    RowClick {
+        row_ix: usize,
+        col_ix: Option<usize>,
+        click_count: usize,
+        was_already_selected: bool,
+    },
     /// A row has been right-clicked.
     ///
     /// Contains the row index, or `None` if right-clicked on an empty area.
@@ -696,9 +709,15 @@ where
             return;
         }
 
+        // If a right-click row was active, this click is dismissing the
+        // context menu — don't count as "was already selected" to avoid
+        // triggering click-to-rename.
+        let was_already_selected =
+            self.right_clicked_row.is_none() && self.selected_row == Some(row_ix);
+
         // Determine which column was clicked from the mouse position
         let click_x = e.position().x;
-        self.last_clicked_col = self
+        let col_ix = self
             .col_groups
             .iter()
             .position(|cg| {
@@ -706,12 +725,21 @@ where
                 let right = left + cg.bounds.size.width;
                 click_x >= left && click_x < right
             });
+        self.last_clicked_col = col_ix;
 
         self.set_selected_row(row_ix, cx);
 
-        if e.click_count() == 2 {
+        let click_count = e.click_count();
+        if click_count == 2 {
             cx.emit(TableEvent::DoubleClickedRow(row_ix));
         }
+
+        cx.emit(TableEvent::RowClick {
+            row_ix,
+            col_ix,
+            click_count,
+            was_already_selected,
+        });
     }
 
     fn on_col_head_click(&mut self, col_ix: usize, _: &mut Window, cx: &mut Context<Self>) {
