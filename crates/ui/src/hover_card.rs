@@ -289,7 +289,10 @@ impl RenderOnce for HoverCard {
         };
 
         let anchor = self.anchor;
-        let position = Rc::new(Cell::new(Popover::resolved_corner(anchor, trigger_bounds)));
+        let offset = self.content_offset;
+        let position = Rc::new(Cell::new(
+            Popover::resolved_corner(anchor, trigger_bounds) + offset,
+        ));
 
         let root = div().id(self.id).child(
             div()
@@ -302,7 +305,8 @@ impl RenderOnce for HoverCard {
                     let state = state.clone();
                     let position = position.clone();
                     move |bounds, _, cx| {
-                        position.set(Popover::resolved_corner(anchor, bounds));
+                        position
+                            .set(Popover::resolved_corner(anchor, bounds) + offset);
                         state.update(cx, |state, _| {
                             state.trigger_bounds = bounds;
                         });

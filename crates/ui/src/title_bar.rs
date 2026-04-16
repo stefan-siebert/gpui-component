@@ -462,7 +462,7 @@ impl RenderOnce for TitleBar {
                     state.drag_start_pos = None;
                 }),
             )
-            .on_mouse_move(window.listener_for(&state, |state, event: &gpui::MouseMoveEvent, window, _| {
+            .on_mouse_move(window.listener_for(&state, |state, _event: &gpui::MouseMoveEvent, window, _| {
                 if state.should_move {
                     #[cfg(not(target_os = "windows"))]
                     {
@@ -474,7 +474,7 @@ impl RenderOnce for TitleBar {
                         // Only start drag after exceeding a movement threshold (4px),
                         // so that double-clicks aren't swallowed by the drag modal loop.
                         if let Some(start) = state.drag_start_pos {
-                            let delta = event.position - start;
+                            let delta = _event.position - start;
                             let threshold = px(4.0);
                             if delta.x > threshold
                                 || delta.x < -threshold
