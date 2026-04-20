@@ -124,6 +124,7 @@ pub fn init(cx: &mut App) {
     table::init(cx);
     text::init(cx);
     tree::init(cx);
+    tooltip::init(cx);
 }
 
 #[inline]

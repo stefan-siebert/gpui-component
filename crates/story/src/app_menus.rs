@@ -69,12 +69,14 @@ fn build_menus(title: impl Into<SharedString>, cx: &App) -> Vec<Menu> {
                         MenuItem::action("Dark", SwitchThemeMode(ThemeMode::Dark))
                             .checked(cx.theme().mode.is_dark()),
                     ],
+                    disabled: false,
                 }),
                 theme_menu(cx),
                 language_menu(cx),
                 MenuItem::Separator,
                 MenuItem::action("Quit", Quit),
             ],
+            disabled: false,
         },
         Menu {
             disabled: false,
@@ -101,16 +103,23 @@ fn build_menus(title: impl Into<SharedString>, cx: &App) -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action("Select All", gpui_component::input::SelectAll),
             ],
+            disabled: false,
         },
         Menu {
             disabled: false,
             name: "Window".into(),
             items: vec![MenuItem::action("Toggle Search", ToggleSearch)],
+            disabled: false,
         },
         Menu {
             disabled: false,
             name: "Help".into(),
-            items: vec![MenuItem::action("Open Website", Open)],
+            items: vec![
+                MenuItem::action("Documentation", Open).disabled(true),
+                MenuItem::separator(),
+                MenuItem::action("Open Website", Open),
+            ],
+            disabled: false,
         },
     ]
 }
@@ -124,6 +133,7 @@ fn language_menu(_: &App) -> MenuItem {
             MenuItem::action("English", SelectLocale("en".into())).checked(locale == "en"),
             MenuItem::action("简体中文", SelectLocale("zh-CN".into())).checked(locale == "zh-CN"),
         ],
+        disabled: false,
     })
 }
 
@@ -141,5 +151,6 @@ fn theme_menu(cx: &App) -> MenuItem {
                     .checked(checked)
             })
             .collect(),
+        disabled: false,
     })
 }

@@ -20,7 +20,7 @@ use sum_tree::Bias;
 use unicode_segmentation::*;
 
 use super::{
-    DisplayMap, blink_cursor::BlinkCursor, change::Change, element::TextElement,
+    DisplayMap, MASK_CHAR, blink_cursor::BlinkCursor, change::Change, element::TextElement,
     mask_pattern::MaskPattern, mode::InputMode, number_input,
 };
 use crate::Size;
@@ -34,9 +34,10 @@ use crate::input::{
     HoverDefinition, InlineCompletion, Lsp, Position, RopeExt as _, Selection,
     display_map::LineLayout,
     element::RIGHT_MARGIN,
-    popovers::{ContextMenu, DiagnosticPopover, HoverPopover, MouseContextMenu},
+    popovers::{ContextMenu, DiagnosticPopover, HoverPopover, InputContextMenu},
     search::{self, SearchPanel},
 };
+use crate::menu::PopupMenu;
 use crate::{Root, history::History};
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
@@ -351,8 +352,20 @@ pub struct InputState {
     /// Popover
     diagnostic_popover: Option<Entity<DiagnosticPopover>>,
     /// Completion/CodeAction context menu
-    pub(super) context_menu: Option<ContextMenu>,
-    pub(super) mouse_context_menu: Entity<MouseContextMenu>,
+    pub(super) context_menu_content: Option<ContextMenu>,
+    pub(super) context_menu: Entity<InputContextMenu>,
+
+    /// An optional context menu builder to allow a custom context menu on the input.
+    ///
+    /// If set, this will override the built-in context menu and ignore the value set in [`Self::enable_context_menu`].
+    pub(super) context_menu_builder:
+        Option<Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>>,
+
+    /// Whether the context menu that shows on right-click is enabled.
+    ///
+    /// This value will be ignored if a context menu builder is defined in [`Self::context_menu_builder`].
+    pub(super) enable_context_menu: bool,
+
     /// A flag to indicate if we are currently inserting a completion item.
     pub(super) completion_inserting: bool,
     pub(super) hover_popover: Option<Entity<HoverPopover>>,
@@ -415,7 +428,7 @@ impl InputState {
         ];
 
         let text_style = window.text_style();
-        let mouse_context_menu = MouseContextMenu::new(cx.entity(), window, cx);
+        let mouse_context_menu = InputContextMenu::new(cx.entity(), window, cx);
 
         Self {
             focus_handle: focus_handle.clone(),
@@ -453,8 +466,10 @@ impl InputState {
             text_align: TextAlign::Left,
             lsp: Lsp::default(),
             diagnostic_popover: None,
-            context_menu: None,
-            mouse_context_menu,
+            context_menu_content: None,
+            context_menu: mouse_context_menu,
+            context_menu_builder: None,
+            enable_context_menu: true,
             completion_inserting: false,
             hover_popover: None,
             hover_definition: HoverDefinition::default(),
@@ -512,12 +527,6 @@ impl InputState {
         self
     }
 
-    /// Upgrade an existing multi-line PlainText input to CodeEditor mode in-place.
-    ///
-    /// This preserves the current text and display_map (text_wrapper, wrap_map)
-    /// so no expensive re-computation is needed. Line numbers appear immediately.
-    /// Tree-sitter highlighting and fold candidates are deferred to the next
-    /// render via `_pending_update`.
     pub fn upgrade_to_code_editor(
         &mut self,
         language: impl Into<SharedString>,
@@ -527,6 +536,15 @@ impl InputState {
         self.searchable = true;
         self._pending_update = true;
         cx.notify();
+    }
+
+    /// Sets whether the context menu that shows on right-click is enabled.
+    ///
+    /// The context menu is enabled by default.
+    /// This value will be ignored if a custom context menu is defined on the input.
+    pub fn context_menu(mut self, enable: bool) -> Self {
+        self.enable_context_menu = enable;
+        self
     }
 
     /// Set this input is searchable, default is false (Default true for Code Editor).
@@ -1411,7 +1429,9 @@ impl InputState {
 
         // Show Mouse context menu
         if event.button == MouseButton::Right {
-            self.handle_right_click_menu(event, offset, window, cx);
+            if self.enable_context_menu || self.context_menu_builder.is_some() {
+                self.handle_right_click_menu(event, offset, window, cx);
+            }
             return;
         }
 
@@ -1441,6 +1461,19 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Check if mouse is within bounds
+        let within_bounds = self
+            .last_bounds
+            .as_ref()
+            .map(|bounds| bounds.contains(&event.position))
+            .unwrap_or(false);
+
+        if !within_bounds {
+            // Clear hover when mouse leaves the input
+            self.clear_hover_state(cx);
+            return;
+        }
+
         // Show diagnostic popover on mouse move
         let offset = self.index_for_mouse_position(event.position);
         self.handle_mouse_move(offset, event, window, cx);
@@ -1756,7 +1789,7 @@ impl InputState {
                 let local_index = line_layout.closest_index_for_x(pos.x, last_layout);
                 let index = line_start_offset + local_index;
                 return if self.masked {
-                    self.text.char_index_to_offset(index)
+                    self.text.char_index_to_offset(index / MASK_CHAR.len_utf8())
                 } else {
                     index.min(self.text.len())
                 };
@@ -1766,14 +1799,15 @@ impl InputState {
             if let Some(local_index) = line_layout.closest_index_for_position(pos, last_layout) {
                 let index = line_start_offset + local_index;
                 return if self.masked {
-                    self.text.char_index_to_offset(index)
+                    self.text.char_index_to_offset(index / MASK_CHAR.len_utf8())
                 } else {
                     index.min(self.text.len())
                 };
             } else if pos.y < px(0.) {
                 // Mouse is above this line, return start of this line
                 return if self.masked {
-                    self.text.char_index_to_offset(line_start_offset)
+                    self.text
+                        .char_index_to_offset(line_start_offset / MASK_CHAR.len_utf8())
                 } else {
                     line_start_offset
                 };
@@ -1783,12 +1817,7 @@ impl InputState {
         }
 
         // Mouse is below all visible lines, return end of text
-        let index = self.text.len();
-        if self.masked {
-            self.text.char_index_to_offset(index)
-        } else {
-            index
-        }
+        self.text.len()
     }
 
     /// Returns a y offsetted point for the line origin.
@@ -1945,7 +1974,7 @@ impl InputState {
 
         self.hover_popover = None;
         self.diagnostic_popover = None;
-        self.context_menu = None;
+        self.context_menu_content = None;
         self.clear_inline_completion(cx);
         self.blink_cursor.update(cx, |cursor, cx| {
             cursor.stop(cx);
@@ -2312,7 +2341,9 @@ impl InputState {
                 }
 
                 // Trigger re-render so the new highlights are displayed.
-                _ = entity.update(cx, |_, cx| {
+                // Also update fold candidates now that the tree is ready.
+                _ = entity.update(cx, |state, cx| {
+                    state.update_fold_candidates();
                     cx.notify();
                 });
             }
@@ -2652,7 +2683,7 @@ impl Render for InputState {
             .overflow_x_hidden()
             .child(TextElement::new(cx.entity().clone()).placeholder(self.placeholder.clone()))
             .children(self.diagnostic_popover.clone())
-            .children(self.context_menu.as_ref().map(|menu| menu.render()))
+            .children(self.context_menu_content.as_ref().map(|menu| menu.render()))
             .children(self.hover_popover.clone())
     }
 }

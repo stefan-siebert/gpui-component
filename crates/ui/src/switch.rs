@@ -1,11 +1,11 @@
 use crate::{
-    h_flex, text::Text, tooltip::Tooltip, ActiveTheme, Disableable, Side, Sizable,
-    Size, StyledExt,
+    ActiveTheme, Disableable, Side, Sizable, Size, StyledExt, h_flex, text::Text,
+    tooltip::{ComponentTooltip, Tooltip},
 };
 use gpui::{
-    div, prelude::FluentBuilder as _, px, Animation, AnimationExt as _, App, ElementId, Hsla,
-    InteractiveElement, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    StatefulInteractiveElement, StyleRefinement, Styled, Window,
+    Animation, AnimationExt as _, App, ElementId, Hsla, InteractiveElement, IntoElement,
+    ParentElement as _, RenderOnce, SharedString, StyleRefinement, Styled, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use std::{rc::Rc, time::Duration};
 
@@ -21,7 +21,7 @@ pub struct Switch {
     on_click: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
     size: Size,
     color: Option<Hsla>,
-    tooltip: Option<SharedString>,
+    tooltip: ComponentTooltip,
     tab_stop: bool,
     tab_index: isize,
 }
@@ -40,7 +40,7 @@ impl Switch {
             label_side: Side::Right,
             size: Size::Medium,
             color: None,
-            tooltip: None,
+            tooltip: ComponentTooltip::default(),
             tab_stop: true,
             tab_index: 0,
         }
@@ -74,9 +74,9 @@ impl Switch {
         self
     }
 
-    /// Set tooltip for the switch.
+    /// Set tooltip text for the switch.
     pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
-        self.tooltip = Some(tooltip.into());
+        self.tooltip.text = Some((tooltip.into(), None));
         self
     }
 
@@ -186,11 +186,7 @@ impl RenderOnce for Switch {
                             cx.theme().transparent
                         })
                         .bg(bg)
-                        .when_some(self.tooltip.clone(), |this, tooltip| {
-                            this.tooltip(move |window, cx| {
-                                Tooltip::new(tooltip.clone()).build(window, cx)
-                            })
-                        })
+                        .map(|this| self.tooltip.apply(this))
                         .child(
                             // Switch Toggle
                             div()

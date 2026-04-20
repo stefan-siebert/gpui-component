@@ -25,6 +25,17 @@ const FOLD_ICON_WIDTH: Pixels = px(14.);
 const FOLD_ICON_HITBOX_WIDTH: Pixels = px(18.);
 const MAX_HIGHLIGHT_LINE_LENGTH: usize = 10_000;
 
+use super::MASK_CHAR;
+
+/// Convert a byte offset in the original text to a byte offset in the masked display string.
+///
+/// The masked string consists of `MASK_CHAR` repeated once per character in the original text.
+/// Since `MASK_CHAR` may be multi-byte in UTF-8, the byte offset in the masked string is
+/// `char_index * MASK_CHAR.len_utf8()`.
+fn masked_display_offset(text: &Rope, original_offset: usize) -> usize {
+    text.offset_to_char_index(original_offset) * MASK_CHAR.len_utf8()
+}
+
 /// Layout information for fold icons.
 struct FoldIconLayout {
     /// Hitbox for the line number area (used for hover detection)
@@ -96,10 +107,9 @@ impl TextElement {
 
         let mut cursor = state.cursor();
         if state.masked {
-            // Because masked use `*`, 1 char with 1 byte.
-            selected_range.start = state.text.offset_to_char_index(selected_range.start);
-            selected_range.end = state.text.offset_to_char_index(selected_range.end);
-            cursor = state.text.offset_to_char_index(cursor);
+            selected_range.start = masked_display_offset(&state.text, selected_range.start);
+            selected_range.end = masked_display_offset(&state.text, selected_range.end);
+            cursor = masked_display_offset(&state.text, cursor);
         }
 
         let mut current_row = None;
@@ -541,9 +551,8 @@ impl TextElement {
         }
 
         if state.masked {
-            // Because masked use `*`, 1 char with 1 byte.
-            selected_range.start = state.text.offset_to_char_index(selected_range.start);
-            selected_range.end = state.text.offset_to_char_index(selected_range.end);
+            selected_range.start = masked_display_offset(&state.text, selected_range.start);
+            selected_range.end = masked_display_offset(&state.text, selected_range.end);
         }
 
         let (start_ix, end_ix) = if selected_range.start < selected_range.end {
@@ -1000,21 +1009,24 @@ impl TextElement {
 
         // Empty to use placeholder, the placeholder is not in the wrapper map.
         if state.text.len() == 0 {
-            return display_text
-                .to_string()
-                .split("\n")
-                .map(|line| {
-                    let shaped_line = window.text_system().shape_line(
-                        line.to_string().into(),
-                        font_size,
-                        &runs,
-                        None,
-                    );
-                    LineLayout::new()
-                        .lines(smallvec::smallvec![shaped_line])
-                        .with_whitespaces(whitespace_indicators.clone())
-                })
-                .collect();
+            let placeholder_text = display_text.to_string();
+            let mut placeholder_lines = SmallVec::new();
+
+            for (line, line_runs) in placeholder_line_runs(&placeholder_text, runs) {
+                let shaped_line = window.text_system().shape_line(
+                    line.to_string().into(),
+                    font_size,
+                    &line_runs,
+                    None,
+                );
+                placeholder_lines.push(shaped_line);
+            }
+
+            // Keep placeholder lines in a single layout to stay parallel with visible_* metadata.
+            let line_layout = LineLayout::new()
+                .lines(placeholder_lines)
+                .with_whitespaces(whitespace_indicators);
+            return vec![line_layout];
         }
 
         let mut lines = Vec::with_capacity(last_layout.visible_buffer_lines.len());
@@ -1327,7 +1339,10 @@ impl Element for TextElement {
                 cx.theme().muted_foreground,
             )
         } else if state.masked {
-            (&Rope::from("*".repeat(text.chars().count())), fg)
+            (
+                &Rope::from(MASK_CHAR.to_string().repeat(text.chars().count())),
+                fg,
+            )
         } else {
             (&text, fg)
         };
@@ -1348,12 +1363,29 @@ impl Element for TextElement {
             .map(|&bl| state.text.line_start_offset(bl))
             .collect();
 
+        // For password input (masked: true), convert byte offsets to masked display byte offsets so that
+        // layout_match_range and position_for_index work in the correct coordinate space.
+        let (visible_line_byte_offsets, visible_range_offset) = if state.masked {
+            let offsets = visible_line_byte_offsets
+                .iter()
+                .map(|&o| masked_display_offset(&text, o))
+                .collect();
+            let range_offset = masked_display_offset(&text, visible_start_offset)
+                ..masked_display_offset(&text, visible_end_offset);
+            (offsets, range_offset)
+        } else {
+            (
+                visible_line_byte_offsets,
+                visible_start_offset..visible_end_offset,
+            )
+        };
+
         let mut last_layout = LastLayout {
             visible_range,
             visible_buffer_lines,
             visible_line_byte_offsets,
             visible_top,
-            visible_range_offset: visible_start_offset..visible_end_offset,
+            visible_range_offset,
             line_height,
             wrap_width,
             line_number_width,
@@ -1682,17 +1714,6 @@ impl Element for TextElement {
         let origin = bounds.origin;
 
         let invisible_top_padding = prepaint.last_layout.visible_top;
-
-        let mut mask_offset_y = px(0.);
-        let state = self.state.read(cx);
-        if state.masked && state.text.len() > 0 {
-            // Move down offset for vertical centering the *****
-            if cfg!(target_os = "macos") {
-                mask_offset_y = px(3.);
-            } else {
-                mask_offset_y = px(2.5);
-            }
-        }
         let active_line_color = cx.theme().highlight_theme.style.editor_active_line;
 
         // Paint active line
@@ -1753,7 +1774,7 @@ impl Element for TextElement {
         }
 
         // Paint text with inline completion ghost line support
-        let mut offset_y = mask_offset_y + invisible_top_padding;
+        let mut offset_y = invisible_top_padding;
         let ghost_lines = &prepaint.ghost_lines;
         let has_ghost_lines = !ghost_lines.is_empty();
 
@@ -1932,6 +1953,28 @@ impl Element for TextElement {
     }
 }
 
+/// Split placeholder text into display lines and trim runs to each line.
+fn placeholder_line_runs<'a>(
+    display_text: &'a str,
+    runs: &[TextRun],
+) -> Vec<(&'a str, Vec<TextRun>)> {
+    let mut result = Vec::new();
+    let mut line_offset = 0;
+
+    for line in display_text.split('\n') {
+        let line_runs = runs_for_range(runs, line_offset, &(0..line.len()));
+        debug_assert_eq!(
+            line_runs.iter().map(|run| run.len).sum::<usize>(),
+            line.len()
+        );
+        result.push((line, line_runs));
+        // Advance in the whole-placeholder coordinate space, including the separator.
+        line_offset += line.len() + 1;
+    }
+
+    result
+}
+
 /// Get the runs for the given range.
 ///
 /// The range is the byte range of the wrapped line.
@@ -2093,6 +2136,44 @@ mod tests {
         assert_runs(runs_for_range(&runs, 3, &(0..3)), &[1, 2]);
         assert_runs(runs_for_range(&runs, 3, &(2..10)), &[4, 1, 3]);
         assert_runs(runs_for_range(&runs, 9, &(0..8)), &[1, 7]);
+    }
+
+    #[test]
+    fn test_placeholder_line_runs() {
+        let run = TextRun {
+            len: 0,
+            font: gpui::font(".SystemUIFont"),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+
+        let runs = vec![
+            TextRun {
+                len: 2,
+                ..run.clone()
+            },
+            TextRun {
+                len: 2,
+                ..run.clone()
+            },
+            TextRun { len: 1, ..run },
+        ];
+
+        let placeholder_runs = placeholder_line_runs("ab\n\nc", &runs);
+
+        let lines = placeholder_runs
+            .iter()
+            .map(|(line, _)| *line)
+            .collect::<Vec<_>>();
+        assert_eq!(lines, vec!["ab", "", "c"]);
+
+        let run_lengths = placeholder_runs
+            .iter()
+            .map(|(_, line_runs)| line_runs.iter().map(|run| run.len).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        assert_eq!(run_lengths, vec![vec![2], vec![], vec![1]]);
     }
 
     #[test]

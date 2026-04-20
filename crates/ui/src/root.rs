@@ -5,6 +5,7 @@ use crate::{
     input::InputState,
     notification::{Notification, NotificationList},
     sheet::Sheet,
+    tooltip::TooltipOverlay,
     window_border,
 };
 use gpui::{
@@ -34,6 +35,7 @@ pub struct Root {
     pub(crate) active_dialogs: Vec<ActiveDialog>,
     pub(super) focused_input: Option<Entity<InputState>>,
     pub notification: Entity<NotificationList>,
+    pub(crate) tooltip_overlay: Entity<TooltipOverlay>,
     sheet_size: Option<DefiniteLength>,
     window_shadow_size: Pixels,
     border_radius: Pixels,
@@ -83,6 +85,7 @@ impl Root {
             active_dialogs: Vec::new(),
             focused_input: None,
             notification: cx.new(|cx| NotificationList::new(window, cx)),
+            tooltip_overlay: cx.new(|_| TooltipOverlay::new()),
             sheet_size: None,
             window_shadow_size: window_border::SHADOW_SIZE,
             border_radius: window_border::BORDER_RADIUS,
@@ -392,6 +395,12 @@ impl Root {
         cx.notify();
     }
 
+    /// Get the tooltip overlay entity for this window.
+    pub(crate) fn tooltip_overlay(window: &Window, cx: &App) -> Option<Entity<TooltipOverlay>> {
+        let root = window.root::<Root>()??;
+        Some(root.read(cx).tooltip_overlay.clone())
+    }
+
     /// Return the root view of the Root.
     pub fn view(&self) -> &AnyView {
         &self.view
@@ -505,7 +514,8 @@ impl Render for Root {
                                 .when(!(tiling.bottom || tiling.right), |d| d.rounded_br(border_radius))
                         }
                     })
-                    .child(self.view.clone()),
+                    .child(self.view.clone())
+                    .child(self.tooltip_overlay.clone()),
             )
     }
 }
