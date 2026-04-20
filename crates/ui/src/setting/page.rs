@@ -1,5 +1,7 @@
+use std::rc::Rc;
+
 use gpui::{
-    App, Entity, InteractiveElement as _, IntoElement, ListAlignment, ListState,
+    AnyElement, App, Entity, InteractiveElement as _, IntoElement, ListAlignment, ListState,
     ParentElement as _, SharedString, StyleRefinement, Styled, Window, div, list,
     prelude::FluentBuilder as _, px,
 };
@@ -15,6 +17,15 @@ use crate::{
     v_flex,
 };
 
+/// Closure producing a fully custom right-hand content element for a
+/// [`SettingPage`]. When set (via [`SettingPage::custom_content`]), the page
+/// renders only its header (title + optional description + reset button is
+/// suppressed) plus the element returned by this closure — the declarative
+/// group/item/field pipeline is bypassed entirely. This is the escape hatch
+/// for settings that don't fit the `SettingField` enum (e.g., a keybindings
+/// editor with a `DataTable`).
+pub type CustomContentFn = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
+
 /// A setting page that can contain multiple setting groups.
 #[derive(Clone)]
 pub struct SettingPage {
@@ -25,6 +36,8 @@ pub struct SettingPage {
     pub(super) description: Option<SharedString>,
     pub(super) groups: Vec<SettingGroup>,
     pub(super) header_style: StyleRefinement,
+    /// Optional custom render — if set, replaces the groups-list pipeline.
+    pub(super) custom_content: Option<CustomContentFn>,
 }
 
 impl SettingPage {
@@ -37,7 +50,28 @@ impl SettingPage {
             description: None,
             groups: Vec::new(),
             header_style: StyleRefinement::default(),
+            custom_content: None,
         }
+    }
+
+    /// Replace the right-hand content with a fully custom element produced by
+    /// `render`. The page still appears in the sidebar under its title/icon,
+    /// but the groups/items pipeline is bypassed when this page is selected.
+    ///
+    /// Use this for settings UIs that don't map to the `SettingField` enum —
+    /// e.g., a keybindings table.
+    pub fn custom_content<F>(mut self, render: F) -> Self
+    where
+        F: Fn(&mut Window, &mut App) -> AnyElement + 'static,
+    {
+        self.custom_content = Some(Rc::new(render));
+        self
+    }
+
+    /// Returns true if this page uses a custom render closure instead of the
+    /// default groups/items pipeline.
+    pub(super) fn has_custom_content(&self) -> bool {
+        self.custom_content.is_some()
     }
 
     /// Set the title of the setting page.
@@ -107,7 +141,35 @@ impl SettingPage {
         options: &RenderOptions,
         window: &mut Window,
         cx: &mut App,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
+        // Custom-content pages bypass the groups/items pipeline entirely. They
+        // still render the header (title + optional description), but the body
+        // is whatever the closure returns. Reset-all is suppressed since
+        // custom pages own their own reset affordances.
+        if let Some(custom) = self.custom_content.clone() {
+            return v_flex()
+                .id(ix)
+                .size_full()
+                .child(
+                    v_flex()
+                        .p_4()
+                        .gap_3()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .refine_style(&self.header_style)
+                        .child(h_flex().justify_between().child(self.title.clone()))
+                        .when_some(self.description.clone(), |this, description| {
+                            this.child(
+                                Label::new(description)
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                        }),
+                )
+                .child(div().flex_1().w_full().child(custom(window, cx)))
+                .into_any_element();
+        }
+
         let search_input = state.read(cx).search_input.clone();
         let query = search_input.read(cx).value();
         let groups = self
@@ -210,5 +272,6 @@ impl SettingPage {
                     )
                     .vertical_scrollbar(&list_state),
             )
+            .into_any_element()
     }
 }

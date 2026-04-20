@@ -132,6 +132,13 @@ impl Settings {
         self.pages
             .iter()
             .filter_map(|page| {
+                // Custom-content pages own their own search; always keep them
+                // visible in the sidebar. Filtering by the outer query would
+                // hide them (since they have no searchable groups/items).
+                if page.has_custom_content() {
+                    return Some(page.clone());
+                }
+
                 let filtered_groups: Vec<SettingGroup> = page
                     .groups
                     .iter()
@@ -173,13 +180,11 @@ impl Settings {
 
         for (ix, page) in pages.into_iter().enumerate() {
             if selected_index.page_ix == ix {
-                return page
-                    .render(ix, state, &options, window, cx)
-                    .into_any_element();
+                return page.render(ix, state, &options, window, cx);
             }
         }
 
-        return div().into_any_element();
+        div().into_any_element()
     }
 
     fn render_sidebar(
