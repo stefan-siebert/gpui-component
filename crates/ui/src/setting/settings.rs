@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::rc::Rc;
 
 use crate::{
@@ -33,6 +34,7 @@ pub struct Settings {
     group_variant: GroupBoxVariant,
     size: Size,
     sidebar_width: Pixels,
+    sidebar_width_range: Range<Pixels>,
     sidebar_style: StyleRefinement,
     default_selected_index: SelectIndex,
     header_style: StyleRefinement,
@@ -52,7 +54,8 @@ impl Settings {
             pages: vec![],
             group_variant: GroupBoxVariant::default(),
             size: Size::default(),
-            sidebar_width: px(250.0),
+            sidebar_width: px(220.0),
+            sidebar_width_range: px(160.0)..px(360.0),
             sidebar_style: StyleRefinement::default(),
             default_selected_index: SelectIndex::default(),
             header_style: StyleRefinement::default(),
@@ -62,9 +65,17 @@ impl Settings {
         }
     }
 
-    /// Set the width of the sidebar, default is `250px`.
+    /// Set the initial width of the sidebar, default is `220px`.
     pub fn sidebar_width(mut self, width: impl Into<Pixels>) -> Self {
         self.sidebar_width = width.into();
+        self
+    }
+
+    /// Set the min/max width range the sidebar can be resized to by the user,
+    /// default is `160px..360px`. Without a finite upper bound the user could
+    /// drag the sidebar to cover the entire content panel.
+    pub fn sidebar_width_range(mut self, range: impl Into<Range<Pixels>>) -> Self {
+        self.sidebar_width_range = range.into();
         self
     }
 
@@ -360,6 +371,7 @@ impl RenderOnce for Settings {
             .child(
                 resizable_panel()
                     .size(self.sidebar_width)
+                    .size_range(self.sidebar_width_range.clone())
                     .child(self.render_sidebar(&state, &filtered_pages, window, cx)),
             )
             .child(resizable_panel().child(self.render_active_page(
