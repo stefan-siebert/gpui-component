@@ -54,8 +54,8 @@ impl Settings {
             pages: vec![],
             group_variant: GroupBoxVariant::default(),
             size: Size::default(),
-            sidebar_width: px(220.0),
-            sidebar_width_range: px(160.0)..px(360.0),
+            sidebar_width: px(190.0),
+            sidebar_width_range: px(150.0)..px(280.0),
             sidebar_style: StyleRefinement::default(),
             default_selected_index: SelectIndex::default(),
             header_style: StyleRefinement::default(),
@@ -65,14 +65,14 @@ impl Settings {
         }
     }
 
-    /// Set the initial width of the sidebar, default is `220px`.
+    /// Set the initial width of the sidebar, default is `190px`.
     pub fn sidebar_width(mut self, width: impl Into<Pixels>) -> Self {
         self.sidebar_width = width.into();
         self
     }
 
     /// Set the min/max width range the sidebar can be resized to by the user,
-    /// default is `160px..360px`. Without a finite upper bound the user could
+    /// default is `150px..280px`. Without a finite upper bound the user could
     /// drag the sidebar to cover the entire content panel.
     pub fn sidebar_width_range(mut self, range: impl Into<Range<Pixels>>) -> Self {
         self.sidebar_width_range = range.into();
