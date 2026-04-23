@@ -1,11 +1,11 @@
 use crate::{
     ActiveTheme, Disableable, Side, Sizable, Size, StyledExt, h_flex, text::Text,
-    tooltip::{ComponentTooltip, Tooltip},
+    tooltip::ComponentTooltip,
 };
 use gpui::{
     Animation, AnimationExt as _, App, ElementId, Hsla, InteractiveElement, IntoElement,
-    ParentElement as _, RenderOnce, SharedString, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _, px,
+    ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _,
+    StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use std::{rc::Rc, time::Duration};
 
