@@ -2020,19 +2020,37 @@ where
 
                     cells
                 })
-                // Row selected style
-                // Note: Don't show row selection if a cell is selected
+                // Row selected / right-clicked style.
+                //
+                // The overlay extends 1px above/below the row so its
+                // top/bottom borders coincide with neighbouring rows'
+                // separator lines — makes the selection look like one
+                // continuous frame instead of a box stacked on top of
+                // borders.  BUT this trick breaks at the viewport edges:
+                // a `top: -1` on the first visible row or a `bottom: -1`
+                // on the last visible row extends 1px past the clipping
+                // surface (inner_table has `overflow_hidden`), so that
+                // side of the border disappears.  The fix is to clamp to
+                // 0 when we're at an edge.
+                //
+                // Horizontally the same thing happened at `left: 0`/
+                // `right: 0` — the border sat exactly at the clip
+                // boundary and was eaten.  `inner_table`'s 1px horizontal
+                // padding (below) gives the overlay 1px of breathing
+                // room on both sides, so callers no longer need the
+                // `.px_px()` wrapper workaround.
                 .when_some(self.selected_row, |this, _| {
                     this.when(is_selected && self.selection_mode.is_row(), |this| {
                         this.map(|this| {
                             if cx.theme().list.active_highlight {
                                 let is_first_visible = row_ix <= self.visible_range.rows.start;
+                                let is_last_visible = row_ix + 1 >= self.visible_range.rows.end;
                                 this.border_color(gpui::transparent_white()).child(
                                     div()
                                         .top(if is_first_visible { px(0.) } else { px(-1.) })
                                         .left(px(0.))
                                         .right(px(0.))
-                                        .bottom(px(-1.))
+                                        .bottom(if is_last_visible { px(0.) } else { px(-1.) })
                                         .absolute()
                                         .bg(cx.theme().table_active)
                                         .border_1()
@@ -2047,12 +2065,13 @@ where
                 // Row right click row style
                 .when(self.right_clicked_row == Some(row_ix), |this| {
                     let is_first_visible = row_ix <= self.visible_range.rows.start;
+                    let is_last_visible = row_ix + 1 >= self.visible_range.rows.end;
                     this.border_color(gpui::transparent_white()).child(
                         div()
                             .top(if is_first_visible { px(0.) } else { px(-1.) })
                             .left(px(0.))
                             .right(px(0.))
-                            .bottom(px(-1.))
+                            .bottom(if is_last_visible { px(0.) } else { px(-1.) })
                             .absolute()
                             .border_1()
                             .border_color(cx.theme().selection),
@@ -2235,6 +2254,12 @@ where
         let inner_table = v_flex()
             .id("table-inner")
             .size_full()
+            // 1px horizontal padding so the selected-row overlay's
+            // left/right borders (`border_1()` drawn from `left: 0`/
+            // `right: 0` on an absolute div) aren't eaten by this
+            // container's `overflow_hidden`.  Header cells shift by
+            // the same 1px so they stay aligned with body cells.
+            .px_px()
             .overflow_hidden()
             .child(self.render_table_header(left_columns_count, window, cx))
             .context_menu({
