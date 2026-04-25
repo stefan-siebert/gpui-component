@@ -1,7 +1,7 @@
-use std::{ops::Range, rc::Rc};
-
+use gpui::Corners;
+use gpui::Half;
+use gpui::{App, Bounds, Element, ElementId, ElementInputHandler, Entity, GlobalElementId};
 use gpui::{
-    App, Bounds, Corners, Element, ElementId, ElementInputHandler, Entity, GlobalElementId, Half,
     HighlightStyle, Hitbox, HitboxBehavior, Hsla, InteractiveElement, IntoElement, LayoutId,
     MouseButton, MouseMoveEvent, Path, Pixels, Point, ShapedLine, SharedString, Size, Style,
     Styled as _, TextAlign, TextRun, TextStyle, UnderlineStyle, Window, fill, point, px, relative,
@@ -9,6 +9,7 @@ use gpui::{
 };
 use ropey::Rope;
 use smallvec::SmallVec;
+use std::{ops::Range, rc::Rc};
 
 use crate::{
     ActiveTheme as _, Colorize, IconName, Root, Selectable, Sizable as _,
@@ -239,11 +240,12 @@ impl TextElement {
         {
             let selection_changed = state.last_selected_range != Some(selected_range);
             if selection_changed && !is_selected_all {
-                // Apart from left alignment, just leave enough space for the cursor size on the right side.
-                let safety_margin = if last_layout.text_align == TextAlign::Left {
-                    RIGHT_MARGIN
-                } else {
-                    CURSOR_WIDTH
+                // For Right alignment use 0 margin: cursor is clamped to bounds separately,
+                // so we never scroll the text for cursor-at-edge, avoiding a first-click jump.
+                let safety_margin = match last_layout.text_align {
+                    TextAlign::Left => RIGHT_MARGIN,
+                    TextAlign::Right => px(0.),
+                    TextAlign::Center => CURSOR_WIDTH,
                 };
 
                 scroll_offset.x = if scroll_offset.x + cursor_pos.x
@@ -302,9 +304,17 @@ impl TextElement {
                 _ => 0.85,
             } * line_height;
 
+            // For Right alignment, clamp cursor within the right edge of bounds so it
+            // stays visible without having to shift the text via scroll_offset.
+            let cursor_x = bounds.left() + cursor_pos.x + line_number_width + scroll_offset.x;
+            let cursor_x = if last_layout.text_align == TextAlign::Right {
+                cursor_x.min(bounds.right() - CURSOR_WIDTH)
+            } else {
+                cursor_x
+            };
             cursor_bounds = Some(Bounds::new(
                 point(
-                    bounds.left() + cursor_pos.x + line_number_width + scroll_offset.x,
+                    cursor_x,
                     bounds.top() + cursor_pos.y + ((line_height - cursor_height) / 2.),
                 ),
                 size(CURSOR_WIDTH, cursor_height),
@@ -839,6 +849,7 @@ impl TextElement {
     /// Icons are created and prepainted here to avoid panics.
     fn layout_fold_icons(
         &self,
+        origin_x: Pixels,
         bounds: &Bounds<Pixels>,
         last_layout: &LastLayout,
         window: &mut Window,
@@ -854,7 +865,7 @@ impl TextElement {
 
         let line_number_hitbox = window.insert_hitbox(
             Bounds::new(
-                bounds.origin + point(px(0.), last_layout.visible_top),
+                point(origin_x, bounds.origin.y + last_layout.visible_top),
                 size(last_layout.line_number_width, bounds.size.height),
             ),
             HitboxBehavior::Normal,
@@ -898,7 +909,7 @@ impl TextElement {
         // Second pass: create and prepaint icons
         let line_height = last_layout.line_height;
         let line_number_width = last_layout.line_number_width
-            - LINE_NUMBER_RIGHT_MARGIN.half()
+            - LINE_NUMBER_RIGHT_MARGIN
             - FOLD_ICON_HITBOX_WIDTH;
         let icon_relative_pos = point(
             (FOLD_ICON_HITBOX_WIDTH - FOLD_ICON_WIDTH).half(),
@@ -906,9 +917,13 @@ impl TextElement {
         );
 
         for (ix, info) in fold_infos.iter().enumerate() {
-            // Position fold icon to the right of line numbers
+            // Position fold icon to the right of line numbers.
+            // Use origin_x (unscrolled) so icons stay fixed in the gutter during horizontal scroll.
             let fold_icon_bounds = Bounds::new(
-                bounds.origin + icon_relative_pos + point(line_number_width, info.offset_y),
+                point(
+                    origin_x + icon_relative_pos.x + line_number_width,
+                    bounds.origin.y + icon_relative_pos.y + info.offset_y,
+                ),
                 size(FOLD_ICON_HITBOX_WIDTH, line_height),
             );
 
@@ -1218,21 +1233,18 @@ impl IntoElement for TextElement {
 
 /// A debug function to print points as SVG path.
 #[allow(unused)]
-fn print_points_as_svg_path(
-    line_corners: &Vec<Corners<Point<Pixels>>>,
-    points: &Vec<Point<Pixels>>,
-) {
+fn print_points_as_svg_path(line_corners: &Vec<gpui::Corners<Pixels>>, points: &Vec<Point<Pixels>>) {
     for corners in line_corners {
         println!(
             "tl: ({}, {}), tr: ({}, {}), bl: ({}, {}), br: ({}, {})",
-            corners.top_left.x.as_f32() as i32,
-            corners.top_left.y.as_f32() as i32,
-            corners.top_right.x.as_f32() as i32,
-            corners.top_right.y.as_f32() as i32,
-            corners.bottom_left.x.as_f32() as i32,
-            corners.bottom_left.y.as_f32() as i32,
-            corners.bottom_right.x.as_f32() as i32,
-            corners.bottom_right.y.as_f32() as i32,
+            corners.top_left.as_f32() as i32,
+            corners.top_left.as_f32() as i32,
+            corners.top_right.as_f32() as i32,
+            corners.top_right.as_f32() as i32,
+            corners.bottom_left.as_f32() as i32,
+            corners.bottom_left.as_f32() as i32,
+            corners.bottom_right.as_f32() as i32,
+            corners.bottom_right.as_f32() as i32,
         );
     }
 
@@ -1247,7 +1259,6 @@ fn print_points_as_svg_path(
         }
     }
 }
-
 impl Element for TextElement {
     type RequestLayoutState = ();
     type PrepaintState = PrepaintState;
@@ -1575,6 +1586,11 @@ impl Element for TextElement {
 
         // Calculate the scroll offset to keep the cursor in view
 
+        // Save the unscrolled x before layout_cursor modifies bounds.origin with scroll_offset.
+        // Fold icons and their hitboxes must use this value so they stay fixed in the gutter
+        // regardless of horizontal scroll position.
+        let original_x = bounds.origin.x;
+
         let (cursor_bounds, cursor_scroll_offset, current_row) =
             self.layout_cursor(&last_layout, &mut bounds, window, cx);
         last_layout.cursor_bounds = cursor_bounds;
@@ -1639,7 +1655,7 @@ impl Element for TextElement {
         let hover_definition_hitbox = self.layout_hover_definition_hitbox(state, window, cx);
         let indent_guides_path =
             self.layout_indent_guides(state, &bounds, &last_layout, &text_style, window);
-        let fold_icon_layout = self.layout_fold_icons(&bounds, &last_layout, window, cx);
+        let fold_icon_layout = self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
 
         PrepaintState {
             bounds,
@@ -1887,7 +1903,14 @@ impl Element for TextElement {
                 if is_active {
                     if let Some(bg_color) = active_line_color {
                         window.paint_quad(fill(
-                            Bounds::new(p, size(prepaint.last_layout.line_number_width, height)),
+                            Bounds::new(
+                                p,
+                                size(
+                                    prepaint.last_layout.line_number_width
+                                        - LINE_NUMBER_RIGHT_MARGIN,
+                                    height,
+                                ),
+                            ),
                             bg_color,
                         ));
                     }

@@ -53,7 +53,6 @@ fn update_app_menu(title: impl Into<SharedString>, app_menu_bar: Entity<AppMenuB
 fn build_menus(title: impl Into<SharedString>, cx: &App) -> Vec<Menu> {
     vec![
         Menu {
-            disabled: false,
             name: title.into(),
             items: vec![
                 MenuItem::action("About", About),
@@ -61,7 +60,6 @@ fn build_menus(title: impl Into<SharedString>, cx: &App) -> Vec<Menu> {
                 MenuItem::action("Open...", Open),
                 MenuItem::Separator,
                 MenuItem::Submenu(Menu {
-                    disabled: false,
                     name: "Appearance".into(),
                     items: vec![
                         MenuItem::action("Light", SwitchThemeMode(ThemeMode::Light))
@@ -79,7 +77,6 @@ fn build_menus(title: impl Into<SharedString>, cx: &App) -> Vec<Menu> {
             disabled: false,
         },
         Menu {
-            disabled: false,
             name: "Edit".into(),
             items: vec![
                 MenuItem::action("Undo", gpui_component::input::Undo),
@@ -106,13 +103,11 @@ fn build_menus(title: impl Into<SharedString>, cx: &App) -> Vec<Menu> {
             disabled: false,
         },
         Menu {
-            disabled: false,
             name: "Window".into(),
             items: vec![MenuItem::action("Toggle Search", ToggleSearch)],
             disabled: false,
         },
         Menu {
-            disabled: false,
             name: "Help".into(),
             items: vec![
                 MenuItem::action("Documentation", Open).disabled(true),
@@ -127,7 +122,6 @@ fn build_menus(title: impl Into<SharedString>, cx: &App) -> Vec<Menu> {
 fn language_menu(_: &App) -> MenuItem {
     let locale = rust_i18n::locale().to_string();
     MenuItem::Submenu(Menu {
-        disabled: false,
         name: "Language".into(),
         items: vec![
             MenuItem::action("English", SelectLocale("en".into())).checked(locale == "en"),
@@ -141,7 +135,6 @@ fn theme_menu(cx: &App) -> MenuItem {
     let themes = ThemeRegistry::global(cx).sorted_themes();
     let current_name = cx.theme().theme_name();
     MenuItem::Submenu(Menu {
-        disabled: false,
         name: "Theme".into(),
         items: themes
             .iter()

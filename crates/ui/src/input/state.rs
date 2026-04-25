@@ -384,6 +384,8 @@ pub struct InputState {
     _pending_fold_update: bool,
     /// A flag to indicate if we should ignore the next completion event.
     pub(super) silent_replace_text: bool,
+    /// A flag to indicate if we should emit InputEvents.
+    pub(super) emit_events: bool,
 
     /// To remember the horizontal column (x-coordinate) of the cursor position for keep column for move up/down.
     ///
@@ -474,6 +476,7 @@ impl InputState {
             hover_popover: None,
             hover_definition: HoverDefinition::default(),
             silent_replace_text: false,
+            emit_events: true,
             size: Size::default(),
             _subscriptions,
             _context_menu_task: Task::ready(Ok(())),
@@ -725,8 +728,10 @@ impl InputState {
         cx: &mut Context<Self>,
     ) {
         self.history.ignore = true;
+        self.emit_events = false;
         self.replace_text(value, window, cx);
         self.history.ignore = false;
+        self.emit_events = true;
 
         // Ensure cursor to start when set text
         if self.mode.is_single_line() {
@@ -743,6 +748,7 @@ impl InputState {
         // Move scroll to top
         self.scroll_handle.set_offset(point(px(0.), px(0.)));
 
+        self.history.clear();
         cx.notify();
     }
 
@@ -1598,11 +1604,12 @@ impl InputState {
             y
         };
 
-        // Apart from left alignment, just leave enough space for the cursor size on the right side.
-        let safety_margin = if last_layout.text_align == TextAlign::Left {
-            RIGHT_MARGIN
-        } else {
-            CURSOR_WIDTH
+        // For Right alignment use 0 margin: the cursor indicator is clamped inside bounds
+        // in layout_cursor, so shifting the text here would cause a first-click visual jump.
+        let safety_margin = match last_layout.text_align {
+            TextAlign::Left => RIGHT_MARGIN,
+            TextAlign::Right => px(0.),
+            TextAlign::Center => CURSOR_WIDTH,
         };
         if let Some(line) = last_layout
             .lines
@@ -1740,6 +1747,30 @@ impl InputState {
         } else {
             self.selected_range.end
         }
+    }
+
+    /// Visible row range in the last laid-out viewport, `None` before first layout.
+    pub fn visible_row_range(&self) -> Option<std::ops::Range<usize>> {
+        self.last_layout.as_ref().map(|l| l.visible_range.clone())
+    }
+
+    /// Current scroll offset of the editor viewport.
+    pub fn scroll_offset(&self) -> gpui::Point<gpui::Pixels> {
+        self.scroll_handle.offset()
+    }
+
+    /// Laid-out line height; `None` before first layout.
+    pub fn line_height(&self) -> Option<gpui::Pixels> {
+        self.last_layout.as_ref().map(|l| l.line_height)
+    }
+
+    /// Returns the current selection as a byte range into the text.
+    ///
+    /// The range is empty (`start == end`) when no text is selected; in
+    /// that case the offset equals `cursor()`. Byte offsets are measured
+    /// in the underlying rope's byte units.
+    pub fn selected_range(&self) -> std::ops::Range<usize> {
+        self.selected_range.into()
     }
 
     pub(crate) fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
@@ -2415,7 +2446,9 @@ impl EntityInputHandler for InputState {
             return;
         }
 
-        self.pause_blink_cursor(cx);
+        if self.blink_cursor.read(cx).visible() {
+            self.pause_blink_cursor(cx);
+        }
 
         let range = range_utf16
             .as_ref()
@@ -2483,8 +2516,9 @@ impl EntityInputHandler for InputState {
         if !self.silent_replace_text {
             self.handle_completion_trigger(&range, &new_text, window, cx);
         }
-
-        cx.emit(InputEvent::Change);
+        if self.emit_events {
+            cx.emit(InputEvent::Change);
+        }
         cx.notify();
     }
 

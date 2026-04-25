@@ -1609,6 +1609,64 @@ where
             })
     }
 
+    /// Compute the visible non-fixed leaf-column range for header rendering.
+    ///
+    /// Returns `(visible_range, left_spacer_width)` where:
+    /// - `visible_range` is the column-index range that should be rendered.
+    /// - `left_spacer_width` is the total width of the off-screen left columns,
+    ///   used as a spacer div to keep visible columns at the correct position.
+    ///
+    /// On the first frame `self.bounds` is zero, so a fallback that covers all
+    /// columns is returned to avoid a blank header on initial paint.
+    fn calculate_visible_leaf_col_range(
+        &self,
+        left_columns_count: usize,
+    ) -> (Range<usize>, Pixels) {
+        let total_cols = self.col_groups.len();
+
+        if self.bounds.size.width == px(0.) {
+            return (left_columns_count..total_cols, px(0.));
+        }
+
+        let fixed_width = self.fixed_head_cols_bounds.size.width;
+        let available_width = (self.bounds.size.width - fixed_width).max(px(0.));
+        // The scroll handle offset is negative when scrolled right; negate it
+        // to obtain a positive distance from the left edge of the scroll area.
+        let scroll_x = (-self.horizontal_scroll_handle.offset().x).max(px(0.));
+
+        // Walk left-to-right through non-fixed columns to find the first one
+        // whose right edge enters the viewport. The accumulated width of the
+        // skipped columns becomes the left spacer width.
+        let mut range_start = left_columns_count;
+        let mut left_spacer = px(0.);
+        let mut cumulative = px(0.);
+        for i in left_columns_count..total_cols {
+            let right_edge = cumulative + self.col_groups[i].width;
+            if right_edge > scroll_x {
+                range_start = i;
+                left_spacer = cumulative;
+                break;
+            }
+            cumulative = right_edge;
+        }
+
+        // Continue from `range_start` (skipping already-scanned columns) to
+        // find the last column still within the viewport. The 200 px overdraw
+        // buffer prevents a visible flash when the user scrolls quickly.
+        let right_bound = scroll_x + available_width + px(200.);
+        let mut range_end = total_cols;
+        let mut cumulative = left_spacer; // already summed widths before `range_start`
+        for i in range_start..total_cols {
+            cumulative += self.col_groups[i].width;
+            if cumulative > right_bound {
+                range_end = (i + 1).min(total_cols);
+                break;
+            }
+        }
+
+        (range_start..range_end, left_spacer)
+    }
+
     fn render_table_header(
         &mut self,
         left_columns_count: usize,
@@ -1616,6 +1674,26 @@ where
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let view = cx.entity().clone();
+
+        // Header leaf-column virtualization.
+        //
+        // `render_th` creates interactive elements with resize-handle listeners.
+        // Calling it for every column every frame is O(n) in column count; with
+        // 1000+ columns this alone drops FPS below 60 even in release mode.
+        //
+        // We restrict rendering to the columns currently visible inside the
+        // overflow-scroll viewport, surrounding them with inert spacer divs:
+        //
+        //   [left_spacer] [visible columns…] [right_spacer] [last_empty_col]
+        //
+        // The spacers preserve the flex container's total content width so that
+        // the scrollbar range stays correct.
+        let total_cols = self.col_groups.len();
+        let (visible_col_range, left_spacer) =
+            self.calculate_visible_leaf_col_range(left_columns_count);
+
+        let layout_len = self.header_layout.len();
+
         // Reset fixed head columns bounds, if no fixed columns are present
         if left_columns_count == 0 {
             self.fixed_head_cols_bounds = Bounds::default();
@@ -1692,44 +1770,82 @@ where
                     .bg(cx.theme().table_head)
                     .map(|this| {
                         if has_group_headers {
+                            // Grouped header: multi-row v_flex. Leaf row uses upstream's spacer
+                            // virtualization for tables with many leaf columns; group header rows
+                            // render every cell (cell count is small per group row).
                             let layout = self.header_layout.clone();
                             this.child(
-                                v_flex().min_w_full().flex_shrink_0().children(layout.iter().enumerate().map(|(_row_ix, row_cells)| {
+                                v_flex().min_w_full().flex_shrink_0().children(layout.iter().enumerate().map(|(row_ix, row_cells)| {
+                                    let is_leaf_row = row_ix + 1 == layout_len;
                                     h_flex()
                                         .min_w_full()
                                         .h(self.options.size.table_row_height())
                                         .border_b_1()
                                         .border_color(cx.theme().border)
-                                        .children(row_cells.iter().filter_map(|cell| {
-                                            if cell.start_leaf_col_ix >= left_columns_count {
-                                                if cell.is_leaf {
-                                                    if let Some(ix) = cell.leaf_col_ix {
-                                                        return Some(
+                                        .map(|this| {
+                                            if is_leaf_row {
+                                                this.when(left_spacer > px(0.), |r| {
+                                                    r.child(div().w(left_spacer).h_full().flex_shrink_0())
+                                                })
+                                                .children(row_cells.iter().filter_map(|cell| {
+                                                    if cell.start_leaf_col_ix >= left_columns_count
+                                                        && cell.is_leaf
+                                                    {
+                                                        let ix = cell.leaf_col_ix?;
+                                                        if !visible_col_range.contains(&ix) {
+                                                            return None;
+                                                        }
+                                                        Some(
                                                             self.render_th(ix, 1, window, cx)
                                                                 .into_any_element(),
-                                                        );
+                                                        )
+                                                    } else {
+                                                        None
                                                     }
-                                                } else {
-                                                    return Some(
-                                                        self.delegate_mut()
-                                                            .render_group_th(
-                                                                &cell.label,
-                                                                cell.col_span,
-                                                                cell.width,
-                                                                window,
-                                                                cx,
-                                                            )
-                                                            .into_any_element(),
-                                                    );
-                                                }
+                                                }))
+                                                .when(visible_col_range.end < total_cols, |r| {
+                                                    let right_spacer: Pixels = self.col_groups
+                                                        [visible_col_range.end..total_cols]
+                                                        .iter()
+                                                        .map(|g| g.width)
+                                                        .sum();
+                                                    r.child(div().w(right_spacer).h_full().flex_shrink_0())
+                                                })
+                                                .child(self.delegate.render_last_empty_col(window, cx))
+                                            } else {
+                                                this.children(row_cells.iter().filter_map(|cell| {
+                                                    if cell.start_leaf_col_ix >= left_columns_count {
+                                                        if cell.is_leaf {
+                                                            if let Some(ix) = cell.leaf_col_ix {
+                                                                return Some(
+                                                                    self.render_th(ix, 1, window, cx)
+                                                                        .into_any_element(),
+                                                                );
+                                                            }
+                                                        } else {
+                                                            return Some(
+                                                                self.delegate_mut()
+                                                                    .render_group_th(
+                                                                        &cell.label,
+                                                                        cell.col_span,
+                                                                        cell.width,
+                                                                        window,
+                                                                        cx,
+                                                                    )
+                                                                    .into_any_element(),
+                                                            );
+                                                        }
+                                                    }
+                                                    None
+                                                }))
+                                                .child(self.delegate.render_last_empty_col(window, cx))
                                             }
-                                            None
-                                        }))
-                                        .child(self.delegate.render_last_empty_col(window, cx))
+                                        })
                                 }))
                             )
                         } else {
-                            let total_cols = self.col_groups.len();
+                            // Flat header: use header_col_spans to support column spans even
+                            // without group headers (a local feature beyond upstream's design).
                             this.child(
                                 h_flex()
                                     .relative()
@@ -2288,12 +2404,12 @@ where
                                 render_rows_count,
                                 cx.processor(
                                     move |table, visible_range: Range<usize>, window, cx| {
-                                        // Use col.width (computed by update_auto_widths at
-                                        // the start of this render) instead of col.bounds.size
-                                        // (stored by on_prepaint from the previous frame).
-                                        // This keeps body column positions in sync with the
-                                        // header on the same frame, avoiding column jitter
-                                        // during window resize.
+                                        // Column widths come from `update_auto_widths` at the
+                                        // start of this render rather than `col.bounds.size` (set
+                                        // by on_prepaint from the previous frame). Keeps body
+                                        // columns in sync with the header on the same frame and
+                                        // avoids column jitter during window resize.
+
                                         table.load_more_if_need(
                                             rows_count,
                                             visible_range.end,
