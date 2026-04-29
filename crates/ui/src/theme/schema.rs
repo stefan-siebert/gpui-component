@@ -687,27 +687,35 @@ impl Theme {
             ThemeColor::light()
         };
 
-        if let Some(font_size) = config.font_size {
-            self.font_size = px(font_size);
-        }
-        if let Some(font_family) = &config.font_family {
-            self.font_family = font_family.clone();
-        }
-        if let Some(mono_font_family) = &config.mono_font_family {
-            self.mono_font_family = mono_font_family.clone();
-        }
-        if let Some(mono_font_size) = config.mono_font_size {
-            self.mono_font_size = px(mono_font_size);
-        }
-        if let Some(radius) = config.radius {
-            self.radius = px(radius as f32);
-        }
-        if let Some(radius_lg) = config.radius_lg {
-            self.radius_lg = px(radius_lg as f32);
-        }
-        if let Some(shadow) = config.shadow {
-            self.shadow = shadow;
-        }
+        // Reset top-level fields to their hard-coded defaults when the new
+        // config doesn't specify them. Without this, switching from a theme
+        // that sets `radius: 0` (e.g. Matrix) to one that leaves it
+        // unspecified would leak the previous theme's value, producing
+        // sticky rectangular buttons after a single Matrix preview.
+        let defaults = Theme::default();
+
+        self.font_size = config.font_size.map(px).unwrap_or(defaults.font_size);
+        self.font_family = config
+            .font_family
+            .clone()
+            .unwrap_or(defaults.font_family);
+        self.mono_font_family = config
+            .mono_font_family
+            .clone()
+            .unwrap_or(defaults.mono_font_family);
+        self.mono_font_size = config
+            .mono_font_size
+            .map(px)
+            .unwrap_or(defaults.mono_font_size);
+        self.radius = config
+            .radius
+            .map(|r| px(r as f32))
+            .unwrap_or(defaults.radius);
+        self.radius_lg = config
+            .radius_lg
+            .map(|r| px(r as f32))
+            .unwrap_or(defaults.radius_lg);
+        self.shadow = config.shadow.unwrap_or(defaults.shadow);
 
         self.colors.apply_config(&config, &default_colors);
         self.mode = config.mode;
