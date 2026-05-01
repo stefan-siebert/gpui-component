@@ -7,6 +7,7 @@ index.scip
 *.log
 node_modules/
 .claude/worktrees/
+.claude/settings.local.json
 docs/superpowers/
 
 # WASM build artifacts
