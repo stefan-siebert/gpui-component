@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use crate::{
-    ActiveTheme, Colorize as _, Disableable, FocusableExt as _, Icon, IconName, Selectable,
+    ActiveTheme, Colorize as _, Disableable, Icon, IconName, Selectable,
     Sizable, Size, StyleSized, StyledExt, button::ButtonIcon, h_flex,
     platform_control_h_boost, platform_control_px_boost,
     tooltip::{ManagedTooltipExt as _, Tooltip},
@@ -647,7 +647,29 @@ impl RenderOnce for Button {
                     this
                 }
             })
-            .focus_ring(is_focused, px(0.), window, cx)
+            // Solid 1px inset focus border in `theme.ring`, matching Input's
+            // `focused_border` style. Renders an absolutely positioned overlay
+            // child so it doesn't shift Button layout on focus, while looking
+            // identical to Input's inline focused border (no outset glow).
+            .when(is_focused, |this| {
+                let mut inner_style = StyleRefinement::default();
+                inner_style.corner_radii.top_left = Some(rounding.into());
+                inner_style.corner_radii.top_right = Some(rounding.into());
+                inner_style.corner_radii.bottom_left = Some(rounding.into());
+                inner_style.corner_radii.bottom_right = Some(rounding.into());
+                this.child(
+                    div()
+                        .flex_none()
+                        .absolute()
+                        .top(px(0.))
+                        .left(px(0.))
+                        .right(px(0.))
+                        .bottom(px(0.))
+                        .border_1()
+                        .border_color(cx.theme().ring)
+                        .refine_style(&inner_style),
+                )
+            })
     }
 }
 
