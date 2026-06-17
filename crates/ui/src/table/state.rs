@@ -1235,24 +1235,20 @@ where
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Div {
-        self.render_cell_inner(col_ix, false)
+        self.render_cell_inner(col_ix)
     }
 
-    /// Like `render_cell` but auto_width columns always use `flex_1()` instead
-    /// of a computed pixel width. Used by the h_flex body row path where CSS
-    /// flexbox handles sizing directly, avoiding 1-frame column jitter during
-    /// window resize.
+    /// Retained as a thin alias of `render_cell` for the body row path.
     fn render_cell_flex(
         &self,
         col_ix: usize,
     ) -> Div {
-        self.render_cell_inner(col_ix, true)
+        self.render_cell_inner(col_ix)
     }
 
     fn render_cell_inner(
         &self,
         col_ix: usize,
-        force_flex_auto: bool,
     ) -> Div {
         let Some(col_group) = self.col_groups.get(col_ix) else {
             return div();
@@ -1260,14 +1256,15 @@ where
 
         let col_width = col_group.width;
         let col_padding = col_group.column.paddings;
-        // Use flex_1() for auto_width columns when:
-        // - force_flex_auto is true (h_flex body path, avoids resize jitter), or
-        // - first frame before auto_widths are computed (avoids visible flash)
-        let use_flex = if force_flex_auto {
-            col_group.column.auto_width
-        } else {
-            col_group.column.auto_width && !self.auto_widths_ready()
-        };
+        // Auto_width columns flex only on the very first frame, before their
+        // width has been measured (avoids a visible flash). Once measured, they
+        // render at their computed pixel width — same as fixed columns — so that
+        // resizing a neighbouring column pushes columns outward instead of the
+        // auto column greedily absorbing the change (which pinned the resized
+        // column's right edge and made the resize look mirrored). The previous
+        // virtual-list jitter that motivated permanent flex_1 is gone: the body
+        // now renders scrollable columns directly in an h_flex.
+        let use_flex = col_group.column.auto_width && !self.auto_widths_ready();
 
         div()
             .when(use_flex, |this| this.flex_1().min_w(col_group.column.min_width))
@@ -1523,6 +1520,10 @@ where
         let is_auto = self.col_groups[col_ix..col_ix + colspan]
             .iter()
             .any(|cg| cg.column.auto_width);
+        // Auto columns flex only until their width has been measured; afterwards
+        // they size to their computed width, mirroring `render_cell_inner` so the
+        // header stays in sync with the body.
+        let auto_flex = is_auto && !self.auto_widths_ready();
 
         // Build the inner sizing div for the spanned header cell.
         let cell_div = if colspan == 1 {
@@ -1544,7 +1545,7 @@ where
                 .whitespace_nowrap()
                 .table_cell_size(self.options.size);
 
-            if is_auto {
+            if auto_flex {
                 cell.flex_1().min_w(total_min_width)
             } else {
                 cell.w(total_width).flex_shrink_0()
@@ -1556,9 +1557,9 @@ where
 
         h_flex()
             .h_full()
-            // Always use flex_1 for auto_width columns so the header stays
-            // in sync with body cells (which also use flex_1 via render_cell_flex).
-            .when(is_auto, |this| this.flex_1())
+            // Flex the auto column only until its width is measured; thereafter
+            // it sizes to its computed width, matching the body.
+            .when(auto_flex, |this| this.flex_1())
             .child(
                 cell_div
                     .id(("col-header", col_ix))
@@ -1611,7 +1612,31 @@ where
             // to save the bounds of this col.
             .on_prepaint({
                 let view = cx.entity().clone();
-                move |bounds, _, cx| view.update(cx, |r, _| r.col_groups[col_ix].bounds = bounds)
+                move |bounds, _, cx| {
+                    view.update(cx, |r, _| {
+                        r.col_groups[col_ix].bounds = bounds;
+                        // For a spanned header (colspan > 1) the resize handle targets the
+                        // LAST spanned column (`resize_col_ix`), not the leader. The drag math
+                        // reads `col_groups[resize_col_ix].bounds.left()`, so that column needs
+                        // bounds whose left edge matches its real on-screen position. Without
+                        // this it stays at the default `origin.x = 0` and the resize computes a
+                        // width relative to the window's left edge, making the column jump to
+                        // full width. Its left edge = span left + widths of the preceding
+                        // spanned columns.
+                        if resize_col_ix != col_ix {
+                            if let Some(slice) = r.col_groups.get(col_ix..resize_col_ix) {
+                                let preceding: Pixels = slice.iter().map(|c| c.width).sum();
+                                if let Some(resize_group) = r.col_groups.get_mut(resize_col_ix) {
+                                    let mut resize_bounds = bounds;
+                                    resize_bounds.origin.x = bounds.left() + preceding;
+                                    resize_bounds.size.width =
+                                        (bounds.right() - resize_bounds.origin.x).max(px(0.));
+                                    resize_group.bounds = resize_bounds;
+                                }
+                            }
+                        }
+                    })
+                }
             })
     }
 
@@ -1766,8 +1791,9 @@ where
             })
             .child(
                 // Columns
-                // overflow_hidden (not overflow_scroll) so that flex_1 on
-                // auto_width columns can compute remaining space correctly.
+                // overflow_hidden (not overflow_scroll): clips columns that
+                // extend past the container when one is resized wider, and lets
+                // the auto column's first-frame remaining-space fill work.
                 h_flex()
                     .id("table-head")
                     .size_full()
@@ -2053,10 +2079,11 @@ where
                     )
                 })
                 .children({
-                    // Render scrollable columns directly in h_flex using
-                    // render_cell_flex (flex_1 for auto_width columns).
-                    // This avoids the horizontal virtual_list's 1-frame
-                    // column width lag that causes jitter during resize.
+                    // Render scrollable columns directly in this h_flex (no
+                    // horizontal virtual_list). This is the jitter fix: it avoids
+                    // the virtual_list's 1-frame column-width lag during resize.
+                    // Auto columns size via their computed width (see
+                    // render_cell_inner), so they stay in sync with the header.
                     let mut cells = Vec::with_capacity(
                         columns_count - left_columns_count,
                     );
@@ -2070,15 +2097,19 @@ where
                         let is_auto = self.col_groups.get(col_ix)
                             .map(|c| c.column.auto_width)
                             .unwrap_or(false);
+                        // Flex the auto column only before its width is measured;
+                        // afterwards the child cell carries the computed width, so
+                        // resizing a neighbour pushes columns instead of shrinking
+                        // this one. Matches the header (`auto_flex`).
+                        let auto_flex = is_auto && !self.auto_widths_ready();
                         let col_min_w = self.col_groups.get(col_ix)
                             .map(|c| c.column.min_width)
                             .unwrap_or(px(0.));
 
                         let el = self
                             .render_col_wrap(Some(row_ix), col_ix, window, cx)
-                            // Propagate flex_1 to the wrapper so the auto_width
-                            // column fills remaining row space.
-                            .when(is_auto, |this| this.flex_1().min_w(col_min_w).overflow_hidden())
+                            // Before measurement: fill remaining row space via flex.
+                            .when(auto_flex, |this| this.flex_1().min_w(col_min_w).overflow_hidden())
                             .child(
                                 self.render_cell_flex(col_ix)
                                     .id(format!("table-cell-{}:{}", row_ix, col_ix))
