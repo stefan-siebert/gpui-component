@@ -15,6 +15,10 @@ members = [
     "examples/webview",
     "examples/system_monitor",
     "examples/focus_trap",
+    "examples/tooltip_top_edge",
+    "examples/sidebar",
+    "examples/text_selection",
+    "examples/root_borderless",
 ]
 resolver = "2"
 
@@ -23,7 +27,7 @@ publish = false
 edition = "2024"
 
 [workspace.dependencies]
-gpui-component = { path = "crates/ui", version = "0.5.1" }
+gpui-component = { path = "crates/ui", version = "0.5.2" }
 gpui-component-macros = { path = "crates/macros", version = "0.5.1" }
 gpui-component-assets = { path = "crates/assets", version = "0.5.1" }
 gpui-mcp-protocol = { package = "gpui-mcp-inspector", path = "../gpui-mcp" }
@@ -70,7 +74,9 @@ errno = { version = "0.3.14", default-features = false }
 
 [workspace.dependencies.windows]
 features = ["Wdk", "Wdk_System", "Wdk_System_SystemServices"]
-version = "0.58.0"
+# Unified with the gpui fork's windows version to avoid two windows crates in
+# the dependency tree (and to provide the Option<HWND> Win32 API title_bar uses).
+version = "0.62"
 
 [workspace.lints.clippy]
 almost_complete_range = "allow"

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Bounds, Element, ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior,
-    InspectorElementId, InteractiveElement, IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, SharedString, StyleRefinement, Styled, Window, div,
+    InspectorElementId, InteractiveElement, IntoElement, LayoutId, ParentElement, Pixels,
+    SharedString, StyleRefinement, Styled, Window, div,
 };
 
 use crate::StyledExt;
@@ -218,7 +218,16 @@ impl Element for TextView {
                 this.size_full().vertical_scrollbar(&list_state)
             })
             .relative()
-            .on_action(window.listener_for(&state, TextViewState::on_action_copy))
+            .on_action(move |_: &crate::input::Copy, window, cx| {
+                use crate::WindowExt as _;
+                let text = window.selected_text(cx).trim().to_string();
+                if text.is_empty() {
+                    cx.propagate();
+                    return;
+                }
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            })
+            .on_action(window.listener_for(&state, TextViewState::on_action_select_all))
             .child(state.clone())
             .refine_style(&self.style)
             .into_any_element();
@@ -250,82 +259,17 @@ impl Element for TextView {
         cx: &mut App,
     ) {
         let state = &request_layout.state;
+        if self.selectable {
+            // Register before painting children so this frame's Inline paint can
+            // repopulate the text bounds after stale ones are cleared.
+            crate::Root::register_selectable_text_view(state, hitbox, window, cx);
+        }
+
         GlobalState::global_mut(cx)
             .text_view_state_stack
             .push(state.clone());
         request_layout.element.paint(window, cx);
         GlobalState::global_mut(cx).text_view_state_stack.pop();
-
-        if self.selectable {
-            let is_selecting = state.read(cx).is_selecting;
-            let has_selection = state.read(cx).has_selection();
-            let parent_view_id = window.current_view();
-
-            window.on_mouse_event({
-                let state = state.clone();
-                let hitbox = hitbox.clone();
-                move |event: &MouseDownEvent, phase, window, cx| {
-                    if !phase.bubble() || !hitbox.is_hovered(window) {
-                        return;
-                    }
-
-                    state.update(cx, |state, _| {
-                        state.start_selection(event.position);
-                    });
-                    cx.notify(parent_view_id);
-                }
-            });
-
-            if is_selecting {
-                // move to update end position.
-                window.on_mouse_event({
-                    let state = state.clone();
-                    move |event: &MouseMoveEvent, phase, _, cx| {
-                        if !phase.bubble() {
-                            return;
-                        }
-
-                        state.update(cx, |state, _| {
-                            state.update_selection(event.position);
-                        });
-                        cx.notify(parent_view_id);
-                    }
-                });
-
-                // up to end selection
-                window.on_mouse_event({
-                    let state = state.clone();
-                    move |_: &MouseUpEvent, phase, _, cx| {
-                        if !phase.bubble() {
-                            return;
-                        }
-
-                        state.update(cx, |state, _| {
-                            state.end_selection();
-                        });
-                        cx.notify(parent_view_id);
-                    }
-                });
-            }
-
-            if has_selection {
-                // down outside to clear selection
-                window.on_mouse_event({
-                    let state = state.clone();
-                    let hitbox = hitbox.clone();
-                    move |_: &MouseDownEvent, _, window, cx| {
-                        if hitbox.is_hovered(window) {
-                            return;
-                        }
-
-                        state.update(cx, |state, _| {
-                            state.clear_selection();
-                        });
-                        cx.notify(parent_view_id);
-                    }
-                });
-            }
-        }
     }
 }
 
@@ -334,8 +278,9 @@ mod tests {
     use super::TextView;
     use crate::text::TextViewState;
     use gpui::{
-        AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, ParentElement as _,
-        Render, Styled as _, TestAppContext, VisualTestContext, Window, div, point, px,
+        AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent,
+        MouseUpEvent, ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext,
+        Window, div, point, px,
     };
 
     struct TextViewTestRoot {
@@ -404,6 +349,153 @@ mod tests {
         assert!(
             selected_text.is_empty(),
             "unexpected selection: {selected_text:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn double_click_selects_word(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (view, cx) =
+            cx.add_window_view(|_, cx| TextViewTestRoot::new("quick select value", cx));
+
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let position = point(px(10.), px(16.));
+        cx.simulate_event(MouseDownEvent {
+            position,
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position,
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let selected_text = view.read_with(cx, |root, cx| root.text_view.read(cx).selected_text());
+        assert_eq!(selected_text.trim(), "quick");
+    }
+
+    #[gpui::test]
+    fn triple_click_selects_paragraph(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (view, cx) =
+            cx.add_window_view(|_, cx| TextViewTestRoot::new("quick select value", cx));
+
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let position = point(px(10.), px(10.));
+        cx.simulate_event(MouseDownEvent {
+            position,
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 3,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position,
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 3,
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let selected_text = view.read_with(cx, |root, cx| root.text_view.read(cx).selected_text());
+        assert_eq!(selected_text.trim(), "quick select value");
+    }
+
+    // Regression: markdown `TextView` items inside an outer `gpui::list` with
+    // `measure_all` must keep a stable total content height while scrolling.
+    // Before synchronous full-replace parsing, off-screen markdown views were
+    // first measured with empty content and the scrollbar thumb jittered as the
+    // total height grew during scrolling.
+    #[gpui::test]
+    fn outer_list_content_total_stable_while_scrolling(cx: &mut TestAppContext) {
+        use gpui::{ListAlignment, ListState, list};
+
+        const ITEMS: &[&str] = &[
+            "# Heading\n\nA paragraph long enough to wrap across several lines and produce a non-trivial height.",
+            "Short.",
+            "Paragraph A\n\nParagraph B\n\nParagraph C with more words to increase the height.",
+            "## Subheading\n\n- One\n- Two\n- Three\n\nClosing paragraph.",
+            "Only one line.",
+            "**Bold**: medium length text with `code` mixed with regular words.",
+            "1. First\n2. Second\n3. Third\n\nA short closing paragraph.",
+            "A long message with enough words to wrap across multiple lines, create a taller item, and verify that off-screen measurement matches visible measurement.",
+        ];
+        let n = 40usize;
+
+        struct ListRoot {
+            state: ListState,
+        }
+        impl Render for ListRoot {
+            fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(360.)).h(px(500.)).child(
+                    list(self.state.clone(), |ix, _w, _cx| {
+                        div()
+                            .w_full()
+                            .child(TextView::markdown(
+                                ("md", ix as u64),
+                                ITEMS[ix % ITEMS.len()],
+                            ))
+                            .into_any_element()
+                    })
+                    .size_full(),
+                )
+            }
+        }
+
+        cx.update(crate::init);
+        let state = ListState::new(n, ListAlignment::Top, px(2048.)).measure_all();
+        let probe = state.clone();
+        let (_view, cx) = cx.add_window_view(|_w, _cx| ListRoot { state });
+        let cx: &mut VisualTestContext = cx;
+
+        cx.run_until_parked();
+        cx.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+
+        let total = |p: &ListState| {
+            f32::from(p.max_offset_for_scrollbar().y + p.viewport_bounds().size.height)
+        };
+        let mut totals = vec![total(&probe)];
+        for _ in 0..20 {
+            probe.scroll_by(px(150.));
+            cx.update(|w, cx| {
+                let _ = w.draw(cx);
+            });
+            cx.run_until_parked();
+            totals.push(total(&probe));
+        }
+        let min = totals.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max = totals.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        println!(
+            "OUTER_LIST_PROBE min={min:.1} max={max:.1} delta={:.1}",
+            max - min
+        );
+        assert!(
+            (max - min) < 2.0,
+            "list content total jittered while scrolling: min={min} max={max} totals={totals:?}"
         );
     }
 }

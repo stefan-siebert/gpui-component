@@ -74,6 +74,7 @@ pub fn box_shadow(
         offset: point(x.into(), y.into()),
         blur_radius: blur.into(),
         spread_radius: spread.into(),
+        inset: false,
         color,
     }
 }
@@ -265,6 +266,7 @@ impl Size {
     pub fn table_row_height(&self) -> Pixels {
         let b = platform_control_h_boost();
         match self {
+            Size::Size(size) => *size,
             Size::XSmall => px(26.) + b,
             Size::Small => px(30.) + b,
             Size::Large => px(40.),
@@ -670,6 +672,15 @@ mod tests {
         assert_eq!(Size::Medium.as_str(), "md");
         assert_eq!(Size::Large.as_str(), "lg");
         assert_eq!(Size::Size(px(15.)).as_str(), "custom");
+    }
+
+    #[test]
+    fn test_table_row_height() {
+        assert_eq!(Size::XSmall.table_row_height(), px(26.));
+        assert_eq!(Size::Small.table_row_height(), px(30.));
+        assert_eq!(Size::Medium.table_row_height(), px(32.));
+        assert_eq!(Size::Large.table_row_height(), px(40.));
+        assert_eq!(Size::Size(px(48.)).table_row_height(), px(48.));
     }
 
     #[test]

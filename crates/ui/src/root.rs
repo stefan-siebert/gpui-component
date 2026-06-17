@@ -2,18 +2,21 @@ use crate::{
     ActiveTheme, ElementExt, Placement, StyledExt,
     dialog::{ANIMATION_DURATION, Dialog},
     focus_trap::FocusTrapManager,
-    input::InputState,
+    input::{Copy, InputState},
+    native_menu::FallbackMenuOverlay,
     notification::{Notification, NotificationList},
     sheet::Sheet,
+    text::{TextSelectionController, TextViewState, WindowTextSelection},
     tooltip::TooltipOverlay,
     window_border,
 };
 use gpui::{
-    Anchor, AnyView, App, AppContext, Context, DefiniteLength, Entity, FocusHandle,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement as _, Pixels, Render,
-    StyleRefinement, Styled, WeakFocusHandle, Window, actions, div, prelude::FluentBuilder as _,
+    Anchor, AnyView, App, AppContext, Bounds, ClipboardItem, Context, DefiniteLength, ElementId,
+    Entity, EntityId, FocusHandle, Hitbox, InteractiveElement, IntoElement, KeyBinding,
+    ParentElement as _, Pixels, Render, StyleRefinement, Styled, WeakEntity, WeakFocusHandle,
+    Window, actions, div, prelude::FluentBuilder as _,
 };
-use std::{any::TypeId, rc::Rc};
+use std::{any::TypeId, collections::HashMap, rc::Rc};
 
 actions!(root, [Tab, TabPrev]);
 
@@ -22,6 +25,10 @@ pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("tab", Tab, Some(CONTEXT)),
         KeyBinding::new("shift-tab", TabPrev, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-c", Copy, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-c", Copy, Some(CONTEXT)),
     ]);
 }
 
@@ -36,12 +43,22 @@ pub struct Root {
     pub(super) focused_input: Option<Entity<InputState>>,
     pub notification: Entity<NotificationList>,
     pub(crate) tooltip_overlay: Entity<TooltipOverlay>,
+    pub(crate) native_menu_overlay: Entity<FallbackMenuOverlay>,
     sheet_size: Option<DefiniteLength>,
     window_shadow_size: Pixels,
+    /// Corner radius for the Linux CSD window border / content rounding.
     border_radius: Pixels,
+    /// Render the Linux CSD `window_border` wrapper.
+    bordered: bool,
     /// The focus handle that will be restored after a dialog is closed with animation.
     /// Used to handle rapid dialog opening/closing to maintain correct focus chain.
     pending_focus_restore: Option<WeakFocusHandle>,
+    /// Window-level text selection state. See `text::window_selection`.
+    pub(crate) text_selection: WindowTextSelection,
+    /// Selectable TextViews registered this frame, keyed by entity id.
+    pub(crate) selectable_text_views: HashMap<EntityId, (WeakEntity<TextViewState>, Hitbox)>,
+    /// Inline text bounds for selectable TextViews, keyed by parent TextView id.
+    pub(crate) selectable_text_inlines: HashMap<EntityId, Vec<Bounds<Pixels>>>,
 }
 
 #[derive(Clone)]
@@ -86,11 +103,25 @@ impl Root {
             focused_input: None,
             notification: cx.new(|cx| NotificationList::new(window, cx)),
             tooltip_overlay: cx.new(|_| TooltipOverlay::new()),
+            native_menu_overlay: cx.new(|_| FallbackMenuOverlay::new()),
             sheet_size: None,
             window_shadow_size: window_border::SHADOW_SIZE,
             border_radius: window_border::BORDER_RADIUS,
+            bordered: true,
             pending_focus_restore: None,
+            text_selection: WindowTextSelection::default(),
+            selectable_text_views: HashMap::new(),
+            selectable_text_inlines: HashMap::new(),
         }
+    }
+
+    /// Enable or disable the Linux client-side window border wrapper.
+    ///
+    /// Defaults to `true`. Use `bordered(false)` for layer-shell fullscreen windows
+    /// or other surfaces that should not render GPUI Component's window border.
+    pub fn bordered(mut self, bordered: bool) -> Self {
+        self.bordered = bordered;
+        self
     }
 
     /// Set the window border shadow size for Linux client-side decorations.
@@ -101,7 +132,7 @@ impl Root {
         self
     }
 
-    /// Set the border radius for the window corners (Linux client-side decorations).
+    /// Set the corner radius for the window border and content rounding (Linux CSD).
     ///
     /// Default: [`window_border::BORDER_RADIUS`]
     pub fn border_radius(mut self, radius: impl Into<Pixels>) -> Self {
@@ -377,14 +408,29 @@ impl Root {
         cx.notify();
     }
 
+    /// Removes all notifications whose id matches `T`, including ones registered with
+    /// either [`Notification::id`] or [`Notification::id1`] (any key).
     pub fn remove_notification<T: Sized + 'static>(
         &mut self,
         window: &mut Window,
         cx: &mut Context<'_, Root>,
     ) {
         self.notification.update(cx, |view, cx| {
-            let id = TypeId::of::<T>();
-            view.close(id, window, cx);
+            view.close_by_type(TypeId::of::<T>(), window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Removes the notification matching the given type and element id (paired with [`Notification::id1`]).
+    pub fn remove_notification1<T: Sized + 'static>(
+        &mut self,
+        key: impl Into<ElementId>,
+        window: &mut Window,
+        cx: &mut Context<'_, Root>,
+    ) {
+        let key = key.into();
+        self.notification.update(cx, |view, cx| {
+            view.close((TypeId::of::<T>(), key), window, cx);
         });
         cx.notify();
     }
@@ -399,6 +445,15 @@ impl Root {
     pub(crate) fn tooltip_overlay(window: &Window, cx: &App) -> Option<Entity<TooltipOverlay>> {
         let root = window.root::<Root>()??;
         Some(root.read(cx).tooltip_overlay.clone())
+    }
+
+    /// Get the fallback native-menu overlay entity for this window.
+    pub(crate) fn native_menu_overlay(
+        window: &Window,
+        cx: &App,
+    ) -> Option<Entity<FallbackMenuOverlay>> {
+        let root = window.root::<Root>()??;
+        Some(root.read(cx).native_menu_overlay.clone())
     }
 
     /// Return the root view of the Root.
@@ -475,6 +530,15 @@ impl Root {
         // Normal tab navigation
         window.focus_prev(cx);
     }
+
+    fn on_action_copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        let text = self.window_selected_text(cx).trim().to_string();
+        if text.is_empty() {
+            cx.propagate();
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
 }
 
 impl Styled for Root {
@@ -488,34 +552,77 @@ impl Render for Root {
         window.set_rem_size(cx.theme().font_size);
         let border_radius = self.border_radius;
 
-        window_border()
-            .shadow_size(self.window_shadow_size)
-            .border_radius(border_radius)
-            .child(
-                div()
-                    .id("root")
-                    .key_context(CONTEXT)
-                    .on_action(cx.listener(Self::on_action_tab))
-                    .on_action(cx.listener(Self::on_action_tab_prev))
-                    .relative()
-                    .size_full()
-                    .overflow_hidden()
-                    .font_family(cx.theme().font_family.clone())
-                    .bg(cx.theme().background)
-                    .text_color(cx.theme().foreground)
-                    .refine_style(&self.style)
-                    .map(|div| {
-                        match window.window_decorations() {
-                            gpui::Decorations::Server => div,
-                            gpui::Decorations::Client { tiling } => div
-                                .when(!(tiling.top || tiling.left), |d| d.rounded_tl(border_radius))
-                                .when(!(tiling.top || tiling.right), |d| d.rounded_tr(border_radius))
-                                .when(!(tiling.bottom || tiling.left), |d| d.rounded_bl(border_radius))
-                                .when(!(tiling.bottom || tiling.right), |d| d.rounded_br(border_radius))
-                        }
-                    })
-                    .child(self.view.clone())
-                    .child(self.tooltip_overlay.clone()),
-            )
+        let inner = div()
+            .id("root")
+            .key_context(CONTEXT)
+            .on_action(cx.listener(Self::on_action_tab))
+            .on_action(cx.listener(Self::on_action_tab_prev))
+            .on_action(cx.listener(Self::on_action_copy))
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .font_family(cx.theme().font_family.clone())
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .refine_style(&self.style)
+            .map(|div| match window.window_decorations() {
+                gpui::Decorations::Server => div,
+                gpui::Decorations::Client { tiling } => div
+                    .when(!(tiling.top || tiling.left), |d| d.rounded_tl(border_radius))
+                    .when(!(tiling.top || tiling.right), |d| d.rounded_tr(border_radius))
+                    .when(!(tiling.bottom || tiling.left), |d| d.rounded_bl(border_radius))
+                    .when(!(tiling.bottom || tiling.right), |d| d.rounded_br(border_radius)),
+            })
+            .child(TextSelectionController)
+            .child(self.view.clone())
+            .child(self.tooltip_overlay.clone())
+            .child(self.native_menu_overlay.clone());
+
+        if self.bordered {
+            window_border()
+                .shadow_size(self.window_shadow_size)
+                .border_radius(border_radius)
+                .child(inner)
+                .into_any_element()
+        } else {
+            inner.into_any_element()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    struct TestView;
+
+    impl Render for TestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    #[gpui::test]
+    fn bordered_builder_toggles_window_border(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+
+        let (default_root, _) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| TestView);
+            Root::new(view, window, cx)
+        });
+        assert!(default_root.read_with(cx, |root, _| root.bordered));
+
+        let (root, _) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| TestView);
+            Root::new(view, window, cx).bordered(false)
+        });
+        assert!(!root.read_with(cx, |root, _| root.bordered));
+
+        let (root, _) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| TestView);
+            Root::new(view, window, cx).bordered(false).bordered(true)
+        });
+        assert!(root.read_with(cx, |root, _| root.bordered));
     }
 }

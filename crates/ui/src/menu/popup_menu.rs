@@ -337,6 +337,22 @@ impl PopupMenu {
         self
     }
 
+    pub(crate) fn set_action_context(
+        &mut self,
+        action_context: Option<FocusHandle>,
+        cx: &mut Context<Self>,
+    ) {
+        self.action_context = action_context.clone();
+
+        for item in &self.menu_items {
+            if let PopupMenuItem::Submenu { menu, .. } = item {
+                menu.update(cx, |menu, cx| {
+                    menu.set_action_context(action_context.clone(), cx);
+                });
+            }
+        }
+    }
+
     /// Set min width of the popup menu, default is 120px
     pub fn min_w(mut self, width: impl Into<Pixels>) -> Self {
         self.min_width = Some(width.into());
@@ -640,12 +656,6 @@ impl PopupMenu {
     pub fn item(mut self, item: impl Into<PopupMenuItem>) -> Self {
         let item: PopupMenuItem = item.into();
         self.menu_items.push(item);
-        self
-    }
-
-    /// Use small size, the menu item will have smaller height.
-    pub(crate) fn small(mut self) -> Self {
-        self.size = Size::Small;
         self
     }
 

@@ -2398,7 +2398,7 @@ where
                         // min_w_full() ensures the table body fills its parent
                         // without creating the layout oscillation that w_full()
                         // caused on Wayland (width: 100% vs flex_grow conflict).
-                        h_flex().id("table-body").flex_grow().h_full().min_w_full().child(
+                        h_flex().id("table-body").flex_grow_1().h_full().min_w_full().child(
                             uniform_list(
                                 "table-uniform-list",
                                 render_rows_count,
@@ -2458,7 +2458,7 @@ where
                                     },
                                 ),
                             )
-                            .flex_grow()
+                            .flex_grow_1()
                             .size_full()
                             .with_sizing_behavior(ListSizingBehavior::Auto)
                             .track_scroll(&self.vertical_scroll_handle)
