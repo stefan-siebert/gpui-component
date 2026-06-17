@@ -1319,7 +1319,13 @@ where
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // `HANDLE_SIZE` is the visual line offset used by the drag math below.
+        // `HIT_SIZE` is the (invisible) grab zone — a 2px target is far too hard
+        // to land the cursor on, so widen it while keeping net margin 0 (no
+        // visual change, no header/body misalignment). The grab zone sits to the
+        // left of the boundary; each column's own handle covers its right edge.
         const HANDLE_SIZE: Pixels = px(2.);
+        const HIT_SIZE: Pixels = px(8.);
 
         let resizable = self.col_resizable
             && self.col_groups.get(ix).map(|col| col.is_resizable()).unwrap_or(false);
@@ -1335,8 +1341,8 @@ where
             .occlude()
             .cursor_col_resize()
             .h_full()
-            .w(HANDLE_SIZE)
-            .ml(-(HANDLE_SIZE))
+            .w(HIT_SIZE)
+            .ml(-(HIT_SIZE))
             .justify_end()
             .items_center()
             .child(
