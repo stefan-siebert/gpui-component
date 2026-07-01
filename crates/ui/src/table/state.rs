@@ -612,6 +612,25 @@ where
         self.prev_table_width > px(0.)
     }
 
+    /// Whether auto-width (`flex_grow`) columns should render with live
+    /// `flex_1()` this frame instead of their computed pixel width.
+    ///
+    /// Flex is the default: the layout engine sizes the auto column every frame
+    /// to fill remaining space, so a window/pane resize has NO one-frame lag
+    /// (the computed width comes from the *previous* frame's bounds). This is
+    /// the long-standing behaviour that clamped correctly — as long as BOTH the
+    /// row wrapper and the inner cell flex together; if only the cell flexes,
+    /// the non-flex wrapper content-sizes around it and the column grows to the
+    /// widest cell's content.
+    ///
+    /// The one time we must NOT flex is while a column is actively resized:
+    /// there the auto column must sit at its computed pixel width so the drag
+    /// math is stable and resizing a *neighbour* doesn't make the lone flex
+    /// column greedily absorb the change (a "mirrored" resize).
+    fn auto_columns_flex(&self) -> bool {
+        self.resizing_col.is_none()
+    }
+
     fn update_header_layout(&mut self, cx: &mut Context<Self>) {
         let group_rows = self.delegate.group_headers(cx);
 
@@ -1264,7 +1283,8 @@ where
         // column's right edge and made the resize look mirrored). The previous
         // virtual-list jitter that motivated permanent flex_1 is gone: the body
         // now renders scrollable columns directly in an h_flex.
-        let use_flex = col_group.column.auto_width && !self.auto_widths_ready();
+        let use_flex = col_group.column.auto_width
+            && (self.auto_columns_flex() || !self.auto_widths_ready());
 
         div()
             .when(use_flex, |this| this.flex_1().min_w(col_group.column.min_width))
@@ -1520,10 +1540,11 @@ where
         let is_auto = self.col_groups[col_ix..col_ix + colspan]
             .iter()
             .any(|cg| cg.column.auto_width);
-        // Auto columns flex only until their width has been measured; afterwards
-        // they size to their computed width, mirroring `render_cell_inner` so the
-        // header stays in sync with the body.
-        let auto_flex = is_auto && !self.auto_widths_ready();
+        // Mirrors `render_cell_inner` and the body row wrapper: flex to fill
+        // remaining space live (no resize lag) except while a column is being
+        // dragged; also flex on the pre-measurement first frame. All three flip
+        // together so header and body stay in sync.
+        let auto_flex = is_auto && (self.auto_columns_flex() || !self.auto_widths_ready());
 
         // Build the inner sizing div for the spanned header cell.
         let cell_div = if colspan == 1 {
@@ -2097,11 +2118,14 @@ where
                         let is_auto = self.col_groups.get(col_ix)
                             .map(|c| c.column.auto_width)
                             .unwrap_or(false);
-                        // Flex the auto column only before its width is measured;
-                        // afterwards the child cell carries the computed width, so
-                        // resizing a neighbour pushes columns instead of shrinking
-                        // this one. Matches the header (`auto_flex`).
-                        let auto_flex = is_auto && !self.auto_widths_ready();
+                        // The row WRAPPER must flex whenever the inner cell does,
+                        // otherwise the non-flex wrapper content-sizes around the
+                        // flexing cell and the column grows to the widest filename.
+                        // So: flex live when idle (lag-free window/pane resize),
+                        // pin to the computed pixel width only during an active
+                        // column drag (stable drag, no neighbour "mirroring").
+                        let auto_flex =
+                            is_auto && (self.auto_columns_flex() || !self.auto_widths_ready());
                         let col_min_w = self.col_groups.get(col_ix)
                             .map(|c| c.column.min_width)
                             .unwrap_or(px(0.));
