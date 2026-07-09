@@ -222,10 +222,10 @@ impl SettingItem {
                 Box::new(NumberField::new(field_type.number_input_options()))
             }
             t if t == TypeId::of::<SharedString>() && field_type.is_input() => {
-                Box::new(StringField::<SharedString>::new())
+                Box::new(StringField::<SharedString>::new(field_type.input_masked()))
             }
             t if t == TypeId::of::<String>() && field_type.is_input() => {
-                Box::new(StringField::<String>::new())
+                Box::new(StringField::<String>::new(field_type.input_masked()))
             }
             t if t == TypeId::of::<SharedString>() && field_type.is_dropdown() => {
                 Box::new(DropdownField::<SharedString>::new(

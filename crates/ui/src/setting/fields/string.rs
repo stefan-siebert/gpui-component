@@ -15,12 +15,15 @@ use crate::{
 };
 
 pub(crate) struct StringField<T> {
+    /// Password-style rendering; the value in get/set stays unmasked.
+    masked: bool,
     _marker: std::marker::PhantomData<T>,
 }
 
 impl<T> StringField<T> {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(masked: bool) -> Self {
         Self {
+            masked,
             _marker: std::marker::PhantomData,
         }
     }
@@ -47,6 +50,7 @@ where
         let value: SharedString = value.into();
         let set_value = set_value::<T>(&field, cx);
 
+        let masked = self.masked;
         let state_entity = window.use_keyed_state(
             SharedString::from(format!(
                 "string-state-{}-{}-{}",
@@ -55,8 +59,12 @@ where
             cx,
             {
                 let value = value.clone();
-                |window, cx| {
-                    let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
+                move |window, cx| {
+                    let input = cx.new(|cx| {
+                        InputState::new(window, cx)
+                            .default_value(value)
+                            .masked(masked)
+                    });
                     let _subscription = cx.subscribe(&input, {
                         move |_, input, event: &InputEvent, cx| match event {
                             InputEvent::Change => {

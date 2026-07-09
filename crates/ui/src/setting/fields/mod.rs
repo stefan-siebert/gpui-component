@@ -65,7 +65,11 @@ pub enum SettingFieldType {
     NumberInput {
         options: NumberFieldOptions,
     },
-    Input,
+    Input {
+        /// Render the value masked (password-style). The real value still
+        /// flows through get/set unchanged.
+        masked: bool,
+    },
     Dropdown {
         options: Vec<(SharedString, SharedString)>,
         scrollable: bool,
@@ -88,7 +92,15 @@ impl SettingFieldType {
 
     #[inline]
     pub(crate) fn is_input(&self) -> bool {
-        matches!(self, SettingFieldType::Input)
+        matches!(self, SettingFieldType::Input { .. })
+    }
+
+    #[inline]
+    pub(super) fn input_masked(&self) -> bool {
+        match self {
+            SettingFieldType::Input { masked } => *masked,
+            _ => false,
+        }
     }
 
     #[inline]
@@ -178,7 +190,17 @@ impl SettingField<SharedString> {
         V: Fn(&App) -> SharedString + 'static,
         S: Fn(SharedString, &mut App) + 'static,
     {
-        Self::new(SettingFieldType::Input, value, set_value)
+        Self::new(SettingFieldType::Input { masked: false }, value, set_value)
+    }
+
+    /// Create a new password Input field: rendered masked, value flows
+    /// through get/set unchanged.
+    pub fn password<V, S>(value: V, set_value: S) -> Self
+    where
+        V: Fn(&App) -> SharedString + 'static,
+        S: Fn(SharedString, &mut App) + 'static,
+    {
+        Self::new(SettingFieldType::Input { masked: true }, value, set_value)
     }
 
     /// Create a new Dropdown field with the given options.
