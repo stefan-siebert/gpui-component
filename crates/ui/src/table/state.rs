@@ -213,10 +213,18 @@ pub struct TableState<D: TableDelegate> {
     ///
     /// When enabled:
     /// - Users can click on individual cells to select them
-    /// - A row selector column appears on the left for selecting entire rows
+    /// - A row header column appears on the left for selecting entire rows
+    ///   (can be hidden via [`Self::row_header`])
     /// - Keyboard navigation works at the cell level (arrow keys move between cells)
     /// - Right-click and double-click events are supported for cells
     pub cell_selectable: bool,
+    /// Whether the row header column is visible when `cell_selectable` is enabled,
+    /// default is `true`.
+    ///
+    /// Set to `false` to hide the narrow leftmost header column while keeping cell
+    /// selection — useful when you want to put your own content (e.g. a row index
+    /// column) on the left.
+    pub row_header: bool,
     /// Whether the table can sort.
     pub sortable: bool,
     /// Whether the table can resize columns.
@@ -283,6 +291,7 @@ where
             col_selectable: true,
             row_selectable: true,
             cell_selectable: false,
+            row_header: true,
             sortable: true,
             col_movable: true,
             col_resizable: true,
@@ -345,7 +354,7 @@ where
     ///
     /// When enabled:
     /// - Individual cells become selectable by clicking
-    /// - A row selector column appears on the left side
+    /// - A row header column appears on the left side (can be hidden via [`Self::row_header`])
     /// - Keyboard navigation operates at the cell level
     /// - Cell-specific events (SelectCell, DoubleClickedCell, RightClickedCell) are emitted
     ///
@@ -355,11 +364,21 @@ where
     /// let table_state = cx.new(|cx| {
     ///     TableState::new(delegate, cx)
     ///         .cell_selectable(true)  // Enable cell selection
-    ///         .row_selectable(true)   // Also allow row selection via row selector
+    ///         .row_selectable(true)   // Also allow row selection via row header
     /// });
     /// ```
     pub fn cell_selectable(mut self, cell_selectable: bool) -> Self {
         self.cell_selectable = cell_selectable;
+        self
+    }
+
+    /// Set whether the row header column is shown, default is `true`.
+    ///
+    /// Only effective when `cell_selectable` is `true` — otherwise the row header
+    /// column is never rendered. Hide it when you want to use the leftmost column
+    /// for your own content (e.g. a row index column).
+    pub fn row_header(mut self, row_header: bool) -> Self {
+        self.row_header = row_header;
         self
     }
 
@@ -1435,15 +1454,15 @@ where
             .into_any_element()
     }
 
-    /// Render the row selector cell (when cell_selectable is enabled)
-    fn render_row_selector_cell(
+    /// Render the row header cell (when cell_selectable is enabled)
+    fn render_row_header_cell(
         &self,
         row_ix: usize,
         is_head: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
-            .id(("row-selector", row_ix))
+            .id(("row-header", row_ix))
             .w_3()
             .h_full()
             .border_r_1()
@@ -1771,8 +1790,8 @@ where
             .bg(cx.theme().table_head)
             .text_color(cx.theme().table_head_foreground)
             .refine_style(&style)
-            .when(self.cell_selectable, |this| {
-                this.child(self.render_row_selector_cell(0, true, cx))
+            .when(self.cell_selectable && self.row_header, |this| {
+                this.child(self.render_row_header_cell(0, true, cx))
             })
             .when(left_columns_count > 0, |this| {
                 let view = view.clone();
@@ -2003,8 +2022,8 @@ where
                         this.bg(cx.theme().table_hover)
                     }
                 })
-                .when(self.cell_selectable, |this| {
-                    this.child(self.render_row_selector_cell(row_ix, false, cx))
+                .when(self.cell_selectable && self.row_header, |this| {
+                    this.child(self.render_row_header_cell(row_ix, false, cx))
                 })
                 .when(left_columns_count > 0, |this| {
                     // Left fixed columns
@@ -2273,8 +2292,8 @@ where
                 .border_b_1()
                 .border_color(cx.theme().table_row_border)
                 .when(is_stripe_row, |this| this.bg(cx.theme().table_even))
-                .when(self.cell_selectable, |this| {
-                    // Render empty row selector cell for fake rows
+                .when(self.cell_selectable && self.row_header, |this| {
+                    // Render empty row header cell for fake rows
                     this.child(
                         div()
                             .w(px(40.))
