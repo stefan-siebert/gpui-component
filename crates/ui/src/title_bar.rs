@@ -12,10 +12,12 @@ use gpui::{
 use smallvec::SmallVec;
 
 pub const TITLE_BAR_HEIGHT: Pixels = px(34.);
+// macOS only: space reserved for the native traffic lights. Fullscreen hides
+// them, so callers must fall back to `TITLE_BAR_LEFT_PADDING_DEFAULT` when
+// `window.is_fullscreen()` is true — see `TitleBar::render` below.
 #[cfg(target_os = "macos")]
-const TITLE_BAR_LEFT_PADDING: Pixels = px(80.);
-#[cfg(not(target_os = "macos"))]
-const TITLE_BAR_LEFT_PADDING: Pixels = px(12.);
+const TITLE_BAR_LEFT_PADDING_MACOS: Pixels = px(80.);
+const TITLE_BAR_LEFT_PADDING_DEFAULT: Pixels = px(12.);
 
 /// TitleBar used to customize the appearance of the title bar.
 ///
@@ -369,6 +371,17 @@ impl RenderOnce for TitleBar {
             .as_ref()
             .is_some_and(|l| l.left.iter().any(|b| b.is_some()));
 
+        // On macOS, fullscreen windows lose the native traffic lights, so the
+        // reserved space collapses to the same padding used everywhere else.
+        #[cfg(target_os = "macos")]
+        let left_padding = if window.is_fullscreen() {
+            TITLE_BAR_LEFT_PADDING_DEFAULT
+        } else {
+            TITLE_BAR_LEFT_PADDING_MACOS
+        };
+        #[cfg(not(target_os = "macos"))]
+        let left_padding = TITLE_BAR_LEFT_PADDING_DEFAULT;
+
         let state = window.use_state(cx, |_, _| TitleBarState {
             should_move: false,
             drag_start_pos: None,
@@ -387,7 +400,7 @@ impl RenderOnce for TitleBar {
             .w_full()
             .h(TITLE_BAR_HEIGHT)
             // Left padding: skip if left window controls will provide spacing
-            .when(!has_left_controls, |this| this.pl(TITLE_BAR_LEFT_PADDING))
+            .when(!has_left_controls, |this| this.pl(left_padding))
             .border_b_1()
             .border_color(cx.theme().title_bar_border)
             .bg(cx.theme().title_bar)

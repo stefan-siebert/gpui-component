@@ -142,7 +142,8 @@ WindowOptions {
 | 常量 | 值 | 说明 |
 | --- | --- | --- |
 | `TITLE_BAR_HEIGHT` | `34px` | 标准标题栏高度 |
-| `TITLE_BAR_LEFT_PADDING` | `80px`（macOS），`12px`（其他） | 内容区域左侧留白 |
+| `TITLE_BAR_LEFT_PADDING_MACOS` | `80px` | macOS 非全屏时的左侧留白（为交通灯按钮预留空间） |
+| `TITLE_BAR_LEFT_PADDING_DEFAULT` | `12px` | 其他平台，以及 macOS 全屏时（无按钮）的左侧留白 |
 
 ## 说明
 

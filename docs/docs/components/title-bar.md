@@ -153,10 +153,11 @@ The `TitleBarElement` provides window dragging functionality on Linux platforms.
 
 ### Constants
 
-| Constant                 | Value                           | Description               |
-| ------------------------ | ------------------------------- | ------------------------- |
-| `TITLE_BAR_HEIGHT`       | `34px`                          | Standard title bar height |
-| `TITLE_BAR_LEFT_PADDING` | `80px` (macOS), `12px` (others) | Left padding for content  |
+| Constant                          | Value   | Description                                                            |
+| ---------------------------------- | ------- | ------------------------------------------------------------------------ |
+| `TITLE_BAR_HEIGHT`               | `34px`  | Standard title bar height                                            |
+| `TITLE_BAR_LEFT_PADDING_MACOS`   | `80px`  | Left padding on macOS, non-fullscreen (space for traffic lights)     |
+| `TITLE_BAR_LEFT_PADDING_DEFAULT` | `12px`  | Left padding elsewhere, and on macOS while fullscreen (no controls)  |
 
 ## Examples
 
