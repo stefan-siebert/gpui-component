@@ -36,6 +36,7 @@ pub struct Settings {
     sidebar_width: Pixels,
     sidebar_width_range: Range<Pixels>,
     sidebar_style: StyleRefinement,
+    content_style: StyleRefinement,
     default_selected_index: SelectIndex,
     header_style: StyleRefinement,
     /// If set, override the selected page on every render.
@@ -57,6 +58,7 @@ impl Settings {
             sidebar_width: px(190.0),
             sidebar_width_range: px(150.0)..px(280.0),
             sidebar_style: StyleRefinement::default(),
+            content_style: StyleRefinement::default(),
             default_selected_index: SelectIndex::default(),
             header_style: StyleRefinement::default(),
             force_page: None,
@@ -102,6 +104,18 @@ impl Settings {
     /// Set the style refinement for the sidebar.
     pub fn sidebar_style(mut self, style: &StyleRefinement) -> Self {
         self.sidebar_style = style.clone();
+        self
+    }
+
+    /// Set the style refinement for the panel holding the active page.
+    ///
+    /// Pages paint no background of their own, so they show whatever the
+    /// window paints behind them. Set a background here when the window itself
+    /// is translucent and the content must stay readable — e.g. a macOS
+    /// translucent window whose sidebar is a material but whose content pane
+    /// should be opaque.
+    pub fn content_style(mut self, style: &StyleRefinement) -> Self {
+        self.content_style = style.clone();
         self
     }
 
@@ -377,12 +391,16 @@ impl RenderOnce for Settings {
                     .size_range(self.sidebar_width_range.clone())
                     .child(self.render_sidebar(&state, &filtered_pages, window, cx)),
             )
-            .child(resizable_panel().child(self.render_active_page(
-                &state,
-                &filtered_pages,
-                &options,
-                window,
-                cx,
-            )))
+            .child(
+                resizable_panel()
+                    .refine_style(&self.content_style)
+                    .child(self.render_active_page(
+                        &state,
+                        &filtered_pages,
+                        &options,
+                        window,
+                        cx,
+                    )),
+            )
     }
 }

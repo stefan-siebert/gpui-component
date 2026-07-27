@@ -12,7 +12,7 @@ use crate::{
 };
 use gpui::{
     Anchor, AnyView, App, AppContext, Bounds, ClipboardItem, Context, DefiniteLength, ElementId,
-    Entity, EntityId, FocusHandle, Hitbox, InteractiveElement, IntoElement, KeyBinding,
+    Entity, EntityId, FocusHandle, Hitbox, Hsla, InteractiveElement, IntoElement, KeyBinding,
     ParentElement as _, Pixels, Render, StyleRefinement, Styled, WeakEntity, WeakFocusHandle,
     Window, actions, div, prelude::FluentBuilder as _,
 };
@@ -59,6 +59,9 @@ pub struct Root {
     pub(crate) selectable_text_views: HashMap<EntityId, (WeakEntity<TextViewState>, Hitbox)>,
     /// Inline text bounds for selectable TextViews, keyed by parent TextView id.
     pub(crate) selectable_text_inlines: HashMap<EntityId, Vec<Bounds<Pixels>>>,
+    /// Per-frame override for the root background fill. `None` paints the
+    /// opaque `theme.background` (default).
+    background_fn: Option<Rc<dyn Fn(&App) -> Hsla>>,
 }
 
 #[derive(Clone)]
@@ -112,7 +115,20 @@ impl Root {
             text_selection: WindowTextSelection::default(),
             selectable_text_views: HashMap::new(),
             selectable_text_inlines: HashMap::new(),
+            background_fn: None,
         }
+    }
+
+    /// Compute the root background per frame instead of painting the opaque
+    /// `theme.background`.
+    ///
+    /// The callback runs on every render, so it can react to theme changes
+    /// and runtime toggles (e.g. translucent fills over a blurred window
+    /// backdrop). Return a color with alpha < 1 to let the window background
+    /// show through.
+    pub fn background_fn(mut self, f: impl Fn(&App) -> Hsla + 'static) -> Self {
+        self.background_fn = Some(Rc::new(f));
+        self
     }
 
     /// Enable or disable the Linux client-side window border wrapper.
@@ -562,16 +578,27 @@ impl Render for Root {
             .size_full()
             .overflow_hidden()
             .font_family(cx.theme().font_family.clone())
-            .bg(cx.theme().background)
+            .bg(self
+                .background_fn
+                .as_ref()
+                .map_or(cx.theme().background, |f| f(cx)))
             .text_color(cx.theme().foreground)
             .refine_style(&self.style)
             .map(|div| match window.window_decorations() {
                 gpui::Decorations::Server => div,
                 gpui::Decorations::Client { tiling } => div
-                    .when(!(tiling.top || tiling.left), |d| d.rounded_tl(border_radius))
-                    .when(!(tiling.top || tiling.right), |d| d.rounded_tr(border_radius))
-                    .when(!(tiling.bottom || tiling.left), |d| d.rounded_bl(border_radius))
-                    .when(!(tiling.bottom || tiling.right), |d| d.rounded_br(border_radius)),
+                    .when(!(tiling.top || tiling.left), |d| {
+                        d.rounded_tl(border_radius)
+                    })
+                    .when(!(tiling.top || tiling.right), |d| {
+                        d.rounded_tr(border_radius)
+                    })
+                    .when(!(tiling.bottom || tiling.left), |d| {
+                        d.rounded_bl(border_radius)
+                    })
+                    .when(!(tiling.bottom || tiling.right), |d| {
+                        d.rounded_br(border_radius)
+                    }),
             })
             .child(TextSelectionController)
             .child(self.view.clone())
