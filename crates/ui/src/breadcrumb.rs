@@ -16,6 +16,12 @@ pub struct Breadcrumb {
 }
 
 /// Maximum number of characters before a breadcrumb label is middle-truncated.
+///
+/// Inside a [`CollapsibleBreadcrumb`] this is a *last resort*, applied only
+/// once the items no longer fit the container. Hiding whole middle segments
+/// is the primary mechanism; shortening the surviving labels comes after it.
+/// Truncating while there is room to spare hides characters for no reason —
+/// a 27-character label would lose its middle in a half-empty bar.
 const DEFAULT_MAX_LABEL_CHARS: usize = 24;
 
 /// Item for the [`Breadcrumb`].
@@ -53,8 +59,11 @@ impl BreadcrumbItem {
 
     /// Set the maximum number of characters before the label is
     /// middle-truncated (e.g. `very_long_na…me_here`).
-    /// Defaults to [`DEFAULT_MAX_LABEL_CHARS`] when used inside a
-    /// [`CollapsibleBreadcrumb`], or unlimited for a regular [`Breadcrumb`].
+    ///
+    /// Set explicitly, the limit always applies. Left unset, a
+    /// [`CollapsibleBreadcrumb`] falls back to [`DEFAULT_MAX_LABEL_CHARS`]
+    /// *only while its items overflow the container*, and a regular
+    /// [`Breadcrumb`] never truncates at all.
     pub fn max_label_chars(mut self, max: usize) -> Self {
         self.max_label_chars = Some(max);
         self
@@ -261,6 +270,49 @@ struct CollapseInner {
     /// Number of items in the last measurement. Used to detect content changes
     /// (e.g. navigation to a different path) and reset stale measurements.
     measured_items_count: usize,
+    /// Combined label length in the last measurement, as a cheap fingerprint of
+    /// the content itself.
+    ///
+    /// The item count alone does not identify a path: `/home/a/b` and
+    /// `/home/very_long_name/another_long_one` both have three segments. Since
+    /// `total_content_width` only ever grows within one measurement generation,
+    /// a swap between two equally deep paths would otherwise carry the wider
+    /// one's width over to the narrower one and keep it looking overflowed.
+    /// Collisions are harmless: equal total length means near-equal width.
+    measured_label_chars: usize,
+}
+
+impl CollapseInner {
+    /// Whether the last *uncollapsed* measurement exceeded the container.
+    ///
+    /// Both widths are zero until the first measured frame lands, so this
+    /// reads `false` on the first pass — which is what we want: that frame
+    /// must render full labels for the measurement to mean anything.
+    ///
+    /// Stable across frames, and so free of the truncate/untruncate flapping
+    /// one would expect: `total_content_width` is a high-water mark of the
+    /// *untruncated* layout (the prepaint callback rejects any smaller
+    /// measurement), so shortening the labels never talks itself out of the
+    /// overflow that caused it. Only a genuine change — a wider container or
+    /// a different path — moves the answer back.
+    fn is_overflowing(&self) -> bool {
+        self.container_width > 0.0 && self.total_content_width > self.container_width
+    }
+
+    /// Discard measurements unless they describe exactly this content.
+    ///
+    /// The container width is deliberately kept: it belongs to the element,
+    /// not to the labels, and is still the best estimate available for the
+    /// frame that re-measures.
+    fn invalidate_unless(&mut self, items_count: usize, label_chars: usize) {
+        if self.measured_items_count == items_count && self.measured_label_chars == label_chars {
+            return;
+        }
+        self.total_content_width = 0.0;
+        self.child_widths.clear();
+        self.measured_items_count = items_count;
+        self.measured_label_chars = label_chars;
+    }
 }
 
 impl CollapsibleBreadcrumbState {
@@ -449,28 +501,40 @@ impl gpui::Element for CollapsibleBreadcrumb {
         let items_count = self.items.len();
         let state = self.state.clone();
 
-        // Determine collapsing from previous frame's measurements
-        // Reset measurements when the number of items changes (content changed)
-        {
-            let mut inner = state.inner.borrow_mut();
-            if inner.measured_items_count != items_count {
-                inner.total_content_width = 0.0;
-                inner.child_widths.clear();
-                inner.measured_items_count = items_count;
-            }
-        }
+        // Determine collapsing from previous frame's measurements. Measurements
+        // describe one specific set of labels, so they are dropped as soon as
+        // the content changes — by item count or by total label length.
+        let label_chars: usize = self
+            .items
+            .iter()
+            .map(|item| item.label.chars().count())
+            .sum();
+        state
+            .inner
+            .borrow_mut()
+            .invalidate_unless(items_count, label_chars);
 
-        let visible_tail = {
+        let (visible_tail, overflowing) = {
             let inner = state.inner.borrow();
-            Self::compute_visible_tail(&inner, items_count)
+            (
+                Self::compute_visible_tail(&inner, items_count),
+                inner.is_overflowing(),
+            )
         };
         let is_collapsed = visible_tail.is_some();
 
-        // Build children — apply default middle-truncation for long labels
+        // Build children. The default label limit is a response to overflow,
+        // not a constant — see [`DEFAULT_MAX_LABEL_CHARS`]. An explicit limit
+        // from the caller is an instruction and always stands.
+        //
+        // `overflowing` is checked instead of `is_collapsed` on purpose: a
+        // breadcrumb of two items never collapses (there is no middle to
+        // hide) but can still overrun its container, and that case needs the
+        // labels shortened just as much.
         let items: Vec<BreadcrumbItem> = std::mem::take(&mut self.items)
             .into_iter()
             .map(|item| {
-                if item.max_label_chars.is_some() {
+                if item.max_label_chars.is_some() || !overflowing {
                     item
                 } else {
                     BreadcrumbItem {
@@ -604,5 +668,113 @@ impl gpui::Element for CollapsibleBreadcrumb {
         cx: &mut App,
     ) {
         inner.paint(window, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A measurement as the prepaint callback would leave it.
+    fn measured(total_content_width: f32, container_width: f32) -> CollapseInner {
+        CollapseInner {
+            child_widths: vec![total_content_width],
+            gap: 6.0,
+            total_content_width,
+            container_width,
+            measured_items_count: 1,
+            measured_label_chars: 10,
+        }
+    }
+
+    #[test]
+    fn nothing_overflows_before_the_first_measurement() {
+        // The opening frame must render full labels — otherwise the width it
+        // measures is the width of already-shortened text.
+        assert!(!CollapseInner::default().is_overflowing());
+    }
+
+    #[test]
+    fn a_container_of_unknown_width_never_forces_truncation() {
+        // Container width only becomes known in prepaint.
+        assert!(!measured(900.0, 0.0).is_overflowing());
+    }
+
+    #[test]
+    fn overflow_needs_the_content_to_exceed_the_container() {
+        assert!(!measured(300.0, 800.0).is_overflowing());
+        assert!(!measured(800.0, 800.0).is_overflowing());
+        assert!(measured(801.0, 800.0).is_overflowing());
+    }
+
+    #[test]
+    fn a_long_label_survives_whole_in_a_roomy_bar() {
+        // The regression this guards: a 27-character label lost its middle in
+        // a half-empty breadcrumb, because the limit counted characters and
+        // never consulted the width.
+        let label = "stefan.siebert.de@gmail.com";
+        assert_eq!(label.chars().count(), 27);
+        assert!(!measured(420.0, 900.0).is_overflowing());
+    }
+
+    #[test]
+    fn unchanged_content_keeps_its_measurement() {
+        let mut inner = measured(900.0, 500.0);
+        inner.invalidate_unless(1, 10);
+        assert_eq!(inner.total_content_width, 900.0);
+        assert!(inner.is_overflowing());
+    }
+
+    #[test]
+    fn a_different_path_of_the_same_depth_drops_the_measurement() {
+        // The regression this guards: `/home/very_long_name/another_long_one`
+        // and `/home/a/b` have the same segment count, so the item count alone
+        // could not tell them apart — and because the stored width only grows,
+        // the short path inherited the long one's overflow and stayed
+        // truncated.
+        let mut inner = measured(900.0, 500.0);
+        assert!(inner.is_overflowing());
+        inner.invalidate_unless(1, 4);
+        assert_eq!(inner.total_content_width, 0.0);
+        assert!(inner.child_widths.is_empty());
+        assert!(!inner.is_overflowing());
+        // The container width outlives the content — it describes the element.
+        assert_eq!(inner.container_width, 500.0);
+    }
+
+    #[test]
+    fn a_different_segment_count_drops_the_measurement() {
+        let mut inner = measured(900.0, 500.0);
+        inner.invalidate_unless(4, 10);
+        assert_eq!(inner.total_content_width, 0.0);
+        assert!(!inner.is_overflowing());
+    }
+
+    #[test]
+    fn middle_truncate_keeps_both_ends() {
+        assert_eq!(
+            middle_truncate("stefan.siebert.de@gmail.com", 24),
+            "stefan.siebert.d…ail.com"
+        );
+    }
+
+    #[test]
+    fn middle_truncate_leaves_short_labels_alone() {
+        assert_eq!(middle_truncate("Documents", 24), "Documents");
+        // Exactly at the limit is still untouched.
+        assert_eq!(middle_truncate("123456789012", 12), "123456789012");
+    }
+
+    #[test]
+    fn middle_truncate_declines_limits_too_small_to_be_useful() {
+        // Below five characters an ellipsis costs more than it saves.
+        assert_eq!(middle_truncate("abcdefgh", 4), "abcdefgh");
+    }
+
+    #[test]
+    fn middle_truncate_slices_on_character_boundaries() {
+        let out = middle_truncate("Ordner_ÄÖÜ_äöü_ßßß_Ende_lang_genug", 20);
+        assert_eq!(out.chars().count(), 20);
+        assert!(out.contains('…'));
     }
 }
