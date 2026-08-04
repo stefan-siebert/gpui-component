@@ -1,13 +1,13 @@
 use std::ops::Range;
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(feature = "tree-sitter")]
 pub use tree_sitter::Tree;
 
-#[cfg(target_family = "wasm")]
+#[cfg(not(feature = "tree-sitter"))]
 /// Stub type for tree-sitter Tree on WASM (tree-sitter not available).
 pub struct Tree;
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(feature = "tree-sitter")]
 /// Minimum line span for a node to be considered foldable.
 const MIN_FOLD_LINES: usize = 2;
 
@@ -37,7 +37,7 @@ impl FoldRange {
 
 // ==================== Native Implementation (with tree-sitter) ====================
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(feature = "tree-sitter")]
 /// Extract fold ranges from a tree-sitter syntax tree.
 ///
 /// Uses iterative `TreeCursor` traversal and prunes single-line subtrees
@@ -52,7 +52,7 @@ pub fn extract_fold_ranges(tree: &Tree) -> Vec<FoldRange> {
     ranges
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(feature = "tree-sitter")]
 /// Extract fold ranges only within a byte range (for incremental updates after edits).
 ///
 /// Skips subtrees entirely outside the range, making it O(nodes in range)
@@ -66,7 +66,7 @@ pub fn extract_fold_ranges_in_range(tree: &Tree, byte_range: Range<usize>) -> Ve
     ranges
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(feature = "tree-sitter")]
 /// Iterative tree traversal that prunes single-line subtrees.
 ///
 /// A node spanning fewer than MIN_FOLD_LINES cannot itself be foldable,
@@ -100,7 +100,7 @@ fn collect_foldable_nodes_iterative(tree: &Tree, ranges: &mut Vec<FoldRange>) {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(feature = "tree-sitter")]
 /// Iterative tree traversal within a byte range, pruning single-line and
 /// out-of-range subtrees.
 fn collect_foldable_nodes_in_range_iterative(
@@ -142,7 +142,7 @@ fn collect_foldable_nodes_in_range_iterative(
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(feature = "tree-sitter")]
 /// Advance the cursor to the next sibling, or backtrack to an ancestor's sibling.
 /// Returns false when the traversal is complete (back at root with no more siblings).
 fn advance_cursor_to_next(cursor: &mut tree_sitter::TreeCursor) -> bool {
@@ -158,13 +158,13 @@ fn advance_cursor_to_next(cursor: &mut tree_sitter::TreeCursor) -> bool {
 
 // ==================== WASM Stub Implementation ====================
 
-#[cfg(target_family = "wasm")]
+#[cfg(not(feature = "tree-sitter"))]
 /// Extract fold ranges - WASM stub (returns empty, no tree-sitter).
 pub fn extract_fold_ranges(_tree: &Tree) -> Vec<FoldRange> {
     Vec::new()
 }
 
-#[cfg(target_family = "wasm")]
+#[cfg(not(feature = "tree-sitter"))]
 /// Extract fold ranges in range - WASM stub (returns empty, no tree-sitter).
 pub fn extract_fold_ranges_in_range(_tree: &Tree, _byte_range: Range<usize>) -> Vec<FoldRange> {
     Vec::new()

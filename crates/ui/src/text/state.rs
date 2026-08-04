@@ -1,5 +1,5 @@
 use futures::Stream as _;
-use std::{pin::Pin, task::Poll};
+use std::{pin::Pin, sync::Arc, task::Poll};
 
 use gpui::{
     App, AppContext as _, Bounds, Context, FocusHandle, IntoElement, KeyBinding, ListState,
@@ -8,13 +8,12 @@ use gpui::{
 };
 
 use crate::{
-    ActiveTheme, ElementExt,
+    ElementExt,
     async_util::{Receiver, Sender, unbounded},
-    highlighter::HighlightTheme,
     input::{self, SelectAll},
     scroll::AutoScroll,
     text::{
-        CodeBlockActionsFn, TextViewStyle,
+        CodeBlockActionsFn, MarkdownExtensions, TextViewStyle,
         document::ParsedDocument,
         format,
         node::{self, NodeContext},
@@ -23,6 +22,9 @@ use crate::{
 };
 
 const CONTEXT: &'static str = "TextView";
+// Keep coalescing bounded so sustained streams still render intermediate updates.
+const MAX_COALESCED_UPDATES_PER_PARSE: usize = 64;
+
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys(vec![
         #[cfg(target_os = "macos")]
@@ -58,6 +60,7 @@ pub struct TextViewState {
     pub(super) scrollable: bool,
     pub(super) text_view_style: TextViewStyle,
     pub(super) code_block_actions: Option<std::sync::Arc<CodeBlockActionsFn>>,
+    pub(super) markdown_extensions: Arc<MarkdownExtensions>,
 
     pub(super) is_selecting: bool,
     multi_click_selection: Option<TextViewMultiClickSelection>,
@@ -70,6 +73,7 @@ pub struct TextViewState {
     /// main thread for full-replace updates.
     format: TextViewFormat,
     text: String,
+    revision: usize,
     parsed_error: Option<SharedString>,
     tx: Sender<UpdateOptions>,
     _parse_task: Task<()>,
@@ -93,12 +97,16 @@ impl TextViewState {
         let entity_id = cx.entity_id();
 
         let (tx, rx) = unbounded::<UpdateOptions>();
-        let (tx_result, rx_result) = unbounded::<Result<ParsedContent, SharedString>>();
+        let (tx_result, rx_result) = unbounded::<ParsedUpdate>();
         let _receive_task = cx.spawn({
             async move |weak_self, cx| {
-                while let Ok(parsed_result) = rx_result.recv().await {
+                while let Ok(parsed_update) = rx_result.recv().await {
                     _ = weak_self.update(cx, |state, cx| {
-                        match parsed_result {
+                        if parsed_update.revision != state.revision {
+                            return;
+                        }
+
+                        match parsed_update.result {
                             Ok(content) => {
                                 state.parsed_content = content;
                                 state.parsed_error = None;
@@ -119,7 +127,7 @@ impl TextViewState {
             }
         });
 
-        let _parse_task = cx.background_spawn(UpdateFuture::new(format, rx, tx_result, cx));
+        let _parse_task = cx.background_spawn(UpdateFuture::new(format, rx, tx_result));
 
         let mut this = Self {
             focus_handle,
@@ -137,12 +145,14 @@ impl TextViewState {
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(1000.)).measure_all(),
             text_view_style: TextViewStyle::default(),
             code_block_actions: None,
+            markdown_extensions: Arc::default(),
             is_selecting: false,
             auto_scroll: AutoScroll::default(),
             parsed_content: Default::default(),
             format,
             parsed_error: None,
             text: text.to_string(),
+            revision: 0,
             tx,
             _parse_task,
             _receive_task,
@@ -204,6 +214,22 @@ impl TextViewState {
         self.increment_update(new_text, true, cx);
     }
 
+    pub(crate) fn set_markdown_extensions(
+        &mut self,
+        markdown_extensions: Arc<MarkdownExtensions>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.markdown_extensions.revision() == markdown_extensions.revision() {
+            return;
+        }
+
+        self.markdown_extensions = markdown_extensions;
+        if self.format == TextViewFormat::Markdown {
+            let text = self.text.clone();
+            self.increment_update(&text, false, cx);
+        }
+    }
+
     /// Return the selected text.
     pub fn selected_text(&self) -> String {
         if self.select_all {
@@ -218,10 +244,12 @@ impl TextViewState {
     }
 
     fn increment_update(&mut self, text: &str, append: bool, cx: &mut Context<Self>) {
+        self.revision += 1;
         let update_options = UpdateOptions {
+            revision: self.revision,
             append,
             pending_text: text.to_string(),
-            highlight_theme: cx.theme().highlight_theme.clone(),
+            markdown_extensions: self.markdown_extensions.clone(),
         };
 
         // Full-replace updates (initial content / `set_text`) parse
@@ -413,6 +441,7 @@ impl Render for TextViewState {
         let mut node_cx = self.parsed_content.node_cx.clone();
 
         node_cx.code_block_actions = self.code_block_actions.clone();
+        node_cx.markdown_extensions = self.markdown_extensions.clone();
         node_cx.style = self.text_view_style.clone();
 
         v_flex()
@@ -461,28 +490,19 @@ pub(crate) struct ParsedContent {
 struct UpdateFuture {
     format: TextViewFormat,
     content: ParsedContent,
-    options: UpdateOptions,
-    pending_text: String,
     rx: Pin<Box<Receiver<UpdateOptions>>>,
-    tx_result: Sender<Result<ParsedContent, SharedString>>,
+    tx_result: Sender<ParsedUpdate>,
 }
 
 impl UpdateFuture {
     fn new(
         format: TextViewFormat,
         rx: Receiver<UpdateOptions>,
-        tx_result: Sender<Result<ParsedContent, SharedString>>,
-        cx: &App,
+        tx_result: Sender<ParsedUpdate>,
     ) -> Self {
         Self {
             format,
             content: Default::default(),
-            pending_text: String::new(),
-            options: UpdateOptions {
-                append: false,
-                pending_text: String::new(),
-                highlight_theme: cx.theme().highlight_theme.clone(),
-            },
             rx: Box::pin(rx),
             tx_result,
         }
@@ -495,25 +515,22 @@ impl Future for UpdateFuture {
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         loop {
             match self.rx.as_mut().poll_next(cx) {
-                Poll::Ready(Some(options)) => {
-                    if options.append {
-                        self.pending_text.push_str(options.pending_text.as_str());
-                    } else {
-                        self.pending_text = options.pending_text.clone();
-                    }
-                    self.options = options;
+                Poll::Ready(Some(mut options)) => {
+                    let hit_coalesce_budget =
+                        merge_pending_options(&mut options, self.rx.as_ref().get_ref());
 
-                    // Process immediately without debounce
-                    let pending_text = std::mem::take(&mut self.pending_text);
-                    let options = UpdateOptions {
-                        pending_text,
-                        ..self.options.clone()
-                    };
                     let res = parse_content(self.format, self.content.clone(), &options);
                     if let Ok(content) = &res {
                         self.content = content.clone();
                     }
-                    _ = self.tx_result.try_send(res);
+                    _ = self.tx_result.try_send(ParsedUpdate {
+                        revision: options.revision,
+                        result: res,
+                    });
+                    if hit_coalesce_budget {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
                     continue;
                 }
                 Poll::Ready(None) => return Poll::Ready(()),
@@ -525,9 +542,42 @@ impl Future for UpdateFuture {
 
 #[derive(Clone)]
 struct UpdateOptions {
+    revision: usize,
     pending_text: String,
     append: bool,
-    highlight_theme: std::sync::Arc<HighlightTheme>,
+    markdown_extensions: Arc<MarkdownExtensions>,
+}
+
+impl UpdateOptions {
+    fn merge(&mut self, next: UpdateOptions) {
+        if next.append {
+            self.pending_text.push_str(&next.pending_text);
+            self.revision = next.revision;
+        } else {
+            *self = next;
+        }
+    }
+}
+
+struct ParsedUpdate {
+    revision: usize,
+    result: Result<ParsedContent, SharedString>,
+}
+
+fn merge_pending_options(options: &mut UpdateOptions, rx: &Receiver<UpdateOptions>) -> bool {
+    let mut update_count = 1;
+
+    while update_count < MAX_COALESCED_UPDATES_PER_PARSE {
+        match rx.try_recv() {
+            Ok(next_options) => {
+                options.merge(next_options);
+                update_count += 1;
+            }
+            Err(_) => return false,
+        }
+    }
+
+    true
 }
 
 fn parse_content(
@@ -536,6 +586,7 @@ fn parse_content(
     options: &UpdateOptions,
 ) -> Result<ParsedContent, SharedString> {
     let mut node_cx = NodeContext {
+        markdown_extensions: options.markdown_extensions.clone(),
         ..NodeContext::default()
     };
 
@@ -553,9 +604,7 @@ fn parse_content(
     }
 
     let new_document = match format {
-        TextViewFormat::Markdown => {
-            format::markdown::parse(&source, &mut node_cx, &options.highlight_theme)
-        }
+        TextViewFormat::Markdown => format::markdown::parse(&source, &mut node_cx),
         TextViewFormat::Html => format::html::parse(&source, &mut node_cx),
     }?;
 
@@ -573,6 +622,7 @@ fn parse_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::MarkdownNode;
     use gpui::TestAppContext;
 
     #[gpui::test]
@@ -604,6 +654,73 @@ mod tests {
         });
     }
 
+    #[test]
+    fn update_options_merge_keeps_latest_full_text() {
+        let mut options = UpdateOptions {
+            revision: 1,
+            pending_text: "old".to_string(),
+            append: true,
+            markdown_extensions: Arc::default(),
+        };
+
+        options.merge(UpdateOptions {
+            revision: 2,
+            pending_text: "new".to_string(),
+            append: false,
+            markdown_extensions: Arc::default(),
+        });
+        options.merge(UpdateOptions {
+            revision: 3,
+            pending_text: " text".to_string(),
+            append: true,
+            markdown_extensions: Arc::default(),
+        });
+
+        assert_eq!(options.revision, 3);
+        assert_eq!(options.pending_text, "new text");
+        assert!(!options.append);
+    }
+
+    #[test]
+    fn update_future_yields_before_coalescing_all_queued_updates() {
+        let (tx, rx) = unbounded::<UpdateOptions>();
+        let (tx_result, rx_result) = unbounded::<ParsedUpdate>();
+        let total_updates = 128;
+
+        for revision in 1..=total_updates {
+            tx.try_send(UpdateOptions {
+                revision,
+                pending_text: format!("{revision}\n"),
+                append: revision != 1,
+                markdown_extensions: Arc::default(),
+            })
+            .unwrap();
+        }
+
+        let mut future = Box::pin(UpdateFuture::new(TextViewFormat::Markdown, rx, tx_result));
+        let waker = futures::task::noop_waker();
+        let mut task_cx = std::task::Context::from_waker(&waker);
+
+        assert!(matches!(
+            std::future::Future::poll(future.as_mut(), &mut task_cx),
+            Poll::Pending
+        ));
+        let parsed_update = rx_result.try_recv().expect("parse result");
+
+        assert!(
+            parsed_update.revision < total_updates,
+            "single poll coalesced every queued update through revision {}",
+            parsed_update.revision
+        );
+
+        assert!(matches!(
+            std::future::Future::poll(future.as_mut(), &mut task_cx),
+            Poll::Pending
+        ));
+        let parsed_update = rx_result.try_recv().expect("next parse result");
+        assert_eq!(parsed_update.revision, total_updates);
+    }
+
     #[gpui::test]
     fn select_all_returns_rendered_text(cx: &mut TestAppContext) {
         cx.update(crate::init);
@@ -626,6 +743,43 @@ mod tests {
         state.read_with(cx, |state, _| {
             assert!(!state.has_view_selection());
             assert_eq!(state.selected_text(), "");
+        });
+    }
+
+    #[gpui::test]
+    fn set_markdown_extensions_reparses_existing_text(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let state = cx.update(|cx| cx.new(|cx| TextViewState::markdown("$TSLA.US", cx)));
+        cx.run_until_parked();
+
+        let extensions = MarkdownExtensions::default().block_parser(|node, cx| {
+            let markdown::mdast::Node::Paragraph(paragraph) = node else {
+                return None;
+            };
+            let [markdown::mdast::Node::Text(text)] = paragraph.children.as_slice() else {
+                return None;
+            };
+            let symbol = text.value.strip_prefix('$')?.to_string();
+            let node_text = format!("${symbol}");
+
+            Some(
+                MarkdownNode::new("ticker", symbol)
+                    .text(node_text)
+                    .markdown(cx.node_source(node).unwrap_or_default()),
+            )
+        });
+
+        state.update(cx, |state, cx| {
+            state.set_markdown_extensions(Arc::new(extensions), cx);
+        });
+        cx.run_until_parked();
+
+        state.read_with(cx, |state, _| {
+            let node::BlockNode::Custom(node) = &state.parsed_content.document.blocks[0] else {
+                panic!("expected custom markdown node");
+            };
+            assert_eq!(node.name(), "ticker");
+            assert_eq!(node.data::<String>().map(String::as_str), Some("TSLA.US"));
         });
     }
 }

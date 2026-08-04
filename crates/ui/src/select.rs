@@ -1,8 +1,8 @@
 use gpui::{
     AnyElement, App, ClickEvent, Context, DismissEvent, Edges, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, Length, ParentElement,
-    Render, RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window,
-    anchored, deferred, div, prelude::FluentBuilder, px, rems,
+    FocusHandle, Focusable, Hsla, InteractiveElement, IntoElement, KeyBinding, Length,
+    ParentElement, Render, RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement,
+    Styled, Window, anchored, deferred, div, prelude::FluentBuilder, px, rems,
 };
 use rust_i18n::t;
 
@@ -32,6 +32,37 @@ pub use crate::searchable_list::SearchableListItem as SelectItem;
 pub use crate::searchable_list::SearchableListItemElement as SelectListItem;
 /// Re-exported for backward compatibility.
 pub use crate::searchable_list::SearchableVec;
+
+#[derive(IntoElement)]
+pub struct Caret {
+    size: Size,
+    color: Option<Hsla>,
+}
+
+impl Caret {
+    /// Create a select caret sized for its trigger.
+    pub fn new(size: Size) -> Self {
+        Self { size, color: None }
+    }
+
+    /// Set the caret color.
+    pub fn text_color(mut self, color: Hsla) -> Self {
+        self.color = Some(color);
+        self
+    }
+}
+
+impl RenderOnce for Caret {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        Icon::new(IconName::ChevronDown)
+            .with_size(match self.size {
+                Size::XSmall => Size::XSmall,
+                Size::Small => Size::Small,
+                _ => Size::Medium,
+            })
+            .when_some(self.color, |this, color| this.text_color(color))
+    }
+}
 
 const CONTEXT: &str = "Select";
 
@@ -173,11 +204,8 @@ where
                         let new_selection = weak_confirm.update(cx, |this, cx| {
                             this.state.selection = selection;
 
-                            let final_value = this
-                                .state
-                                .selection
-                                .first()
-                                .map(|(_, i)| i.value().clone());
+                            let final_value =
+                                this.state.selection.first().map(|(_, i)| i.value().clone());
 
                             cx.emit(SelectEvent::Confirm(final_value));
                             cx.notify();
@@ -207,9 +235,7 @@ where
                     move |list_state, window, cx| {
                         let committed_ix = weak_cancel
                             .upgrade()
-                            .and_then(|e| {
-                                e.read(cx).state.selection.first().map(|(ix, _)| *ix)
-                            });
+                            .and_then(|e| e.read(cx).state.selection.first().map(|(ix, _)| *ix));
 
                         list_state.set_selected_index(committed_ix, window, cx);
 
@@ -493,14 +519,6 @@ where
                             .when(self.state.disabled, |this| this.opacity(0.5))
                             .border_color(cx.theme().input)
                             .rounded(cx.theme().radius)
-                            .when(cx.theme().shadow, |this| this.shadow_xs())
-                    })
-                    .map(|this| {
-                        if self.state.disabled {
-                            this.shadow_none()
-                        } else {
-                            this
-                        }
                     })
                     .overflow_hidden()
                     .input_size(self.state.size)
@@ -537,11 +555,16 @@ where
                             })
                             .when(!show_clean, |this| {
                                 let icon = match self.icon.clone() {
-                                    Some(icon) => icon,
-                                    None => Icon::new(IconName::ChevronDown),
+                                    Some(icon) => icon
+                                        .xsmall()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .into_any_element(),
+                                    None => Caret::new(self.state.size)
+                                        .text_color(cx.theme().muted_foreground)
+                                        .into_any_element(),
                                 };
 
-                                this.child(icon.xsmall().text_color(cx.theme().muted_foreground))
+                                this.child(icon)
                             }),
                     )
                     .on_prepaint({
@@ -563,7 +586,7 @@ where
                                     v_flex()
                                         .occlude()
                                         .mt_1p5()
-                                        .bg(cx.theme().background)
+                                        .bg(cx.theme().tokens.popover)
                                         .border_1()
                                         .border_color(cx.theme().border)
                                         .rounded(popup_radius)
@@ -661,7 +684,9 @@ where
         mut self,
         builder: impl Fn(&mut Window, &App) -> E + 'static,
     ) -> Self {
-        self.empty = Some(Box::new(move |window, cx| builder(window, cx).into_any_element()));
+        self.empty = Some(Box::new(move |window, cx| {
+            builder(window, cx).into_any_element()
+        }));
         self
     }
 

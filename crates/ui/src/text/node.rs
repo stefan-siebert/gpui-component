@@ -7,9 +7,9 @@ use std::{
 
 use gpui::{
     AnyElement, App, DefiniteLength, Div, ElementId, FontStyle, FontWeight, Half, HighlightStyle,
-    InteractiveElement as _, IntoElement, Length, ObjectFit, Overflow, ParentElement, ScrollHandle,
-    SharedString, SharedUri, StatefulInteractiveElement, Styled, StyledImage as _, Window, div,
-    img, prelude::FluentBuilder as _, px, relative, rems,
+    Hsla, InteractiveElement as _, IntoElement, Length, ObjectFit, Overflow, ParentElement,
+    ScrollHandle, SharedString, SharedUri, StatefulInteractiveElement, Styled, StyledImage as _,
+    Window, div, img, prelude::FluentBuilder as _, px, relative, rems,
 };
 use markdown::mdast;
 use ropey::Rope;
@@ -20,9 +20,10 @@ use crate::{
     input::{InputEdit, Point, RopeExt as _},
     scroll::horizontal_scroll_area,
     text::{
-        CodeBlockActionsFn,
+        CodeBlockActionsFn, MarkdownExtensions, MarkdownNode,
         document::NodeRenderOptions,
         inline::{Inline, InlineState},
+        inline_flow::{InlineFlow, InlineFlowItem},
     },
     tooltip::Tooltip,
     v_flex,
@@ -67,6 +68,8 @@ pub(crate) enum BlockNode {
         span: Option<Span>,
     },
     CodeBlock(CodeBlock),
+    /// A custom Markdown node produced by [`MarkdownExtensions`].
+    Custom(MarkdownNode),
     Table(Table),
     Break {
         html: bool,
@@ -96,10 +99,6 @@ impl BlockNode {
         matches!(self, Self::ListItem { .. })
     }
 
-    pub(super) fn is_break(&self) -> bool {
-        matches!(self, Self::Break { .. })
-    }
-
     /// Combine all children, omitting the empt parent nodes.
     pub(super) fn compact(self) -> BlockNode {
         match self {
@@ -118,6 +117,7 @@ impl BlockNode {
             BlockNode::List { span, .. } => *span,
             BlockNode::ListItem { span, .. } => *span,
             BlockNode::CodeBlock(code_block) => code_block.span,
+            BlockNode::Custom(el) => el.span,
             BlockNode::Table(table) => table.span,
             BlockNode::Break { span, .. } => *span,
             BlockNode::HorizontalRule { span, .. } => *span,
@@ -206,6 +206,15 @@ impl BlockNode {
                     text.push('\n');
                 }
             }
+            BlockNode::Custom(node) => {
+                if let BlockTextKind::All = kind {
+                    let content = node.as_text();
+                    if !content.is_empty() {
+                        text.push_str(content);
+                        text.push('\n');
+                    }
+                }
+            }
             BlockNode::Definition { .. }
             | BlockNode::Break { .. }
             | BlockNode::HorizontalRule { .. }
@@ -248,7 +257,8 @@ impl BlockNode {
                 }
             }
             BlockNode::CodeBlock(code_block) => code_block.clear_selection(),
-            BlockNode::Definition { .. }
+            BlockNode::Custom { .. }
+            | BlockNode::Definition { .. }
             | BlockNode::Break { .. }
             | BlockNode::HorizontalRule { .. }
             | BlockNode::Unknown { .. } => {}
@@ -272,6 +282,10 @@ pub struct TextMark {
     pub strikethrough: bool,
     pub underline: bool,
     pub code: bool,
+    /// Highlight (`<mark>`) the text with this background color.
+    ///
+    /// `None` means the text is not highlighted.
+    pub highlight: Option<Hsla>,
     pub link: Option<LinkMark>,
 }
 
@@ -301,6 +315,12 @@ impl TextMark {
         self
     }
 
+    /// Mark the text as highlighted (`<mark>`) with the given background color.
+    pub fn highlight(mut self, color: Hsla) -> Self {
+        self.highlight = Some(color);
+        self
+    }
+
     pub fn link(mut self, link: impl Into<LinkMark>) -> Self {
         self.link = Some(link.into());
         self
@@ -312,6 +332,9 @@ impl TextMark {
         self.strikethrough |= other.strikethrough;
         self.underline |= other.underline;
         self.code |= other.code;
+        if other.highlight.is_some() {
+            self.highlight = other.highlight;
+        }
         if let Some(link) = other.link {
             self.link = Some(link);
         }
@@ -580,10 +603,16 @@ impl Paragraph {
 }
 
 #[derive(Debug, Clone)]
+struct CachedCodeBlockStyles {
+    /// The active theme used to compute `styles`.
+    highlight_theme: Arc<HighlightTheme>,
+    styles: Vec<(Range<usize>, HighlightStyle)>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CodeBlock {
     lang: Option<SharedString>,
-    styles: Arc<Mutex<Option<Vec<(Range<usize>, HighlightStyle)>>>>,
-    highlight_theme: Arc<HighlightTheme>,
+    styles: Arc<Mutex<Option<CachedCodeBlockStyles>>>,
     state: Arc<Mutex<InlineState>>,
     pub span: Option<Span>,
 }
@@ -611,7 +640,6 @@ impl CodeBlock {
     pub(crate) fn new(
         code: SharedString,
         lang: Option<SharedString>,
-        highlight_theme: &HighlightTheme,
         span: Option<impl Into<Span>>,
     ) -> Self {
         let state = Arc::new(Mutex::new(InlineState::default()));
@@ -622,13 +650,15 @@ impl CodeBlock {
         Self {
             lang,
             styles: Arc::new(Mutex::new(None)),
-            highlight_theme: Arc::new(highlight_theme.clone()),
             state,
             span: span.map(|s| s.into()),
         }
     }
 
-    pub(crate) fn styles(&self) -> Vec<(Range<usize>, HighlightStyle)> {
+    pub(crate) fn styles(
+        &self,
+        highlight_theme: &Arc<HighlightTheme>,
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
         let Some(lang) = &self.lang else {
             return Vec::new();
         };
@@ -637,8 +667,18 @@ impl CodeBlock {
             return Vec::new();
         };
 
-        if let Some(styles) = styles.as_ref() {
-            return styles.clone();
+        // Pointer identity is the common render-path fast check. If an
+        // equivalent theme is reallocated, adopt its Arc while preserving the
+        // computed styles so subsequent renders also use the fast path.
+        if let Some(cached) = styles.as_mut() {
+            if Arc::ptr_eq(&cached.highlight_theme, highlight_theme) {
+                return cached.styles.clone();
+            }
+
+            if cached.highlight_theme.as_ref() == highlight_theme.as_ref() {
+                cached.highlight_theme = highlight_theme.clone();
+                return cached.styles.clone();
+            }
         }
 
         let code = self.code();
@@ -668,9 +708,12 @@ impl CodeBlock {
             };
 
             highlighter.update(Some(edit), &code_rope, None);
-            highlighter.styles(&(0..code.len()), &self.highlight_theme)
+            highlighter.styles(&(0..code.len()), highlight_theme)
         });
-        *styles = Some(computed_styles.clone());
+        *styles = Some(CachedCodeBlockStyles {
+            highlight_theme: highlight_theme.clone(),
+            styles: computed_styles.clone(),
+        });
         computed_styles
     }
 
@@ -710,13 +753,17 @@ impl CodeBlock {
         let style = &node_cx.style;
 
         div()
+            .w_full()
+            .min_w_0()
             .when(!options.is_last, |this| this.pb(style.paragraph_gap))
             .child(
                 div()
                     .id(("codeblock", options.ix))
+                    .w_full()
+                    .min_w_0()
                     .p_3()
                     .rounded(cx.theme().radius)
-                    .bg(cx.theme().muted)
+                    .bg(cx.theme().tokens.muted)
                     .font_family(cx.theme().mono_font_family.clone())
                     .text_size(cx.theme().mono_font_size)
                     .relative()
@@ -725,7 +772,7 @@ impl CodeBlock {
                         "code",
                         self.state.clone(),
                         vec![],
-                        self.styles(),
+                        self.styles(&cx.theme().highlight_theme),
                     ))
                     .when_some(node_cx.code_block_actions.clone(), |this, actions| {
                         this.child(
@@ -734,7 +781,7 @@ impl CodeBlock {
                                 .absolute()
                                 .top_2()
                                 .right_2()
-                                .bg(cx.theme().muted)
+                                .bg(cx.theme().tokens.muted)
                                 .rounded(cx.theme().radius)
                                 .child(actions(&self, window, cx)),
                         )
@@ -753,6 +800,7 @@ pub(crate) struct NodeContext {
     pub(crate) link_refs: HashMap<SharedString, LinkMark>,
     pub(crate) style: TextViewStyle,
     pub(crate) code_block_actions: Option<Arc<CodeBlockActionsFn>>,
+    pub(crate) markdown_extensions: Arc<MarkdownExtensions>,
 }
 
 impl NodeContext {
@@ -764,19 +812,23 @@ impl NodeContext {
 impl PartialEq for NodeContext {
     fn eq(&self, other: &Self) -> bool {
         self.link_refs == other.link_refs && self.style == other.style
-        // Note: code_block_buttons is intentionally not compared (closures can't be compared)
+        // Note: code_block_actions and markdown_extensions are intentionally
+        // not compared (closures can't be compared)
     }
 }
 
 impl Paragraph {
-    fn render(
-        &self,
-        node_cx: &NodeContext,
-        _window: &mut Window,
-        cx: &mut App,
-    ) -> impl IntoElement {
+    fn render(&self, node_cx: &NodeContext, _window: &mut Window, cx: &mut App) -> AnyElement {
         let span = self.span;
         let children = &self.children;
+
+        if self.should_render_inline_flow() {
+            return InlineFlow::new(
+                span.unwrap_or_default(),
+                self.inline_flow_items(node_cx, cx),
+            )
+            .into_any_element();
+        }
 
         let mut child_nodes: Vec<AnyElement> = vec![];
 
@@ -857,6 +909,9 @@ impl Paragraph {
                     if style.code {
                         highlight.background_color = Some(cx.theme().accent);
                     }
+                    if let Some(color) = style.highlight {
+                        highlight.background_color = Some(color);
+                    }
 
                     if let Some(mut link_mark) = style.link.clone() {
                         highlight.color = Some(cx.theme().link);
@@ -893,7 +948,122 @@ impl Paragraph {
                 .push(Inline::new(ix, self.state.clone(), links, highlights).into_any_element());
         }
 
-        div().id(span.unwrap_or_default()).children(child_nodes)
+        div()
+            .id(span.unwrap_or_default())
+            .children(child_nodes)
+            .into_any_element()
+    }
+
+    fn should_render_inline_flow(&self) -> bool {
+        let has_image = self.children.iter().any(|child| child.image.is_some());
+        let has_text = self.children.iter().any(|child| !child.text.is_empty());
+        has_image && has_text
+    }
+
+    fn inline_flow_items(&self, node_cx: &NodeContext, cx: &mut App) -> Vec<InlineFlowItem> {
+        let mut items = Vec::new();
+        let mut text = String::new();
+        let mut highlights: Vec<(Range<usize>, HighlightStyle)> = vec![];
+        let mut links: Vec<(Range<usize>, LinkMark)> = vec![];
+        let mut offset = 0;
+
+        for inline_node in &self.children {
+            let text_len = inline_node.text.len();
+            text.push_str(&inline_node.text);
+
+            if let Some(image) = &inline_node.image {
+                if !text.is_empty() {
+                    if let Ok(mut state) = inline_node.state.lock() {
+                        state.set_text(text.clone().into());
+                    }
+                    items.push(InlineFlowItem::Text {
+                        state: inline_node.state.clone(),
+                        text: text.clone().into(),
+                        links: links.clone(),
+                        highlights: highlights.clone(),
+                    });
+                }
+
+                items.push(InlineFlowItem::Image {
+                    url: image.url.clone(),
+                    link: image.link.clone(),
+                    title: image.title(),
+                    width: image.width,
+                    height: image.height,
+                });
+
+                text.clear();
+                links.clear();
+                highlights.clear();
+                offset = 0;
+            } else {
+                let mut node_highlights = vec![];
+                for (range, style) in &inline_node.marks {
+                    let inner_range = (offset + range.start)..(offset + range.end);
+
+                    let mut highlight = HighlightStyle::default();
+                    if style.bold {
+                        highlight.font_weight = Some(FontWeight::BOLD);
+                    }
+                    if style.italic {
+                        highlight.font_style = Some(FontStyle::Italic);
+                    }
+                    if style.strikethrough {
+                        highlight.strikethrough = Some(gpui::StrikethroughStyle {
+                            thickness: gpui::px(1.),
+                            ..Default::default()
+                        });
+                    }
+                    if style.underline {
+                        highlight.underline = Some(gpui::UnderlineStyle {
+                            thickness: gpui::px(1.),
+                            ..Default::default()
+                        });
+                    }
+                    if style.code {
+                        highlight.background_color = Some(cx.theme().accent);
+                    }
+                    if let Some(color) = style.highlight {
+                        highlight.background_color = Some(color);
+                    }
+
+                    if let Some(mut link_mark) = style.link.clone() {
+                        highlight.color = Some(cx.theme().link);
+                        highlight.underline = Some(gpui::UnderlineStyle {
+                            thickness: gpui::px(1.),
+                            ..Default::default()
+                        });
+
+                        if let Some(identifier) = link_mark.identifier.as_ref()
+                            && let Some(mark) = node_cx.link_refs.get(identifier)
+                        {
+                            link_mark = mark.clone();
+                        }
+
+                        links.push((inner_range.clone(), link_mark));
+                    }
+
+                    node_highlights.push((inner_range, highlight));
+                }
+
+                highlights = gpui::combine_highlights(highlights, node_highlights).collect();
+                offset += text_len;
+            }
+        }
+
+        if !text.is_empty() {
+            if let Ok(mut state) = self.state.lock() {
+                state.set_text(text.clone().into());
+            }
+            items.push(InlineFlowItem::Text {
+                state: self.state.clone(),
+                text: text.into(),
+                links,
+                highlights,
+            });
+        }
+
+        items
     }
 }
 
@@ -916,6 +1086,9 @@ impl Paragraph {
                     }
                     if style.code {
                         text = format!("`{}`", &text_node.text[range.clone()]);
+                    }
+                    if style.highlight.is_some() {
+                        text = format!("=={}==", &text_node.text[range.clone()]);
                     }
                     if let Some(link) = &style.link {
                         text = format!("[{}]({})", &text_node.text[range.clone()], link.url);
@@ -1061,6 +1234,7 @@ impl BlockNode {
                 }
             }
             BlockNode::HorizontalRule { .. } => "---".to_string(),
+            BlockNode::Custom(node) => node.to_markdown(),
             BlockNode::Definition {
                 identifier,
                 url,
@@ -1081,6 +1255,46 @@ impl BlockNode {
 }
 
 impl BlockNode {
+    fn render_list_item_row(
+        content: AnyElement,
+        ix: usize,
+        options: NodeRenderOptions,
+        checked: Option<bool>,
+        cx: &mut App,
+    ) -> Div {
+        h_flex()
+            .w_full()
+            .flex_1()
+            .min_w_0()
+            .relative()
+            .items_start()
+            .content_start()
+            .when(!options.todo && checked.is_none(), |this| {
+                this.child(list_item_prefix(ix, options.ordered, options.depth))
+            })
+            .when_some(checked, |this, checked| {
+                // Todo list checkbox
+                this.child(
+                    div()
+                        .flex()
+                        .mt(rems(0.4))
+                        .mr_1p5()
+                        .size(rems(0.875))
+                        .items_center()
+                        .justify_center()
+                        .rounded(cx.theme().radius.half())
+                        .border_1()
+                        .border_color(cx.theme().primary)
+                        .text_color(cx.theme().primary_foreground)
+                        .when(checked, |this| {
+                            this.bg(cx.theme().tokens.primary)
+                                .child(Icon::new(IconName::Check).size_2().text_xs())
+                        }),
+                )
+            })
+            .child(div().flex_1().min_w_0().overflow_hidden().child(content))
+    }
+
     fn render_list_item(
         item: &BlockNode,
         ix: usize,
@@ -1130,7 +1344,7 @@ impl BlockNode {
                                             v_flex().child(preceding_row).child(
                                                 div()
                                                     .w_full()
-                                                    .pl(rems(0.75))
+                                                    .pl(rems(1.))
                                                     .overflow_hidden()
                                                     .child(text),
                                             ),
@@ -1139,48 +1353,9 @@ impl BlockNode {
                                     }
                                 }
 
-                                items.push(
-                                    h_flex()
-                                        .w_full()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .relative()
-                                        .items_start()
-                                        .content_start()
-                                        .when(!options.todo && checked.is_none(), |this| {
-                                            this.child(list_item_prefix(
-                                                ix,
-                                                options.ordered,
-                                                options.depth,
-                                            ))
-                                        })
-                                        .when_some(*checked, |this, checked| {
-                                            // Todo list checkbox
-                                            this.child(
-                                                div()
-                                                    .flex()
-                                                    .mt(rems(0.4))
-                                                    .mr_1p5()
-                                                    .size(rems(0.875))
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .rounded(cx.theme().radius.half())
-                                                    .border_1()
-                                                    .border_color(cx.theme().primary)
-                                                    .text_color(cx.theme().primary_foreground)
-                                                    .when(checked, |this| {
-                                                        this.bg(cx.theme().primary).child(
-                                                            Icon::new(IconName::Check)
-                                                                .size_2()
-                                                                .text_xs(),
-                                                        )
-                                                    }),
-                                            )
-                                        })
-                                        .child(
-                                            div().flex_1().min_w_0().overflow_hidden().child(text),
-                                        ),
-                                );
+                                items.push(Self::render_list_item_row(
+                                    text, ix, options, *checked, cx,
+                                ));
                             }
                             BlockNode::List { .. } => {
                                 items.push(div().ml(rems(1.)).child(child.render_block(
@@ -1195,7 +1370,47 @@ impl BlockNode {
                                     cx,
                                 )));
                             }
-                            _ => {}
+                            BlockNode::Root { .. }
+                            | BlockNode::Heading { .. }
+                            | BlockNode::Blockquote { .. }
+                            | BlockNode::CodeBlock(_)
+                            | BlockNode::Custom(_)
+                            | BlockNode::Table(_)
+                            | BlockNode::HorizontalRule { .. } => {
+                                let block = child.render_block(
+                                    NodeRenderOptions {
+                                        depth: options.depth + 1,
+                                        todo: checked.is_some(),
+                                        is_last: true,
+                                        ..options
+                                    },
+                                    node_cx,
+                                    window,
+                                    cx,
+                                );
+
+                                if child_ix == 0 {
+                                    items.push(Self::render_list_item_row(
+                                        block, ix, options, *checked, cx,
+                                    ));
+                                } else {
+                                    // Indent continuation blocks to align with a
+                                    // nested sub-list (`ml(rems(1.))`) and with
+                                    // continuation paragraphs.
+                                    items.push(
+                                        div()
+                                            .w_full()
+                                            .min_w_0()
+                                            .pl(rems(1.))
+                                            .overflow_hidden()
+                                            .child(block),
+                                    );
+                                }
+                            }
+                            BlockNode::ListItem { .. }
+                            | BlockNode::Break { .. }
+                            | BlockNode::Definition { .. }
+                            | BlockNode::Unknown => {}
                         }
                     }
                     items
@@ -1531,6 +1746,8 @@ impl BlockNode {
                 children, ordered, ..
             } => v_flex()
                 .id((if *ordered { "ol" } else { "ul" }, ix))
+                .w_full()
+                .min_w_0()
                 .pb(mb)
                 .children({
                     let mut items = Vec::with_capacity(children.len());
@@ -1559,6 +1776,14 @@ impl BlockNode {
                 })
                 .into_any_element(),
             BlockNode::CodeBlock(code_block) => code_block.render(&options, node_cx, window, cx),
+            BlockNode::Custom(node) => {
+                let inner = match node_cx.markdown_extensions.render_block(node, window, cx) {
+                    Some(rendered) => rendered,
+                    None => div().child(node.as_text().to_string()).into_any_element(),
+                };
+
+                div().pb(mb).child(inner).into_any_element()
+            }
             BlockNode::Table { .. } => {
                 Self::render_table(self, &options, node_cx, window, cx).into_any_element()
             }
@@ -1583,26 +1808,32 @@ impl BlockNode {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "tree-sitter")]
+    use crate::{
+        Theme, ThemeMode,
+        text::{TextView, TextViewState},
+    };
+    #[cfg(feature = "tree-sitter")]
+    use gpui::{AppContext as _, Context, Entity, Render, TestAppContext, VisualTestContext};
+
+    #[cfg(feature = "tree-sitter")]
+    fn cached_highlight_theme(block: &CodeBlock) -> Option<Arc<HighlightTheme>> {
+        block
+            .styles
+            .lock()
+            .ok()
+            .and_then(|styles| styles.as_ref().map(|styles| styles.highlight_theme.clone()))
+    }
+
     #[test]
     fn code_block_equality_includes_code_content() {
-        let theme = HighlightTheme::default_light();
-        let first = CodeBlock::new(
-            "let value = 1;".into(),
-            Some("rust".into()),
-            &theme,
-            None::<Span>,
-        );
-        let second = CodeBlock::new(
-            "let value = 2;".into(),
-            Some("rust".into()),
-            &theme,
-            None::<Span>,
-        );
+        let first = CodeBlock::new("let value = 1;".into(), Some("rust".into()), None::<Span>);
+        let second = CodeBlock::new("let value = 2;".into(), Some("rust".into()), None::<Span>);
 
         assert_ne!(first, second);
     }
 
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(feature = "tree-sitter")]
     #[test]
     fn code_block_highlighter_cache_refreshes_after_language_registration() {
         let lang = SharedString::from("json-cache-test");
@@ -1612,13 +1843,9 @@ mod tests {
             cache.borrow_mut().remove(&lang);
         });
 
-        let unknown_block = CodeBlock::new(
-            "{\"value\": 1}".into(),
-            Some(lang.clone()),
-            &theme,
-            None::<Span>,
-        );
-        _ = unknown_block.styles();
+        let unknown_block =
+            CodeBlock::new("{\"value\": 1}".into(), Some(lang.clone()), None::<Span>);
+        _ = unknown_block.styles(&theme);
 
         let cached_language = CODE_BLOCK_HIGHLIGHTERS.with(|cache| {
             cache
@@ -1644,13 +1871,9 @@ mod tests {
             ),
         );
 
-        let registered_block = CodeBlock::new(
-            "{\"value\": 2}".into(),
-            Some(lang.clone()),
-            &theme,
-            None::<Span>,
-        );
-        _ = registered_block.styles();
+        let registered_block =
+            CodeBlock::new("{\"value\": 2}".into(), Some(lang.clone()), None::<Span>);
+        _ = registered_block.styles(&theme);
 
         let cached_language = CODE_BLOCK_HIGHLIGHTERS.with(|cache| {
             cache
@@ -1659,5 +1882,160 @@ mod tests {
                 .map(|highlighter| highlighter.language().clone())
         });
         assert_eq!(cached_language.as_deref(), Some(lang.as_ref()));
+    }
+
+    #[cfg(feature = "tree-sitter")]
+    #[test]
+    fn code_block_styles_follow_the_current_highlight_theme() {
+        let lang = SharedString::from("json-theme-cache-test");
+        let light_theme = HighlightTheme::default_light();
+        let dark_theme = HighlightTheme::default_dark();
+        let code = SharedString::from(r#"{"value": 42}"#);
+        let number_range = code.find("42").unwrap()..code.find("42").unwrap() + 2;
+
+        let light_number = light_theme.style("number").and_then(|style| style.color);
+        let dark_number = dark_theme.style("number").and_then(|style| style.color);
+        assert_ne!(
+            light_number, dark_number,
+            "the test themes must use different number colors"
+        );
+
+        CODE_BLOCK_HIGHLIGHTERS.with(|cache| {
+            cache.borrow_mut().remove(&lang);
+        });
+        LanguageRegistry::singleton().register(
+            lang.as_ref(),
+            &crate::highlighter::LanguageConfig::new(
+                lang.clone(),
+                tree_sitter_json::LANGUAGE.into(),
+                vec![],
+                "(number) @number",
+                "",
+                "",
+            ),
+        );
+
+        let block = CodeBlock::new(code.clone(), Some(lang), None::<Span>);
+        let light_styles = block.styles(&light_theme);
+        let cached_light_theme = cached_highlight_theme(&block).unwrap();
+        assert!(Arc::ptr_eq(&cached_light_theme, &light_theme));
+
+        let equivalent_light_theme = Arc::new(light_theme.as_ref().clone());
+        let repeated_light_styles = block.styles(&equivalent_light_theme);
+        assert_eq!(repeated_light_styles, light_styles);
+        assert!(
+            Arc::ptr_eq(
+                &cached_highlight_theme(&block).unwrap(),
+                &equivalent_light_theme
+            ),
+            "an equivalent replacement should become the cache identity"
+        );
+        assert_eq!(block.styles(&equivalent_light_theme), light_styles);
+
+        let dark_styles = block.styles(&dark_theme);
+        assert_eq!(
+            cached_highlight_theme(&block).as_deref(),
+            Some(dark_theme.as_ref())
+        );
+
+        let color_for_number = |styles: &[(Range<usize>, HighlightStyle)]| -> Option<Hsla> {
+            styles
+                .iter()
+                .find(|(range, _)| {
+                    range.start <= number_range.start && range.end >= number_range.end
+                })
+                .and_then(|(_, style)| style.color)
+        };
+
+        assert_eq!(color_for_number(&light_styles), light_number);
+        assert_eq!(
+            color_for_number(&dark_styles),
+            dark_number,
+            "a theme change must not reuse syntax styles from the previous theme"
+        );
+    }
+
+    #[cfg(feature = "tree-sitter")]
+    #[gpui::test]
+    fn rendered_markdown_code_block_follows_theme_without_reparsing(cx: &mut TestAppContext) {
+        struct CodeBlockThemeRoot {
+            text_view: Entity<TextViewState>,
+        }
+
+        impl Render for CodeBlockThemeRoot {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                div().w(px(480.)).child(TextView::new(&self.text_view))
+            }
+        }
+
+        let lang = SharedString::from("json-theme-render-test");
+        LanguageRegistry::singleton().register(
+            lang.as_ref(),
+            &crate::highlighter::LanguageConfig::new(
+                lang.clone(),
+                tree_sitter_json::LANGUAGE.into(),
+                vec![],
+                "(number) @number",
+                "",
+                "",
+            ),
+        );
+
+        cx.update(crate::init);
+        let markdown = format!("```{lang}\n{{\"value\": 42}}\n```");
+        let (view, cx) = cx.add_window_view(|_, cx| CodeBlockThemeRoot {
+            text_view: cx.new(|cx| TextViewState::markdown(&markdown, cx)),
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let light_theme = cx.update(|_, cx| cx.theme().highlight_theme.clone());
+        let light_block = view.read_with(cx, |root, cx| {
+            let state = root.text_view.read(cx);
+            let BlockNode::CodeBlock(block) = &state.parsed_content.document.blocks[0] else {
+                panic!("expected a code block");
+            };
+
+            block.clone()
+        });
+        let cached_light_theme = cached_highlight_theme(&light_block)
+            .expect("initial render should populate the highlight cache");
+        assert_eq!(cached_light_theme.as_ref(), light_theme.as_ref());
+
+        cx.update(|window, cx| {
+            Theme::change(ThemeMode::Dark, Some(&mut *window), cx);
+            let _ = window.draw(cx);
+        });
+
+        let dark_theme = cx.update(|_, cx| cx.theme().highlight_theme.clone());
+        let dark_block = view.read_with(cx, |root, cx| {
+            let state = root.text_view.read(cx);
+            let BlockNode::CodeBlock(block) = &state.parsed_content.document.blocks[0] else {
+                panic!("expected a code block");
+            };
+
+            block.clone()
+        });
+        let cached_dark_theme = cached_highlight_theme(&dark_block)
+            .expect("theme-change render should refresh the highlight cache");
+
+        assert_ne!(
+            light_theme.as_ref(),
+            dark_theme.as_ref(),
+            "the test themes must have distinct highlight palettes"
+        );
+        assert!(
+            Arc::ptr_eq(&dark_block.styles, &light_block.styles),
+            "changing the theme must not require reparsing the Markdown document"
+        );
+        assert_eq!(cached_dark_theme.as_ref(), dark_theme.as_ref());
     }
 }

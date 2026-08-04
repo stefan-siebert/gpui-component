@@ -1,12 +1,12 @@
 use std::rc::Rc;
 
 use gpui::{
-    div, prelude::FluentBuilder as _, App, Bounds, ClickEvent, ElementId, InteractiveElement as _,
-    IntoElement, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement,
-    StyleRefinement, Styled, Window,
+    App, Bounds, ClickEvent, ElementId, InteractiveElement as _, IntoElement, ParentElement,
+    Pixels, RenderOnce, Role, SharedString, StatefulInteractiveElement, StyleRefinement, Styled,
+    Window, div, prelude::FluentBuilder as _,
 };
 
-use crate::{h_flex, ActiveTheme, Icon, IconName, StyledExt};
+use crate::{ActiveTheme, Icon, IconName, StyledExt, h_flex};
 
 /// A breadcrumb navigation element.
 #[derive(IntoElement)]
@@ -77,10 +77,7 @@ impl BreadcrumbItem {
         self
     }
 
-    pub fn on_hover(
-        mut self,
-        on_hover: impl Fn(&bool, &mut Window, &mut App) + 'static,
-    ) -> Self {
+    pub fn on_hover(mut self, on_hover: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
         self.on_hover = Some(Rc::new(on_hover));
         self
     }
@@ -154,6 +151,11 @@ impl RenderOnce for BreadcrumbItem {
         div()
             .id(self.id)
             .flex_shrink_0()
+            .role(if self.on_click.is_some() && !self.disabled {
+                Role::Link
+            } else {
+                Role::ListItem
+            })
             .child(label)
             .text_color(cx.theme().muted_foreground)
             .when(self.is_last, |this| this.text_color(cx.theme().foreground))
@@ -574,10 +576,7 @@ impl gpui::Element for CollapsibleBreadcrumb {
                     } else if ix >= tail_start {
                         // Tail items — insert ellipsis before the first one
                         if !ellipsis_inserted && tail_start > 1 {
-                            children.push(Self::make_ellipsis(
-                                self.on_ellipsis_click.clone(),
-                                cx,
-                            ));
+                            children.push(Self::make_ellipsis(self.on_ellipsis_click.clone(), cx));
                             children.push(BreadcrumbSeparator.into_any_element());
                             ellipsis_inserted = true;
                         }
@@ -609,8 +608,7 @@ impl gpui::Element for CollapsibleBreadcrumb {
                 // Collapsed frames have fewer children, so their measurements
                 // would cause the next frame to incorrectly uncollapse.
                 if !is_collapsed && bounds.len() >= 2 {
-                    let widths: Vec<f32> =
-                        bounds.iter().map(|b| f32::from(b.size.width)).collect();
+                    let widths: Vec<f32> = bounds.iter().map(|b| f32::from(b.size.width)).collect();
 
                     // Measure actual gap from the distance between first two children
                     let first_right =

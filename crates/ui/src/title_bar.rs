@@ -1,8 +1,6 @@
 use std::rc::Rc;
 
-use crate::{
-    ActiveTheme, Icon, IconName, Sizable as _, StyledExt, h_flex,
-};
+use crate::{ActiveTheme, Icon, IconName, Sizable as _, StyledExt, h_flex};
 use gpui::{
     AnyElement, App, ClickEvent, Context, Hsla, InteractiveElement, IntoElement,
     MAX_BUTTONS_PER_SIDE, MouseButton, ParentElement, Pixels, Point, Render, RenderOnce,
@@ -257,7 +255,7 @@ impl RenderOnce for ControlIcon {
             .child(
                 Icon::new(self.icon())
                     .when(is_linux, |this| this.size_4().text_color(fg_muted))
-                    .when(!is_linux, |this| this.small())
+                    .when(!is_linux, |this| this.small()),
             )
     }
 }
@@ -275,10 +273,20 @@ impl RenderOnce for WindowControls {
         let is_maximized = window.is_maximized();
         let on_close = self.on_close_window;
 
+        // The window manager declares which controls it can honor; a tiling
+        // compositor may support neither minimize nor maximize. Close is
+        // always ours to offer.
+        let supported = window.window_controls();
+
         let icons: Vec<ControlIcon> = self
             .buttons
             .iter()
             .filter_map(|b| *b)
+            .filter(|button| match button {
+                WindowButton::Minimize => supported.minimize,
+                WindowButton::Maximize => supported.maximize,
+                WindowButton::Close => true,
+            })
             .map(|button| match button {
                 WindowButton::Minimize => ControlIcon::minimize(),
                 WindowButton::Maximize => {
@@ -340,32 +348,31 @@ impl RenderOnce for TitleBar {
         // On macOS: native traffic lights, no custom controls needed.
         // On Linux: follow DE configuration via XDG Desktop Portal.
         // On Windows: always right-side controls.
-        let button_layout = if is_macos {
-            None
-        } else if is_linux {
-            Some(
-                self.button_layout
-                    .or_else(|| cx.button_layout())
-                    .unwrap_or(WindowButtonLayout {
+        let button_layout =
+            if is_macos {
+                None
+            } else if is_linux {
+                Some(self.button_layout.or_else(|| cx.button_layout()).unwrap_or(
+                    WindowButtonLayout {
                         left: [None; MAX_BUTTONS_PER_SIDE],
                         right: [
                             Some(WindowButton::Minimize),
                             Some(WindowButton::Maximize),
                             Some(WindowButton::Close),
                         ],
-                    }),
-            )
-        } else {
-            // Windows: always right-side
-            Some(WindowButtonLayout {
-                left: [None; MAX_BUTTONS_PER_SIDE],
-                right: [
-                    Some(WindowButton::Minimize),
-                    Some(WindowButton::Maximize),
-                    Some(WindowButton::Close),
-                ],
-            })
-        };
+                    },
+                ))
+            } else {
+                // Windows: always right-side
+                Some(WindowButtonLayout {
+                    left: [None; MAX_BUTTONS_PER_SIDE],
+                    right: [
+                        Some(WindowButton::Minimize),
+                        Some(WindowButton::Maximize),
+                        Some(WindowButton::Close),
+                    ],
+                })
+            };
 
         let has_left_controls = button_layout
             .as_ref()
@@ -438,17 +445,20 @@ impl RenderOnce for TitleBar {
                     #[cfg(target_os = "windows")]
                     {
                         let now = std::time::Instant::now();
-                        let is_double_click = match (state.last_mousedown_time, state.last_mousedown_pos) {
-                            (Some(last_time), Some(last_pos)) => {
-                                let elapsed = now.duration_since(last_time);
-                                let delta = event.position - last_pos;
-                                let threshold = px(4.0);
-                                elapsed.as_millis() < 500
-                                    && delta.x > -threshold && delta.x < threshold
-                                    && delta.y > -threshold && delta.y < threshold
-                            }
-                            _ => false,
-                        };
+                        let is_double_click =
+                            match (state.last_mousedown_time, state.last_mousedown_pos) {
+                                (Some(last_time), Some(last_pos)) => {
+                                    let elapsed = now.duration_since(last_time);
+                                    let delta = event.position - last_pos;
+                                    let threshold = px(4.0);
+                                    elapsed.as_millis() < 500
+                                        && delta.x > -threshold
+                                        && delta.x < threshold
+                                        && delta.y > -threshold
+                                        && delta.y < threshold
+                                }
+                                _ => false,
+                            };
 
                         if is_double_click {
                             state.should_move = false;
@@ -475,33 +485,40 @@ impl RenderOnce for TitleBar {
                     state.drag_start_pos = None;
                 }),
             )
-            .on_mouse_move(window.listener_for(&state, |state, #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] event: &gpui::MouseMoveEvent, window, _| {
-                if state.should_move {
-                    #[cfg(not(target_os = "windows"))]
-                    {
-                        state.should_move = false;
-                        window.start_window_move();
-                    }
-                    #[cfg(target_os = "windows")]
-                    {
-                        // Only start drag after exceeding a movement threshold (4px),
-                        // so that double-clicks aren't swallowed by the drag modal loop.
-                        if let Some(start) = state.drag_start_pos {
-                            let delta = event.position - start;
-                            let threshold = px(4.0);
-                            if delta.x > threshold
-                                || delta.x < -threshold
-                                || delta.y > threshold
-                                || delta.y < -threshold
-                            {
-                                state.should_move = false;
-                                state.drag_start_pos = None;
-                                start_window_move_win32(window);
+            .on_mouse_move(window.listener_for(
+                &state,
+                |state,
+                 #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+                 event: &gpui::MouseMoveEvent,
+                 window,
+                 _| {
+                    if state.should_move {
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            state.should_move = false;
+                            window.start_window_move();
+                        }
+                        #[cfg(target_os = "windows")]
+                        {
+                            // Only start drag after exceeding a movement threshold (4px),
+                            // so that double-clicks aren't swallowed by the drag modal loop.
+                            if let Some(start) = state.drag_start_pos {
+                                let delta = event.position - start;
+                                let threshold = px(4.0);
+                                if delta.x > threshold
+                                    || delta.x < -threshold
+                                    || delta.y > threshold
+                                    || delta.y < -threshold
+                                {
+                                    state.should_move = false;
+                                    state.drag_start_pos = None;
+                                    start_window_move_win32(window);
+                                }
                             }
                         }
                     }
-                }
-            }))
+                },
+            ))
             // Double-click to maximize/restore
             // Linux: use GPUI's click_count(). Windows: handled in on_mouse_down above.
             .when(cfg!(target_os = "linux"), |this| {
@@ -622,7 +639,12 @@ fn start_top_resize_win32(window: &mut gpui::Window) {
                 use windows::Win32::UI::WindowsAndMessaging::*;
                 let hwnd = HWND(win32.hwnd.get() as *mut _);
                 let _ = ReleaseCapture();
-                let _ = PostMessageW(Some(hwnd), WM_NCLBUTTONDOWN, WPARAM(HTTOP as usize), LPARAM(0));
+                let _ = PostMessageW(
+                    Some(hwnd),
+                    WM_NCLBUTTONDOWN,
+                    WPARAM(HTTOP as usize),
+                    LPARAM(0),
+                );
             }
         }
     }
@@ -643,7 +665,12 @@ fn start_window_move_win32(window: &mut gpui::Window) {
                 use windows::Win32::UI::WindowsAndMessaging::*;
                 let hwnd = HWND(win32.hwnd.get() as *mut _);
                 let _ = ReleaseCapture();
-                let _ = PostMessageW(Some(hwnd), WM_NCLBUTTONDOWN, WPARAM(HTCAPTION as usize), LPARAM(0));
+                let _ = PostMessageW(
+                    Some(hwnd),
+                    WM_NCLBUTTONDOWN,
+                    WPARAM(HTCAPTION as usize),
+                    LPARAM(0),
+                );
             }
         }
     }

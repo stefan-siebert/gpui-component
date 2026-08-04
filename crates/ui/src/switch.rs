@@ -3,9 +3,10 @@ use crate::{
     tooltip::ComponentTooltip,
 };
 use gpui::{
-    Animation, AnimationExt as _, App, ElementId, Hsla, InteractiveElement, IntoElement,
-    ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, px,
+    Animation, AnimationExt as _, App, Background, ElementId, Hsla, InteractiveElement,
+    IntoElement, ParentElement as _, RenderOnce, Role, SharedString,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, Toggled, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use std::{rc::Rc, time::Duration};
 
@@ -125,16 +126,22 @@ impl RenderOnce for Switch {
             .clone();
         let is_focused = focus_handle.is_focused(window);
 
-        let checked_bg = self.color.unwrap_or(cx.theme().primary);
-        let (bg, toggle_bg) = match checked {
-            true => (checked_bg, cx.theme().switch_thumb),
-            false => (cx.theme().switch, cx.theme().switch_thumb),
+        let checked_bg = self
+            .color
+            .map(Background::from)
+            .unwrap_or(cx.theme().tokens.primary.into());
+        let (bg, toggle_bg): (Background, Background) = match checked {
+            true => (checked_bg, cx.theme().tokens.switch_thumb.into()),
+            false => (
+                cx.theme().tokens.switch.into(),
+                cx.theme().tokens.switch_thumb.into(),
+            ),
         };
 
         let (bg, toggle_bg) = if self.disabled {
             (
-                if checked { bg.alpha(0.5) } else { bg },
-                toggle_bg.alpha(0.35),
+                if checked { bg.opacity(0.5) } else { bg },
+                toggle_bg.opacity(0.35),
             )
         } else {
             (bg, toggle_bg)
@@ -158,6 +165,16 @@ impl RenderOnce for Switch {
         div().refine_style(&self.style).child(
             h_flex()
                 .id(self.id.clone())
+                .role(Role::Switch)
+                .aria_toggled(if checked {
+                    Toggled::True
+                } else {
+                    Toggled::False
+                })
+                .when_some(
+                    self.label.as_ref().map(|l| l.get_text(cx)),
+                    |this, label| this.aria_label(label),
+                )
                 .gap_2()
                 .items_start()
                 .when(!self.disabled, |this| {
@@ -171,9 +188,7 @@ impl RenderOnce for Switch {
                 .child(
                     // Switch Bar (needs its own id for tooltip support)
                     div()
-                        .id(ElementId::Name(
-                            format!("switch-bar-{:?}", self.id).into(),
-                        ))
+                        .id(ElementId::Name(format!("switch-bar-{:?}", self.id).into()))
                         .w(bg_width)
                         .h(bg_height)
                         .rounded(radius)
@@ -192,7 +207,6 @@ impl RenderOnce for Switch {
                             div()
                                 .rounded(radius)
                                 .bg(toggle_bg)
-                                .shadow_md()
                                 .size(bar_width)
                                 .map(|this| {
                                     let prev_checked = toggle_state.read(cx);

@@ -28,7 +28,7 @@
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -36,7 +36,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(windows)]
 use uds_windows::{UnixListener, UnixStream};
 
-use gpui::{point, px, App, Keystroke, MouseButton as GpuiMouseButton, Pixels};
+use gpui::{App, Keystroke, MouseButton as GpuiMouseButton, Pixels, point, px};
 use gpui_mcp_protocol::protocol::*;
 use serde_json::json;
 
@@ -75,9 +75,7 @@ fn convert_bounds(b: gpui::Bounds<Pixels>) -> Bounds {
 /// application's semantic state. It runs on the main thread whenever
 /// `get_app_state` is called. Only one provider can be registered; calling
 /// this again replaces the previous one.
-pub fn mcp_set_app_state_provider(
-    provider: impl Fn(&App) -> serde_json::Value + Send + 'static,
-) {
+pub fn mcp_set_app_state_provider(provider: impl Fn(&App) -> serde_json::Value + Send + 'static) {
     if let Ok(mut guard) = APP_STATE_PROVIDER.lock() {
         *guard = Some(Box::new(provider));
     }
@@ -170,10 +168,7 @@ pub fn init_mcp(cx: &mut App, app_name: &str) {
 }
 
 /// Unix Socket listener loop (runs on background thread)
-fn run_ipc_listener(
-    socket_path: &str,
-    req_tx: mpsc::Sender<RequestMsg>,
-) -> anyhow::Result<()> {
+fn run_ipc_listener(socket_path: &str, req_tx: mpsc::Sender<RequestMsg>) -> anyhow::Result<()> {
     // Remove old socket
     let _ = std::fs::remove_file(socket_path);
 
@@ -212,9 +207,9 @@ fn handle_ipc_connection(
 
         let (resp_tx, resp_rx) = mpsc::channel();
 
-        req_tx.send((request, resp_tx)).map_err(|e| {
-            anyhow::anyhow!("Failed to send request to main thread: {}", e)
-        })?;
+        req_tx
+            .send((request, resp_tx))
+            .map_err(|e| anyhow::anyhow!("Failed to send request to main thread: {}", e))?;
 
         let response = resp_rx
             .recv_timeout(Duration::from_secs(10))
@@ -260,10 +255,7 @@ fn handle_request(request: &IpcRequest, cx: &mut App) -> IpcResponse {
 
 /// Resolve a window handle from an optional window_id string.
 /// Falls back to: active window → first window.
-fn resolve_window(
-    window_id: Option<&str>,
-    cx: &mut App,
-) -> Result<gpui::AnyWindowHandle, String> {
+fn resolve_window(window_id: Option<&str>, cx: &mut App) -> Result<gpui::AnyWindowHandle, String> {
     if let Some(id_str) = window_id {
         for handle in cx.windows() {
             let wid = format!("{:?}", handle.window_id());
@@ -540,12 +532,10 @@ fn resolve_element_center(
         let result = handle.update(cx, |_, window, _cx| {
             let window_id_str = format!("{:?}", handle.window_id());
             for info in window.inspector_elements() {
-                let full_id =
-                    format!("{}/{}[{}]", window_id_str, info.global_id, info.instance_id);
+                let full_id = format!("{}/{}[{}]", window_id_str, info.global_id, info.instance_id);
 
-                let matches = full_id == query
-                    || info.global_id == query
-                    || info.global_id.ends_with(query);
+                let matches =
+                    full_id == query || info.global_id == query || info.global_id.ends_with(query);
 
                 if matches {
                     let center_x = info.bounds.origin.x + info.bounds.size.width / 2.0;
@@ -565,10 +555,7 @@ fn resolve_element_center(
     Err(not_found_error(query, candidates))
 }
 
-fn handle_send_key(
-    params: &serde_json::Value,
-    cx: &mut App,
-) -> Result<serde_json::Value, String> {
+fn handle_send_key(params: &serde_json::Value, cx: &mut App) -> Result<serde_json::Value, String> {
     let event: KeyEvent = serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
 
     let mut keystroke_str = String::new();
@@ -595,9 +582,7 @@ fn handle_send_key(
     let handle = resolve_window(event.window_id.as_deref(), cx)?;
 
     let dispatched = handle
-        .update(cx, |_, window, cx| {
-            window.dispatch_keystroke(keystroke, cx)
-        })
+        .update(cx, |_, window, cx| window.dispatch_keystroke(keystroke, cx))
         .map_err(|e| e.to_string())?;
 
     mcp_log(format!("Key '{}' dispatched={}", keystroke_str, dispatched));
@@ -609,12 +594,8 @@ fn handle_send_key(
     Ok(attach_post_state(response, event.window_id.as_deref(), cx))
 }
 
-fn handle_type_text(
-    params: &serde_json::Value,
-    cx: &mut App,
-) -> Result<serde_json::Value, String> {
-    let opts: TypeTextParams =
-        serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
+fn handle_type_text(params: &serde_json::Value, cx: &mut App) -> Result<serde_json::Value, String> {
+    let opts: TypeTextParams = serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
 
     let handle = resolve_window(opts.window_id.as_deref(), cx)?;
 
@@ -633,9 +614,7 @@ fn handle_type_text(
         };
 
         let ok = handle
-            .update(cx, |_, window, cx| {
-                window.dispatch_keystroke(keystroke, cx)
-            })
+            .update(cx, |_, window, cx| window.dispatch_keystroke(keystroke, cx))
             .map_err(|e| e.to_string())?;
 
         if ok {
@@ -746,8 +725,7 @@ fn handle_inspect_ui_tree(
                     let window_id_str = format!("{:?}", handle.window_id());
 
                     let inspector_elems = window.inspector_elements();
-                    let mut element_children =
-                        build_element_tree(&window_id_str, inspector_elems);
+                    let mut element_children = build_element_tree(&window_id_str, inspector_elems);
 
                     // If root_element_id is set, find that subtree
                     if let Some(ref root_id) = opts.root_element_id {
@@ -1201,10 +1179,8 @@ fn handle_take_screenshot(
             .update(cx, |_, window, _cx| {
                 let window_id_str = format!("{:?}", handle.window_id());
                 for info in window.inspector_elements() {
-                    let full_id = format!(
-                        "{}/{}[{}]",
-                        window_id_str, info.global_id, info.instance_id
-                    );
+                    let full_id =
+                        format!("{}/{}[{}]", window_id_str, info.global_id, info.instance_id);
                     let matches = full_id == *element_id
                         || info.global_id == *element_id
                         || info.global_id.ends_with(element_id.as_str());
@@ -1311,9 +1287,7 @@ fn handle_execute_action(
             let focused = window.focused(cx);
             let has_focus = focused.is_some();
             match focused {
-                Some(focus_handle) => {
-                    focus_handle.dispatch_action(action.as_ref(), window, cx)
-                }
+                Some(focus_handle) => focus_handle.dispatch_action(action.as_ref(), window, cx),
                 None => window.dispatch_action(action, cx),
             }
             (wid, title, has_focus)
@@ -1366,8 +1340,7 @@ fn handle_list_actions(
     // contexts and collect action names whose binding predicate matches.
     // `only_available` implies we must return bindings, since filtering
     // depends on them.
-    let available_action_names: Option<std::collections::HashSet<String>> = if opts.only_available
-    {
+    let available_action_names: Option<std::collections::HashSet<String>> = if opts.only_available {
         let handle = resolve_window(opts.window_id.as_deref(), cx)?;
         let contexts: Vec<gpui::KeyContext> = handle
             .update(cx, |_, window, _cx| window.context_stack())
@@ -1431,15 +1404,14 @@ fn handle_list_actions(
                         .map(|ks| format!("{}", ks))
                         .collect();
 
-                    let context = binding
-                        .predicate()
-                        .map(|p| format!("{}", p));
+                    let context = binding.predicate().map(|p| format!("{}", p));
 
                     let mut entry = json!({
                         "keys": keystrokes.join(" "),
                     });
                     if let Some(ctx) = context {
-                        entry.as_object_mut()
+                        entry
+                            .as_object_mut()
                             .map(|o| o.insert("context".into(), json!(ctx)));
                     }
                     entry

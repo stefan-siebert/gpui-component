@@ -138,10 +138,7 @@ impl InputState {
 
     pub(super) fn left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
         // In single-line mode, propagate when cursor is already at the start
-        if self.mode.is_single_line()
-            && self.selected_range.is_empty()
-            && self.cursor() == 0
-        {
+        if self.mode.is_single_line() && self.selected_range.is_empty() && self.cursor() == 0 {
             cx.propagate();
             return;
         }

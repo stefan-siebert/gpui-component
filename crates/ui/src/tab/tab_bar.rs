@@ -1,10 +1,10 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use gpui::{
-    Anchor, Animation, AnimationExt as _, AnyElement, App, Bounds, Div, Edges, ElementId,
-    InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, ScrollHandle, SharedString,
-    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _, px,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, Background, Bounds, Div, Edges,
+    ElementId, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, Role,
+    ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use rust_i18n::t;
 use smallvec::SmallVec;
@@ -13,9 +13,7 @@ use super::{Tab, TabVariant};
 use crate::animation::{Lerp, ease_in_out_cubic};
 use crate::button::{Button, ButtonVariants as _};
 use crate::menu::{DropdownMenu as _, PopupMenuItem};
-use crate::{
-    ActiveTheme, ElementExt, Icon, IconName, Selectable, Sizable, Size, StyledExt, h_flex,
-};
+use crate::{ActiveTheme, ElementExt, Icon, Selectable, Sizable, Size, StyledExt, h_flex};
 
 struct TabIndicatorBounds {
     container: Bounds<Pixels>,
@@ -164,12 +162,17 @@ impl TabBar {
     }
 
     /// Render the sliding indicator element for animated tab switching.
+    ///
+    /// Returns the indicator element together with the current animation
+    /// `epoch`, which increments on every tab switch. Tabs key their own
+    /// transitions (e.g. text color fade) on this epoch so they restart in sync
+    /// with the indicator slide.
     fn render_indicator(
         &self,
         bounds_rc: &Option<Rc<RefCell<TabIndicatorBounds>>>,
         window: &mut Window,
         cx: &mut App,
-    ) -> Option<AnyElement> {
+    ) -> Option<(AnyElement, u64)> {
         let has_indicator = matches!(
             self.variant,
             TabVariant::Segmented | TabVariant::Pill | TabVariant::Underline
@@ -217,14 +220,16 @@ impl TabBar {
                     div()
                         .w_full()
                         .h(inner_height)
-                        .bg(cx.theme().background)
+                        .bg(cx.theme().tokens.background)
                         .rounded(inner_radius)
-                        .shadow_xs(),
+                        .shadow_sm(),
                 ),
-                TabVariant::Pill => el
-                    .flex()
-                    .items_center()
-                    .child(div().size_full().bg(cx.theme().primary).rounded(px(99.))),
+                TabVariant::Pill => el.flex().items_center().child(
+                    div()
+                        .size_full()
+                        .bg(cx.theme().tokens.primary)
+                        .rounded(px(99.)),
+                ),
                 TabVariant::Underline => el.child(
                     div()
                         .absolute()
@@ -232,7 +237,7 @@ impl TabBar {
                         .right_0()
                         .bottom_0()
                         .h(px(2.))
-                        .bg(cx.theme().primary),
+                        .bg(cx.theme().tokens.primary),
                 ),
                 _ => el,
             })
@@ -246,7 +251,7 @@ impl TabBar {
                 },
             );
 
-        Some(indicator.into_any_element())
+        Some((indicator.into_any_element(), epoch))
     }
 
     /// Update animation parameters based on current and previous selection.
@@ -337,18 +342,18 @@ impl RenderOnce for TabBar {
             Size::Large => px(16.),
             _ => px(12.),
         };
-        let (bg, paddings, gap) = match self.variant {
+        let (bg, paddings, gap): (Background, _, _) = match self.variant {
             TabVariant::Tab => {
                 let padding = Edges::all(px(0.));
-                (cx.theme().tab_bar, padding, px(0.))
+                (cx.theme().tokens.tab_bar.into(), padding, px(0.))
             }
             TabVariant::Outline => {
                 let padding = Edges::all(px(0.));
-                (cx.theme().transparent, padding, default_gap)
+                (cx.theme().transparent.into(), padding, default_gap)
             }
             TabVariant::Pill => {
                 let padding = Edges::all(px(0.));
-                (cx.theme().transparent, padding, px(4.))
+                (cx.theme().transparent.into(), padding, px(4.))
             }
             TabVariant::Segmented => {
                 let padding_x = match self.size {
@@ -362,7 +367,7 @@ impl RenderOnce for TabBar {
                     ..Default::default()
                 };
 
-                (cx.theme().tab_bar_segmented, padding, px(2.))
+                (cx.theme().tokens.tab_bar_segmented.into(), padding, px(2.))
             }
             TabVariant::Underline => {
                 // This gap is same as the tab inner_paddings
@@ -373,7 +378,7 @@ impl RenderOnce for TabBar {
                     _ => px(16.),
                 };
 
-                (cx.theme().transparent, Edges::all(px(0.)), gap)
+                (cx.theme().transparent.into(), Edges::all(px(0.)), gap)
             }
         };
 
@@ -398,7 +403,9 @@ impl RenderOnce for TabBar {
             None
         };
 
-        let indicator_element = self.render_indicator(&bounds_rc, window, cx);
+        let indicator = self.render_indicator(&bounds_rc, window, cx);
+        let indicator_epoch = indicator.as_ref().map(|(_, epoch)| *epoch).unwrap_or(0);
+        let indicator_element = indicator.map(|(el, _)| el);
         let indicator_ready = indicator_element.is_some();
 
         let has_suffix_or_menu = self.suffix.is_some() || self.menu;
@@ -407,6 +414,7 @@ impl RenderOnce for TabBar {
         let on_click = self.on_click.clone();
 
         self.base
+            .role(Role::TabList)
             .group("tab-bar")
             .relative()
             .flex()
@@ -439,6 +447,7 @@ impl RenderOnce for TabBar {
                         .relative()
                         .gap(gap)
                         .overflow_x_scroll()
+                        .restrict_scroll_to_axis()
                         .when_some(self.scroll_handle, |this, scroll_handle| {
                             this.track_scroll(&scroll_handle)
                         })
@@ -462,6 +471,7 @@ impl RenderOnce for TabBar {
                                 .with_size(self.size);
                             tab.indicator_active = has_indicator;
                             tab.indicator_ready = indicator_ready;
+                            tab.indicator_epoch = indicator_epoch;
                             let tab = tab
                                 .when_some(self.selected_index, |this, selected_ix| {
                                     this.selected(selected_ix == ix)
@@ -473,6 +483,7 @@ impl RenderOnce for TabBar {
                             if let Some(ref rc) = bounds_rc {
                                 let rc = rc.clone();
                                 div()
+                                    .flex_shrink_0()
                                     .on_prepaint(move |bounds, _, _| {
                                         if let Some(slot) = rc.borrow_mut().tabs.get_mut(ix) {
                                             *slot = bounds;
@@ -492,7 +503,7 @@ impl RenderOnce for TabBar {
                     Button::new("more")
                         .xsmall()
                         .ghost()
-                        .icon(IconName::ChevronDown)
+                        .dropdown_caret(true)
                         .dropdown_menu(move |mut this, _, _| {
                             this = this.scrollable(true);
                             for (ix, (label, icon, disabled)) in item_metas.iter().enumerate() {

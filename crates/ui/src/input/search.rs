@@ -4,8 +4,8 @@ use std::{ops::Range, rc::Rc};
 
 use gpui::{
     App, AppContext as _, Context, Empty, Entity, FocusHandle, Focusable, Half,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, Styled,
-    Subscription, Window, actions, div, prelude::FluentBuilder as _,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, Styled, Subscription,
+    Window, actions, div, prelude::FluentBuilder as _,
 };
 use ropey::Rope;
 
@@ -481,7 +481,7 @@ impl Render for SearchPanel {
             .px_3()
             .w_full()
             .gap_1()
-            .bg(cx.theme().popover)
+            .bg(cx.theme().tokens.popover)
             .border_b_1()
             .rounded(cx.theme().radius.half())
             .border_color(cx.theme().border)
@@ -500,9 +500,10 @@ impl Render for SearchPanel {
                                     .suffix(
                                         Button::new("case-insensitive")
                                             .selected(!self.case_insensitive)
+                                            .toggled(!self.case_insensitive)
                                             .xsmall()
                                             .compact()
-                                            .ghost()
+                                            .text()
                                             .icon(IconName::CaseSensitive)
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.case_insensitive = !this.case_insensitive;
@@ -528,6 +529,7 @@ impl Render for SearchPanel {
                                 .ghost()
                                 .icon(IconName::Replace)
                                 .selected(self.replace_mode)
+                                .toggled(self.replace_mode)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.replace_mode = !this.replace_mode;
                                     if this.replace_mode {
