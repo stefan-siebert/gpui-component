@@ -14,19 +14,35 @@ const MASKED: &'static str = "•";
 pub enum HighlightsMatch {
     Prefix(SharedString),
     Full(SharedString),
+    /// Byte ranges into the label text, computed by the caller.
+    ///
+    /// Use this when the match cannot be expressed as "find this substring":
+    /// a glob or fuzzy match that lands on several disjoint runs, or a
+    /// matcher that has already produced offsets. Ranges that are empty, out
+    /// of bounds, or not on char boundaries are dropped rather than slicing
+    /// the text mid-code-point.
+    Ranges(Vec<Range<usize>>),
 }
 
 impl HighlightsMatch {
+    /// The search text, or `""` for [`Self::Ranges`], which has none.
     pub fn as_str(&self) -> &str {
         match self {
             Self::Prefix(s) => s.as_str(),
             Self::Full(s) => s.as_str(),
+            Self::Ranges(_) => "",
         }
     }
 
     #[inline]
     pub fn is_prefix(&self) -> bool {
         matches!(self, Self::Prefix(_))
+    }
+}
+
+impl From<Vec<Range<usize>>> for HighlightsMatch {
+    fn from(value: Vec<Range<usize>>) -> Self {
+        Self::Ranges(value)
     }
 }
 
@@ -104,6 +120,24 @@ impl Label {
         if self.secondary.is_some() {
             ranges.push(0..self.label.len());
             ranges.push(self.label.len()..total_length);
+        }
+
+        if let Some(HighlightsMatch::Ranges(supplied)) = &self.highlights_text {
+            // Caller-supplied offsets: trust the positions, verify they are
+            // safe to slice. An out-of-range or mid-code-point range would
+            // panic the render pass.
+            ranges.extend(
+                supplied
+                    .iter()
+                    .filter(|range| {
+                        range.start < range.end
+                            && range.end <= full_text.len()
+                            && full_text.is_char_boundary(range.start)
+                            && full_text.is_char_boundary(range.end)
+                    })
+                    .cloned(),
+            );
+            return ranges;
         }
 
         if let Some(matched) = &self.highlights_text {
@@ -392,5 +426,40 @@ mod tests {
         // Test as_str method for prefix
         let prefix_match = HighlightsMatch::Prefix("test".into());
         assert_eq!(prefix_match.as_str(), "test");
+    }
+
+    #[test]
+    fn test_highlight_ranges_supplied() {
+        // Several disjoint runs, as a glob or fuzzy matcher produces.
+        let label = Label::new("window_test.rs").highlights(vec![0..6, 11..14]);
+        let result = label.highlight_ranges("window_test.rs".len());
+        assert_eq!(result, vec![0..6, 11..14]);
+
+        // Supplied ranges win over the substring search entirely — there is no
+        // search text to fall back to.
+        assert_eq!(HighlightsMatch::Ranges(vec![0..1]).as_str(), "");
+        assert!(!HighlightsMatch::Ranges(vec![0..1]).is_prefix());
+
+        // Ranges still compose with secondary text.
+        let label = Label::new("Hello").secondary("World").highlights(vec![6..11]);
+        let result = label.highlight_ranges("Hello World".len());
+        assert_eq!(result, vec![0..5, 5..11, 6..11]);
+    }
+
+    #[test]
+    fn test_highlight_ranges_supplied_rejects_unsliceable() {
+        // Past the end.
+        let label = Label::new("abc").highlights(vec![0..1, 2..99]);
+        assert_eq!(label.highlight_ranges("abc".len()), vec![0..1]);
+
+        // Empty and inverted ranges contribute nothing.
+        let label = Label::new("abc").highlights(vec![1..1, 2..1]);
+        assert_eq!(label.highlight_ranges("abc".len()), Vec::<Range<usize>>::new());
+
+        // Mid-code-point offsets are dropped, not sliced. `世` is 3 bytes, so
+        // 1 and 2 are inside it — the exact shape a lowercased-copy offset
+        // takes when a char's lowercase has a different byte length.
+        let label = Label::new("世界").highlights(vec![1..4, 0..3]);
+        assert_eq!(label.highlight_ranges("世界".len()), vec![0..3]);
     }
 }
