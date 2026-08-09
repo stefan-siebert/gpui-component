@@ -7,14 +7,48 @@ use crate::{Side, Size, StyledExt, kbd::Kbd};
 use gpui::{
     Action, Anchor, AnyElement, App, AppContext, Bounds, Context, DismissEvent, Edges, Entity,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
-    ParentElement, Pixels, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement,
-    Styled, WeakEntity, Window, anchored, deferred, div, prelude::FluentBuilder, px, rems,
+    ParentElement, Pixels, Render, RenderImage, Role, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, WeakEntity, Window, anchored, deferred, div, img,
+    prelude::FluentBuilder, px, rems,
 };
 use gpui::{ClickEvent, Half, MouseDownEvent, OwnedMenuItem, Point, Subscription};
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 const CONTEXT: &str = "PopupMenu";
+
+/// What goes in a menu row's leading icon slot.
+///
+/// [`Icon`] covers the bundled vector assets, which is what application menus
+/// use. `Raster` exists for icons that have no SVG form and are only ever
+/// handed over as pixels — a platform shell's menu bitmaps, for instance, which
+/// arrive as small pre-decoded images from whichever extension produced the
+/// row. Both render at the same size, so a menu mixing them keeps one icon
+/// column and one label column.
+#[derive(Clone)]
+pub enum MenuIcon {
+    Vector(Icon),
+    Raster(Arc<RenderImage>),
+}
+
+impl From<Icon> for MenuIcon {
+    fn from(icon: Icon) -> Self {
+        MenuIcon::Vector(icon)
+    }
+}
+
+impl From<IconName> for MenuIcon {
+    fn from(name: IconName) -> Self {
+        MenuIcon::Vector(Icon::new(name))
+    }
+}
+
+impl From<Arc<RenderImage>> for MenuIcon {
+    fn from(image: Arc<RenderImage>) -> Self {
+        MenuIcon::Raster(image)
+    }
+}
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -38,7 +72,7 @@ pub enum PopupMenuItem {
     Label(SharedString),
     /// A standard menu item.
     Item {
-        icon: Option<Icon>,
+        icon: Option<MenuIcon>,
         label: SharedString,
         disabled: bool,
         checked: bool,
@@ -49,7 +83,7 @@ pub enum PopupMenuItem {
     },
     /// A menu item with custom element render.
     ElementItem {
-        icon: Option<Icon>,
+        icon: Option<MenuIcon>,
         disabled: bool,
         checked: bool,
         action: Option<Box<dyn Action>>,
@@ -60,7 +94,7 @@ pub enum PopupMenuItem {
     ///
     /// NOTE: This is only supported when the parent menu is not `scrollable`.
     Submenu {
-        icon: Option<Icon>,
+        icon: Option<MenuIcon>,
         label: SharedString,
         disabled: bool,
         menu: Entity<PopupMenu>,
@@ -126,7 +160,7 @@ impl PopupMenuItem {
     /// Set the icon for the menu item.
     ///
     /// Only works for [`PopupMenuItem::Item`], [`PopupMenuItem::ElementItem`] and [`PopupMenuItem::Submenu`].
-    pub fn icon(mut self, icon: impl Into<Icon>) -> Self {
+    pub fn icon(mut self, icon: impl Into<MenuIcon>) -> Self {
         match &mut self {
             PopupMenuItem::Item { icon: i, .. } => {
                 *i = Some(icon.into());
@@ -492,7 +526,7 @@ impl PopupMenu {
     pub fn link_with_icon(
         self,
         label: impl Into<SharedString>,
-        icon: impl Into<Icon>,
+        icon: impl Into<MenuIcon>,
         href: impl Into<String>,
     ) -> Self {
         self.link_with_icon_and_disabled(label, icon, href, false)
@@ -502,7 +536,7 @@ impl PopupMenu {
     fn link_with_icon_and_disabled(
         mut self,
         label: impl Into<SharedString>,
-        icon: impl Into<Icon>,
+        icon: impl Into<MenuIcon>,
         href: impl Into<String>,
         disabled: bool,
     ) -> Self {
@@ -519,7 +553,7 @@ impl PopupMenu {
     pub fn menu_with_icon(
         self,
         label: impl Into<SharedString>,
-        icon: impl Into<Icon>,
+        icon: impl Into<MenuIcon>,
         action: Box<dyn Action>,
     ) -> Self {
         self.menu_with_icon_and_disabled(label, icon, action, false)
@@ -529,7 +563,7 @@ impl PopupMenu {
     pub fn menu_with_icon_and_disabled(
         mut self,
         label: impl Into<SharedString>,
-        icon: impl Into<Icon>,
+        icon: impl Into<MenuIcon>,
         action: Box<dyn Action>,
         disabled: bool,
     ) -> Self {
@@ -585,7 +619,7 @@ impl PopupMenu {
     /// Add Menu Item with custom element render with icon.
     pub fn menu_element_with_icon<F, E>(
         self,
-        icon: impl Into<Icon>,
+        icon: impl Into<MenuIcon>,
         action: Box<dyn Action>,
         builder: F,
     ) -> Self
@@ -613,7 +647,7 @@ impl PopupMenu {
     /// Add Menu Item with custom element render with icon and disabled state
     fn menu_element_with_icon_and_disabled<F, E>(
         mut self,
-        icon: impl Into<Icon>,
+        icon: impl Into<MenuIcon>,
         action: Box<dyn Action>,
         disabled: bool,
         builder: F,
@@ -680,7 +714,7 @@ impl PopupMenu {
     /// Add a Submenu item with icon
     pub fn submenu_with_icon(
         mut self,
-        icon: Option<Icon>,
+        icon: Option<MenuIcon>,
         label: impl Into<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -742,7 +776,7 @@ impl PopupMenu {
     fn add_menu_item(
         &mut self,
         label: impl Into<SharedString>,
-        icon: Option<Icon>,
+        icon: Option<MenuIcon>,
         action: Box<dyn Action>,
         disabled: bool,
         checked: bool,
@@ -1108,23 +1142,27 @@ impl PopupMenu {
     fn render_icon(
         has_icon: bool,
         checked: bool,
-        icon: Option<Icon>,
+        icon: Option<MenuIcon>,
         _: &mut Window,
         _: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
+    ) -> Option<AnyElement> {
         if !has_icon {
             return None;
         }
 
-        let icon = if let Some(icon) = icon {
-            icon.clone()
-        } else if checked {
-            Icon::new(IconName::Check)
-        } else {
-            Icon::empty()
+        // A raster is sized explicitly to the same box a vector icon occupies
+        // at `xsmall`, so the label column lines up whichever kind a row has.
+        if let Some(MenuIcon::Raster(image)) = icon {
+            return Some(img(image).flex_none().size_3().into_any_element());
+        }
+
+        let icon = match icon {
+            Some(MenuIcon::Vector(icon)) => icon,
+            _ if checked => Icon::new(IconName::Check),
+            _ => Icon::empty(),
         };
 
-        Some(icon.xsmall())
+        Some(icon.xsmall().into_any_element())
     }
 
     #[inline]
