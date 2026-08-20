@@ -330,6 +330,18 @@ struct TitleBarState {
     last_mousedown_time: Option<std::time::Instant>,
     #[cfg(target_os = "windows")]
     last_mousedown_pos: Option<Point<Pixels>>,
+    /// Set right before this titlebar posts a `WM_NCLBUTTONDOWN` to its own
+    /// window (drag / top-resize initiation). GPUI dispatches that posted
+    /// message through the element tree as one more `MouseDown`, which lands
+    /// back in this titlebar's handler. That re-entry must fall through to
+    /// `DefWindowProc` untouched: handling it re-arms the drag state and, on
+    /// a maximized window — whose client (0,0) *is* screen (0,0), inside the
+    /// titlebar — re-posts the same message. The result is an infinite
+    /// posted-message ping-pong that starves input and paint while the
+    /// message loop stays "responsive" (measured 2026-08-20: 100% of one
+    /// core in `dispatch_event`, WM_NULL still answered, screen frozen).
+    #[cfg(target_os = "windows")]
+    synthetic_nc_down_posted: bool,
 }
 
 // TODO: Remove this when GPUI has released v0.2.3
@@ -396,6 +408,8 @@ impl RenderOnce for TitleBar {
             last_mousedown_time: None,
             #[cfg(target_os = "windows")]
             last_mousedown_pos: None,
+            #[cfg(target_os = "windows")]
+            synthetic_nc_down_posted: false,
         });
 
         // Main title bar container - all event handlers go here (like Zed's approach)
@@ -420,6 +434,19 @@ impl RenderOnce for TitleBar {
             .on_mouse_down(
                 MouseButton::Left,
                 window.listener_for(&state, |state, event: &gpui::MouseDownEvent, window, cx| {
+                    // A WM_NCLBUTTONDOWN this titlebar posted itself comes back
+                    // through GPUI as one more MouseDown. Let it fall through to
+                    // DefWindowProc untouched (no prevent_default, no
+                    // stop_propagation, no state changes) — that is what starts
+                    // the native drag/resize loop. Handling it instead re-arms
+                    // the drag state and, on a maximized window, re-posts the
+                    // message forever (see `synthetic_nc_down_posted`).
+                    #[cfg(target_os = "windows")]
+                    if state.synthetic_nc_down_posted {
+                        state.synthetic_nc_down_posted = false;
+                        return;
+                    }
+
                     // On Windows, a focusable parent element's auto-focus handler
                     // calls prevent_default() on every mouse-down, which blocks
                     // DefWindowProc from handling NC events (drag, resize, etc.).
@@ -433,8 +460,12 @@ impl RenderOnce for TitleBar {
 
                     // On Windows, handle the top resize zone (~8px) by posting
                     // WM_NCLBUTTONDOWN + HTTOP directly, since DefWindowProc can't.
+                    // Not on a maximized window: it has no top edge to resize, and
+                    // its client (0,0) is inside the titlebar, so the posted
+                    // message would loop right back here.
                     #[cfg(target_os = "windows")]
-                    if event.position.y < px(8.0) {
+                    if event.position.y < px(8.0) && !window.is_maximized() {
+                        state.synthetic_nc_down_posted = true;
                         start_top_resize_win32(window);
                         return;
                     }
@@ -512,6 +543,7 @@ impl RenderOnce for TitleBar {
                                 {
                                     state.should_move = false;
                                     state.drag_start_pos = None;
+                                    state.synthetic_nc_down_posted = true;
                                     start_window_move_win32(window);
                                 }
                             }
@@ -622,12 +654,33 @@ fn toggle_maximize_win32(window: &mut gpui::Window) {
     }
 }
 
+/// The LPARAM of a `WM_NCLBUTTONDOWN` carries the cursor position in screen
+/// coordinates. Posting `LPARAM(0)` — i.e. claiming the click happened at
+/// screen (0,0) — makes GPUI's re-dispatch of the message land on whatever
+/// element covers that point; on a maximized window that is this very
+/// titlebar, which is how the self-posting livelock started. Always post the
+/// true cursor position.
+#[cfg(target_os = "windows")]
+fn cursor_screen_lparam() -> windows::Win32::Foundation::LPARAM {
+    use windows::Win32::Foundation::*;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut point = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut point);
+    }
+    LPARAM((((point.y as isize) & 0xFFFF) << 16) | ((point.x as isize) & 0xFFFF))
+}
+
 /// Send WM_NCLBUTTONDOWN + HTTOP to initiate a top-edge resize on Windows.
 ///
 /// When GPUI dispatches NC mouse events through the element tree, a focusable
 /// parent element's auto-focus handler calls `prevent_default()`, which prevents
 /// `DefWindowProc` from being called. Since `DefWindowProc` is what initiates
 /// the native resize, we must post the message ourselves.
+///
+/// Callers must set `TitleBarState::synthetic_nc_down_posted` first so the
+/// titlebar's own mouse-down handler lets the posted message fall through to
+/// `DefWindowProc` instead of re-handling it.
 #[cfg(target_os = "windows")]
 fn start_top_resize_win32(window: &mut gpui::Window) {
     use raw_window_handle::HasWindowHandle;
@@ -643,7 +696,7 @@ fn start_top_resize_win32(window: &mut gpui::Window) {
                     Some(hwnd),
                     WM_NCLBUTTONDOWN,
                     WPARAM(HTTOP as usize),
-                    LPARAM(0),
+                    cursor_screen_lparam(),
                 );
             }
         }
@@ -654,6 +707,10 @@ fn start_top_resize_win32(window: &mut gpui::Window) {
 ///
 /// GPUI's `start_window_move()` is a no-op on Windows, so we post the
 /// message directly to the HWND via the Win32 API.
+///
+/// Callers must set `TitleBarState::synthetic_nc_down_posted` first so the
+/// titlebar's own mouse-down handler lets the posted message fall through to
+/// `DefWindowProc` instead of re-handling it.
 #[cfg(target_os = "windows")]
 fn start_window_move_win32(window: &mut gpui::Window) {
     use raw_window_handle::HasWindowHandle;
@@ -669,7 +726,7 @@ fn start_window_move_win32(window: &mut gpui::Window) {
                     Some(hwnd),
                     WM_NCLBUTTONDOWN,
                     WPARAM(HTCAPTION as usize),
-                    LPARAM(0),
+                    cursor_screen_lparam(),
                 );
             }
         }
