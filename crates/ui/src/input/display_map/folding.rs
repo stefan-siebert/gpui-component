@@ -5,6 +5,7 @@ pub use tree_sitter::Tree;
 
 #[cfg(not(feature = "tree-sitter"))]
 /// Stub type for tree-sitter Tree on WASM (tree-sitter not available).
+#[derive(Clone)]
 pub struct Tree;
 
 #[cfg(feature = "tree-sitter")]
