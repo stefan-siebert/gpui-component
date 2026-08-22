@@ -31,7 +31,10 @@ edition = "2024"
 gpui-component = { path = "crates/ui", version = "0.5.2" }
 gpui-component-macros = { path = "crates/macros", version = "0.5.1" }
 gpui-component-assets = { path = "crates/assets", version = "0.5.1" }
-gpui-mcp-protocol = { package = "gpui-mcp-inspector", path = "../gpui-mcp" }
+# Git, not a sibling path: a consumer that pulls this crate by git (speedy)
+# must be able to resolve the `mcp` feature without a ../gpui-mcp checkout.
+# The [patch] below keeps local work on the sibling checkout.
+gpui-mcp-protocol = { package = "gpui-mcp-inspector", git = "https://github.com/stefan-siebert/gpui-mcp", branch = "main" }
 story = { path = "crates/story" }
 
 gpui = { git = "https://github.com/stefan-siebert/zed", branch = "gpui-mcp-patches-v2" }
@@ -140,3 +143,6 @@ gpui_platform = { path = "../gpui-fork/crates/gpui_platform" }
 gpui_macros = { path = "../gpui-fork/crates/gpui_macros" }
 http_client = { path = "../gpui-fork/crates/http_client" }
 reqwest_client = { path = "../gpui-fork/crates/reqwest_client" }
+
+[patch."https://github.com/stefan-siebert/gpui-mcp"]
+gpui-mcp-inspector = { path = "../gpui-mcp" }
