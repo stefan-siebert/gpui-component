@@ -311,6 +311,40 @@ impl ResizableState {
         cx.notify();
     }
 
+    /// Record the group's container bounds, re-deriving the panel sizes when
+    /// the container itself changed size.
+    ///
+    /// The stored sizes are absolute pixels, so without this a panel keeps the
+    /// size it was dragged to while the window grows around it: the flex pass
+    /// hands the extra space to every `flex_grow` panel in equal parts, and a
+    /// 70/30 split walks towards 50/50 (a small panel in a large window ends up
+    /// a sliver of what its fraction says). Nothing else re-derives the
+    /// fractions, because from the group's point of view nothing was dragged.
+    ///
+    /// It is deliberately *only* a real size change. Proportional rescaling and
+    /// Taffy's flex pass are two different algorithms; feeding one back into the
+    /// other on every steady-state prepaint drifts by Taffy's rounding and
+    /// flickers at flex boundaries (a panel's `min_size` threshold). A frame
+    /// where the container did not move must not touch the sizes at all.
+    pub(crate) fn set_container_bounds(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
+        let previous = self.container_size();
+        self.bounds = bounds;
+        let current = self.container_size();
+
+        // No previous layout to keep a proportion of, and sub-pixel jitter is
+        // not a resize.
+        if previous.is_zero() || (current - previous).abs() < px(1.) {
+            return;
+        }
+        // A drag in flight computes the sizes itself, from the bounds Taffy
+        // just produced — leave them alone.
+        if self.resizing_panel_ix.is_some() {
+            return;
+        }
+
+        self.adjust_to_container_size(cx);
+    }
+
     /// Adjust panel sizes according to the container size.
     ///
     /// When the container size changes, the panels should take up the same percentage as they did before.
@@ -330,6 +364,18 @@ impl ResizableState {
             let size = self.sizes[i];
             let ratio = size / total_size;
             let new_size = container_size * ratio;
+            // Keep the stored size inside the panel's own range. Rendering
+            // clamps anyway (`min_h`/`max_h` plus a clamped `flex_basis`), so
+            // an out-of-range value would not show up now — it would show up
+            // one resize later, as a ratio taken from a size the panel never
+            // had. A range is only meaningful once the panel has laid out
+            // once; before that it is `0..0`.
+            let range = &self.panels[i].size_range;
+            let new_size = if range.end > range.start {
+                new_size.clamp(range.start, range.end)
+            } else {
+                new_size
+            };
 
             self.sizes[i] = new_size;
             self.panels[i].size = Some(new_size);
@@ -345,4 +391,87 @@ pub(crate) struct ResizablePanelState {
     pub size: Option<Pixels>,
     pub size_range: Range<Pixels>,
     bounds: Bounds<Pixels>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AppContext as _, Entity, TestAppContext, point, size};
+
+    fn container(height: f32) -> Bounds<Pixels> {
+        Bounds {
+            origin: point(px(0.), px(0.)),
+            size: size(px(400.), px(height)),
+        }
+    }
+
+    /// A two-panel vertical group that has laid out once: `first` and `second`
+    /// are the heights Taffy reported for the panels.
+    fn laid_out(
+        cx: &mut TestAppContext,
+        height: f32,
+        first: f32,
+        second: f32,
+    ) -> Entity<ResizableState> {
+        let state = cx.new(|_| ResizableState::default());
+        state.update(cx, |state, cx| {
+            state.sync_panels_count(Axis::Vertical, 2, cx);
+            state.set_container_bounds(container(height), cx);
+            state.update_panel_size(0, container(first), px(50.)..px(10000.), cx);
+            state.update_panel_size(1, container(second), px(50.)..px(10000.), cx);
+        });
+        state
+    }
+
+    #[gpui::test]
+    fn container_growth_keeps_the_panel_proportions(cx: &mut TestAppContext) {
+        // 25 % of a 600 px column.
+        let state = laid_out(cx, 600., 450., 150.);
+
+        state.update(cx, |state, cx| {
+            state.set_container_bounds(container(1200.), cx);
+            assert_eq!(state.sizes(), &vec![px(900.), px(300.)]);
+        });
+    }
+
+    #[gpui::test]
+    fn container_shrink_keeps_the_panel_proportions(cx: &mut TestAppContext) {
+        let state = laid_out(cx, 600., 450., 150.);
+
+        state.update(cx, |state, cx| {
+            state.set_container_bounds(container(300.), cx);
+            assert_eq!(state.sizes(), &vec![px(225.), px(75.)]);
+        });
+    }
+
+    #[gpui::test]
+    fn a_frame_without_a_size_change_leaves_the_sizes_alone(cx: &mut TestAppContext) {
+        let state = laid_out(cx, 600., 450., 150.);
+
+        state.update(cx, |state, cx| {
+            // Same height, and sub-pixel jitter: neither is a resize. Rescaling
+            // here would fight Taffy's own rounding, one prepaint at a time.
+            state.set_container_bounds(container(600.), cx);
+            state.set_container_bounds(container(600.4), cx);
+            assert_eq!(state.sizes(), &vec![px(450.), px(150.)]);
+        });
+    }
+
+    #[gpui::test]
+    fn a_panel_never_shrinks_below_its_range(cx: &mut TestAppContext) {
+        let state = cx.new(|_| ResizableState::default());
+        state.update(cx, |state, cx| {
+            state.sync_panels_count(Axis::Vertical, 2, cx);
+            state.set_container_bounds(container(600.), cx);
+            state.update_panel_size(0, container(450.), px(50.)..px(10000.), cx);
+            state.update_panel_size(1, container(150.), px(120.)..px(10000.), cx);
+
+            // A quarter of 200 px is below the pane's 120 px minimum. The
+            // stored size must not go there: rendering would clamp it anyway,
+            // and the next resize would take its ratio from a height the panel
+            // never had.
+            state.set_container_bounds(container(200.), cx);
+            assert_eq!(state.sizes(), &vec![px(150.), px(120.)]);
+        });
+    }
 }
