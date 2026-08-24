@@ -7,7 +7,7 @@ use gpui::{
     AnyElement, App, AppContext, Axis, Bounds, Context, Element, ElementId, Empty, Entity,
     EventEmitter, InteractiveElement as _, IntoElement, IsZero as _, MouseMoveEvent, MouseUpEvent,
     ParentElement, Pixels, Render, RenderOnce, Style, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder,
+    prelude::FluentBuilder, px,
 };
 
 use crate::{
@@ -28,6 +28,36 @@ impl Render for DragPanel {
     }
 }
 
+/// Positions a dragged handle sticks to, and how close the boundary has to
+/// come before it does.
+#[derive(Clone, Debug, PartialEq)]
+struct SnapConfig {
+    /// Fractions of the container, `0.0..=1.0`, measured from its leading edge.
+    fractions: Vec<f32>,
+    /// How far from a fraction the boundary may be and still be pulled onto it.
+    threshold: Pixels,
+}
+
+impl SnapConfig {
+    /// `size` is the size the drag proposes for the panel before the handle,
+    /// `leading` that panel's own offset inside the container. Returns the size
+    /// to use — pulled onto the first fraction the resulting boundary lands
+    /// within `threshold` of, otherwise `size` unchanged.
+    fn apply(&self, size: Pixels, leading: Pixels, container: Pixels) -> Pixels {
+        if container <= px(0.) {
+            return size;
+        }
+
+        let boundary = leading + size;
+        self.fractions
+            .iter()
+            .map(|fraction| container * *fraction)
+            .find(|target| (boundary - *target).abs() <= self.threshold)
+            .map(|target| target - leading)
+            .unwrap_or(size)
+    }
+}
+
 /// A group of resizable panels.
 #[derive(IntoElement)]
 pub struct ResizablePanelGroup {
@@ -37,6 +67,7 @@ pub struct ResizablePanelGroup {
     size: Option<Pixels>,
     children: Vec<ResizablePanel>,
     on_resize: Rc<dyn Fn(&Entity<ResizableState>, &mut Window, &mut App)>,
+    snap: Option<SnapConfig>,
 }
 
 impl ResizablePanelGroup {
@@ -49,6 +80,7 @@ impl ResizablePanelGroup {
             state: None,
             size: None,
             on_resize: Rc::new(|_, _, _| {}),
+            snap: None,
         }
     }
 
@@ -104,6 +136,28 @@ impl ResizablePanelGroup {
         on_resize: impl Fn(&Entity<ResizableState>, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_resize = Rc::new(on_resize);
+        self
+    }
+
+    /// Make a dragged handle stick to these fractions of the container
+    /// (`0.0..=1.0`, from its leading edge) whenever the boundary comes within
+    /// `threshold` of one — a stopper, not a magnet: the boundary stays on the
+    /// fraction while the pointer is inside the window and picks the pointer
+    /// up again on the way out.
+    ///
+    /// Snapping the *drag* is what makes the position land where the readout
+    /// says it does. Correcting it on mouse-up instead lets the panels track
+    /// the pointer to the very end and then jump, which reads as the release
+    /// having moved them.
+    ///
+    /// Only drags snap; [`ResizableState::resize_panel`] gets the size it asks
+    /// for. An empty list or a non-positive threshold disables snapping.
+    pub fn snap_to(mut self, fractions: impl IntoIterator<Item = f32>, threshold: Pixels) -> Self {
+        let fractions: Vec<f32> = fractions.into_iter().collect();
+        self.snap = (!fractions.is_empty() && threshold > px(0.)).then_some(SnapConfig {
+            fractions,
+            threshold,
+        });
         self
     }
 }
@@ -172,6 +226,7 @@ impl RenderOnce for ResizablePanelGroup {
                 state: state.clone(),
                 axis: self.axis,
                 on_resize: self.on_resize.clone(),
+                snap: self.snap.clone(),
             })
     }
 }
@@ -348,6 +403,7 @@ struct ResizePanelGroupElement {
     state: Entity<ResizableState>,
     on_resize: Rc<dyn Fn(&Entity<ResizableState>, &mut Window, &mut App)>,
     axis: Axis,
+    snap: Option<SnapConfig>,
 }
 
 impl IntoElement for ResizePanelGroupElement {
@@ -405,6 +461,7 @@ impl Element for ResizePanelGroupElement {
         window.on_mouse_event({
             let state = self.state.clone();
             let axis = self.axis;
+            let snap = self.snap.clone();
             let current_ix = state.read(cx).resizing_panel_ix;
             move |e: &MouseMoveEvent, phase, window, cx| {
                 if !phase.bubble() {
@@ -413,22 +470,31 @@ impl Element for ResizePanelGroupElement {
                 let Some(ix) = current_ix else { return };
 
                 state.update(cx, |state, cx| {
-                    let panel = state.panels.get(ix).expect("BUG: invalid panel index");
+                    let bounds = state
+                        .panels
+                        .get(ix)
+                        .expect("BUG: invalid panel index")
+                        .bounds;
+                    let container = state.container_size();
+                    // The panel before the handle starts here; the handle's
+                    // own position inside the container is that plus the size
+                    // the drag is proposing for it.
+                    let (proposed, leading) = match axis {
+                        Axis::Horizontal => (
+                            e.position.x - bounds.left(),
+                            bounds.left() - state.bounds.left(),
+                        ),
+                        Axis::Vertical => (
+                            e.position.y - bounds.top(),
+                            bounds.top() - state.bounds.top(),
+                        ),
+                    };
+                    let size = match &snap {
+                        Some(snap) => snap.apply(proposed, leading, container),
+                        None => proposed,
+                    };
 
-                    match axis {
-                        Axis::Horizontal => state.resize_panel_at_handle(
-                            ix,
-                            e.position.x - panel.bounds.left(),
-                            window,
-                            cx,
-                        ),
-                        Axis::Vertical => state.resize_panel_at_handle(
-                            ix,
-                            e.position.y - panel.bounds.top(),
-                            window,
-                            cx,
-                        ),
-                    }
+                    state.resize_panel_at_handle(ix, size, window, cx);
                     cx.notify();
                 })
             }
@@ -449,5 +515,63 @@ impl Element for ResizePanelGroupElement {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn centre(threshold: f32) -> SnapConfig {
+        SnapConfig {
+            fractions: vec![0.5],
+            threshold: px(threshold),
+        }
+    }
+
+    #[test]
+    fn a_boundary_inside_the_window_lands_on_the_fraction() {
+        // 1000 px wide, centre at 500, window 16 px: 492 is inside it.
+        assert_eq!(centre(16.).apply(px(492.), px(0.), px(1000.)), px(500.));
+        assert_eq!(centre(16.).apply(px(516.), px(0.), px(1000.)), px(500.));
+    }
+
+    #[test]
+    fn a_boundary_outside_the_window_is_left_where_the_drag_put_it() {
+        assert_eq!(centre(16.).apply(px(483.), px(0.), px(1000.)), px(483.));
+        assert_eq!(centre(16.).apply(px(517.), px(0.), px(1000.)), px(517.));
+    }
+
+    #[test]
+    fn the_fraction_is_measured_from_the_container_not_the_panel() {
+        // Third handle of a wider group: the panel being sized starts 200 px
+        // in, so the centre of a 1000 px container is a size of 300, not 500.
+        assert_eq!(centre(16.).apply(px(295.), px(200.), px(1000.)), px(300.));
+    }
+
+    #[test]
+    fn several_fractions_pick_the_first_one_in_range() {
+        let thirds = SnapConfig {
+            fractions: vec![0.25, 0.5, 0.75],
+            threshold: px(10.),
+        };
+        assert_eq!(thirds.apply(px(252.), px(0.), px(1000.)), px(250.));
+        assert_eq!(thirds.apply(px(748.), px(0.), px(1000.)), px(750.));
+        assert_eq!(thirds.apply(px(600.), px(0.), px(1000.)), px(600.));
+    }
+
+    #[test]
+    fn a_container_that_has_not_laid_out_snaps_nothing() {
+        // Every fraction of a zero-width container is zero; snapping there
+        // would collapse the panel on the first drag event of a fresh group.
+        assert_eq!(centre(16.).apply(px(42.), px(0.), px(0.)), px(42.));
+    }
+
+    #[test]
+    fn an_empty_or_zero_threshold_snap_is_no_snap() {
+        let group = ResizablePanelGroup::new("g").snap_to([], px(16.));
+        assert_eq!(group.snap, None);
+        let group = ResizablePanelGroup::new("g").snap_to([0.5], px(0.));
+        assert_eq!(group.snap, None);
     }
 }

@@ -55,6 +55,15 @@ impl ResizableState {
         &self.sizes
     }
 
+    /// Whether one of the group's handles is being dragged right now.
+    ///
+    /// A host that draws something for the duration of a drag — a size
+    /// readout, a highlighted bar — should ask this instead of inferring a
+    /// drag from the sizes changing: they change on a window resize too.
+    pub fn is_resizing(&self) -> bool {
+        self.resizing_panel_ix.is_some()
+    }
+
     /// Programmatically resize the panel at `ix` to `size`, redistributing
     /// space among siblings using the same logic as a drag.
     ///
@@ -209,8 +218,10 @@ impl ResizableState {
         self.sizes.clear();
     }
 
+    /// The container's extent along the group's axis. Zero until the group has
+    /// laid out once.
     #[inline]
-    pub(crate) fn container_size(&self) -> Pixels {
+    pub fn container_size(&self) -> Pixels {
         self.bounds.size.along(self.axis)
     }
 
