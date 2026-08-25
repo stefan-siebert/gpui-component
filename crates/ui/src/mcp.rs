@@ -29,22 +29,43 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(windows)]
 use uds_windows::{UnixListener, UnixStream};
 
-use gpui::{App, Keystroke, MouseButton as GpuiMouseButton, Pixels, point, px};
+use futures::channel::oneshot;
+use gpui::{App, AsyncApp, Keystroke, MouseButton as GpuiMouseButton, Pixels, point, px};
 use gpui_mcp_protocol::protocol::*;
 use serde_json::json;
 
 /// Maximum number of stored log entries
 const MAX_LOG_ENTRIES: usize = 500;
 
-/// Type for request messages from IPC thread to main thread
+/// Distinguishes the temp files screenshots are handed over in, so two taken
+/// in one batch cannot overwrite each other.
+static SCREENSHOT_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A request on its way to the main thread, with the channel its answer goes
+/// back on. The reply channel stays a blocking `std` one: it is received on
+/// the connection thread, which has nothing else to do.
 type RequestMsg = (IpcRequest, mpsc::Sender<IpcResponse>);
+
+/// How long the connection thread waits for the main thread before giving up.
+///
+/// Generous on purpose: `wait_for` may legitimately hold a request open for
+/// [`MAX_WAIT_MS`] and a batch for [`MAX_BATCH_MS`]. This is the backstop for
+/// a wedged main thread, not a policy on how long work may take.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long to wait for one frame callback before deciding none is coming.
+///
+/// A window that is occluded, minimised or otherwise not being drawn will
+/// never call back. Reporting that as `settled: false` is honest and costs a
+/// fifth of a second; hanging until the request times out is neither.
+const FRAME_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// Global log buffer, thread-safe
 static LOG_BUFFER: std::sync::LazyLock<Arc<Mutex<VecDeque<String>>>> =
@@ -132,12 +153,17 @@ fn socket_path_for(app_name: &str) -> String {
 /// the `gpui-mcp-server` can discover and filter by app when multiple GPUI
 /// apps are running at the same time.
 ///
-/// Starts a Unix Domain Socket listener on a background thread and
-/// polls incoming requests on the GPUI main thread.
+/// Starts a Unix Domain Socket listener on a background thread. Requests are
+/// answered on the GPUI main thread, which the listener wakes; an idle app
+/// does no work for the MCP server at all.
 pub fn init_mcp(cx: &mut App, app_name: &str) {
     let socket_path = socket_path_for(app_name);
 
-    let (req_tx, req_rx) = mpsc::channel::<RequestMsg>();
+    // Async and unbounded: the listener thread hands a request over and the
+    // main thread's task is woken by it. The old arrangement polled a
+    // `try_recv` every 10 ms, which cost an idle app a hundred main-loop
+    // wakeups a second and still added up to 10 ms to every call.
+    let (req_tx, req_rx) = async_channel::unbounded::<RequestMsg>();
 
     // Start IPC server on background thread
     let path = socket_path.clone();
@@ -150,25 +176,24 @@ pub fn init_mcp(cx: &mut App, app_name: &str) {
     mcp_log(format!("MCP IPC Server started on {}", socket_path));
     eprintln!("[MCP] IPC Server listening on {}", socket_path);
 
-    // Main thread polling: receives requests and handles them with GPUI access
+    // Requests are answered on the main thread, one at a time and in arrival
+    // order. Sequential on purpose: a `wait_for` suspends without blocking the
+    // thread, and letting a later call overtake it would reorder inputs the
+    // agent meant as a sequence.
     cx.spawn(async move |cx| {
-        loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(10))
-                .await;
-
-            // Process all pending requests
-            while let Ok((request, resp_tx)) = req_rx.try_recv() {
-                let ipc_response = cx.update(|cx| handle_request(&request, cx));
-                let _ = resp_tx.send(ipc_response);
-            }
+        while let Ok((request, resp_tx)) = req_rx.recv().await {
+            let response = respond(request, cx).await;
+            let _ = resp_tx.send(response);
         }
     })
     .detach();
 }
 
 /// Unix Socket listener loop (runs on background thread)
-fn run_ipc_listener(socket_path: &str, req_tx: mpsc::Sender<RequestMsg>) -> anyhow::Result<()> {
+fn run_ipc_listener(
+    socket_path: &str,
+    req_tx: async_channel::Sender<RequestMsg>,
+) -> anyhow::Result<()> {
     // Remove old socket
     let _ = std::fs::remove_file(socket_path);
 
@@ -196,7 +221,7 @@ fn run_ipc_listener(socket_path: &str, req_tx: mpsc::Sender<RequestMsg>) -> anyh
 /// Handle a single IPC connection (runs on connection thread)
 fn handle_ipc_connection(
     stream: UnixStream,
-    req_tx: mpsc::Sender<RequestMsg>,
+    req_tx: async_channel::Sender<RequestMsg>,
 ) -> anyhow::Result<()> {
     let reader = BufReader::new(&stream);
     let mut writer = &stream;
@@ -207,15 +232,22 @@ fn handle_ipc_connection(
 
         let (resp_tx, resp_rx) = mpsc::channel();
 
+        let request_id = request.id.clone();
+
         req_tx
-            .send((request, resp_tx))
+            .send_blocking((request, resp_tx))
             .map_err(|e| anyhow::anyhow!("Failed to send request to main thread: {}", e))?;
 
-        let response = resp_rx
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap_or_else(|_| {
-                IpcResponse::new(String::new(), Err("Request timeout (10s)".into()))
-            });
+        let response = resp_rx.recv_timeout(RESPONSE_TIMEOUT).unwrap_or_else(|_| {
+            IpcResponse::new(
+                request_id,
+                Err(format!(
+                    "The app's main thread did not answer within {}s. It is blocked, \
+                     in a modal loop, or busy.",
+                    RESPONSE_TIMEOUT.as_secs()
+                )),
+            )
+        });
 
         let response_json = serde_json::to_string(&response)?;
         writer.write_all(response_json.as_bytes())?;
@@ -226,8 +258,15 @@ fn handle_ipc_connection(
     Ok(())
 }
 
-/// Handle an IPC request on the GPUI main thread
-fn handle_request(request: &IpcRequest, cx: &mut App) -> IpcResponse {
+/// Answer one IPC request.
+///
+/// Async because the honest answer to an input is not available at the moment
+/// the input returns: gpui has dispatched it, but nothing has been drawn, and
+/// the element tree, the focus chain and every screenshot are read from the
+/// last *painted* frame. Waiting for that frame here is the difference between
+/// an agent seeing its click take effect and asking again — and asking again
+/// costs it a whole model turn, thousands of times what the frame costs.
+async fn respond(request: IpcRequest, cx: &AsyncApp) -> IpcResponse {
     // Refuse before dispatching: this app and the server that called it are
     // built from one crate but by different mechanisms, so they can drift
     // apart, and a silently misread request is worse than a named refusal.
@@ -238,26 +277,442 @@ fn handle_request(request: &IpcRequest, cx: &mut App) -> IpcResponse {
         "MCP server",
         "`cargo build --release` inside the gpui-mcp checkout",
     ) {
-        return IpcResponse::new(request.id.clone(), Err(complaint));
+        return IpcResponse::new(request.id, Err(complaint));
     }
 
-    let result = match request.method.as_str() {
-        methods::GET_WINDOWS => handle_get_windows(cx),
-        methods::CLICK_ELEMENT => handle_click_element(&request.params, cx),
-        methods::SEND_KEY => handle_send_key(&request.params, cx),
-        methods::GET_APP_STATE => handle_get_app_state(cx),
-        methods::GET_LOGS => handle_get_logs(),
-        methods::INSPECT_UI_TREE => handle_inspect_ui_tree(&request.params, cx),
-        methods::GET_ELEMENT => handle_get_element(&request.params, cx),
-        methods::TAKE_SCREENSHOT => handle_take_screenshot(&request.params, cx),
-        methods::EXECUTE_ACTION => handle_execute_action(&request.params, cx),
-        methods::LIST_ACTIONS => handle_list_actions(&request.params, cx),
-        methods::GET_FOCUS_INFO => handle_get_focus_info(&request.params, cx),
-        methods::TYPE_TEXT => handle_type_text(&request.params, cx),
-        _ => Err(format!("Unknown method: {}", request.method)),
+    let result = if request.method == methods::BATCH {
+        run_batch(&request.params, cx).await
+    } else {
+        dispatch(&request.method, &request.params, true, cx).await
     };
 
-    IpcResponse::new(request.id.clone(), result)
+    IpcResponse::new(request.id, result)
+}
+
+/// Run one method, waiting for a painted frame when the method changed
+/// something.
+///
+/// `with_state` decides whether the answer carries the post-dispatch app state
+/// and focus info. A standalone call wants it — that is the round trip it
+/// saves. A batch step does not: the batch attaches it once, at the end,
+/// instead of repeating it after every step.
+async fn dispatch(
+    method: &str,
+    params: &serde_json::Value,
+    with_state: bool,
+    cx: &AsyncApp,
+) -> Result<serde_json::Value, String> {
+    if method == methods::BATCH {
+        return Err("A batch cannot contain another batch.".into());
+    }
+    if method == methods::WAIT_FOR {
+        return run_wait_for(params, with_state, cx).await;
+    }
+
+    let window_id = params
+        .get("window_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    let result = cx.update(|cx| dispatch_sync(method, params, cx))?;
+
+    if !is_input_method(method) {
+        return Ok(result);
+    }
+
+    let settled = settle(window_id.as_deref(), cx).await;
+    if !with_state {
+        return Ok(result);
+    }
+
+    Ok(cx.update(|cx| attach_post_state(result, window_id.as_deref(), settled, cx)))
+}
+
+/// Methods that change the app, and whose answer therefore has to describe the
+/// frame after the change rather than the one before it.
+fn is_input_method(method: &str) -> bool {
+    matches!(
+        method,
+        methods::CLICK_ELEMENT | methods::SEND_KEY | methods::TYPE_TEXT | methods::EXECUTE_ACTION
+    )
+}
+
+/// The methods that can be answered from the frame already on screen.
+fn dispatch_sync(
+    method: &str,
+    params: &serde_json::Value,
+    cx: &mut App,
+) -> Result<serde_json::Value, String> {
+    match method {
+        methods::GET_WINDOWS => handle_get_windows(cx),
+        methods::CLICK_ELEMENT => handle_click_element(params, cx),
+        methods::SEND_KEY => handle_send_key(params, cx),
+        methods::GET_APP_STATE => handle_get_app_state(cx),
+        methods::GET_LOGS => handle_get_logs(),
+        methods::INSPECT_UI_TREE => handle_inspect_ui_tree(params, cx),
+        methods::GET_ELEMENT => handle_get_element(params, cx),
+        methods::TAKE_SCREENSHOT => handle_take_screenshot(params, cx),
+        methods::EXECUTE_ACTION => handle_execute_action(params, cx),
+        methods::LIST_ACTIONS => handle_list_actions(params, cx),
+        methods::GET_FOCUS_INFO => handle_get_focus_info(params, cx),
+        methods::TYPE_TEXT => handle_type_text(params, cx),
+        // Both are answered by `dispatch`, which never sends them here.
+        methods::WAIT_FOR | methods::BATCH => Err(format!("{method} is answered asynchronously")),
+        _ => Err(format!("Unknown method: {}", method)),
+    }
+}
+
+/// Wait for the frame that shows what was just dispatched.
+///
+/// `on_next_frame` callbacks run at the *start* of a frame request, before the
+/// draw that request performs — so a single callback still sees the previous
+/// `rendered_frame`. Two of them bracket exactly one completed draw, and that
+/// is the draw carrying the input.
+///
+/// `false` means no frame arrived. That is reported rather than waited out: an
+/// occluded or stalled window would otherwise hold the request open for
+/// nothing.
+async fn settle(window_id: Option<&str>, cx: &AsyncApp) -> bool {
+    // Only the first await asks for a draw: it is the one that has to make
+    // sure a draw happens at all, even for an input that dirtied nothing. The
+    // second is just waiting for the frame request after that draw.
+    next_frame(window_id, true, cx).await && next_frame(window_id, false, cx).await
+}
+
+/// Await one frame callback of the target window, or [`FRAME_TIMEOUT`].
+///
+/// `force_draw` marks the window dirty first. Worth it when something must be
+/// painted before the answer is honest; not worth it while waiting, where it
+/// would re-render the whole window on every frame for as long as the wait
+/// lasts. A wait does not need it: whatever changes the condition marks the
+/// window dirty by itself.
+async fn next_frame(window_id: Option<&str>, force_draw: bool, cx: &AsyncApp) -> bool {
+    let (tx, rx) = oneshot::channel::<()>();
+
+    let registered = cx.update(|cx| {
+        let handle = resolve_window(window_id, cx)?;
+        handle
+            .update(cx, |_, window, _| {
+                if force_draw {
+                    window.refresh();
+                }
+                window.on_next_frame(move |_, _| {
+                    let _ = tx.send(());
+                });
+            })
+            .map_err(|e| e.to_string())
+    });
+
+    if registered.is_err() {
+        return false;
+    }
+
+    let timer = cx.background_executor().timer(FRAME_TIMEOUT);
+    match futures::future::select(Box::pin(rx), Box::pin(timer)).await {
+        // The sender is dropped rather than fired when the window goes away
+        // mid-wait, which is a frame that never happened, not one that did.
+        futures::future::Either::Left((delivered, _)) => delivered.is_ok(),
+        futures::future::Either::Right(_) => false,
+    }
+}
+
+/// Wait until the app looks the way the caller says it should.
+///
+/// The alternative is the agent looking again and again from the outside,
+/// which costs a model turn per look. Here a look costs one frame callback.
+/// Running out of time is not an error: `satisfied: false` is a fact, and
+/// often the very fact being asked for.
+async fn run_wait_for(
+    params: &serde_json::Value,
+    with_state: bool,
+    cx: &AsyncApp,
+) -> Result<serde_json::Value, String> {
+    let opts: WaitForParams = serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
+
+    let timeout = Duration::from_millis(
+        opts.timeout_ms
+            .unwrap_or(DEFAULT_WAIT_MS)
+            .clamp(1, MAX_WAIT_MS),
+    );
+    let started = Instant::now();
+    let mut frames = 0usize;
+    let mut settled = true;
+
+    // No condition at all means "give me a settled frame" — useful after
+    // something the app started on its own.
+    if !has_conditions(&opts) {
+        settled = settle(opts.window_id.as_deref(), cx).await;
+        frames = 2;
+    }
+
+    loop {
+        let (satisfied, checks) = cx.update(|cx| evaluate_wait(&opts, cx))?;
+        let expired = started.elapsed() >= timeout;
+
+        if satisfied || expired {
+            let mut answer = json!({
+                "satisfied": satisfied,
+                "waited_ms": started.elapsed().as_millis() as u64,
+                "frames": frames,
+                "settled": settled,
+                "checks": checks,
+            });
+            if !satisfied {
+                answer["timeout_ms"] = json!(timeout.as_millis() as u64);
+                answer["hint"] = json!(
+                    "Nothing failed here — the condition did not hold in time. `checks` \
+                     says which part is missing."
+                );
+            }
+            if with_state {
+                answer = cx
+                    .update(|cx| attach_post_state(answer, opts.window_id.as_deref(), settled, cx));
+            }
+            return Ok(answer);
+        }
+
+        // `next_frame` paces this loop by itself: it returns on the frame
+        // callback, or after FRAME_TIMEOUT when no frames are coming.
+        settled = next_frame(opts.window_id.as_deref(), false, cx).await;
+        if settled {
+            frames += 1;
+        }
+    }
+}
+
+/// Whether a `wait_for` asks about anything at all.
+fn has_conditions(opts: &WaitForParams) -> bool {
+    opts.element_id.is_some()
+        || opts.text.is_some()
+        || opts.key_context.is_some()
+        || opts.app_state_path.is_some()
+}
+
+/// Check a `wait_for`'s conditions against the frame on screen right now.
+///
+/// Returns whether they hold together, and a breakdown per condition — which
+/// is what makes running out of time actionable rather than merely
+/// disappointing.
+fn evaluate_wait(opts: &WaitForParams, cx: &mut App) -> Result<(bool, serde_json::Value), String> {
+    let mut checks = serde_json::Map::new();
+    let mut holds = true;
+
+    if opts.element_id.is_some() || opts.text.is_some() {
+        let query = opts.element_id.clone();
+        let needle = opts.text.as_ref().map(|text| text.to_lowercase());
+
+        let (element_found, text_found) =
+            with_elements(opts.window_id.as_deref(), cx, |elements, window_id| {
+                let mut element_found = false;
+                let mut text_found = false;
+                for info in elements {
+                    if let (Some(query), false) = (&query, element_found) {
+                        let full_id =
+                            format!("{}/{}[{}]", window_id, info.global_id, info.instance_id);
+                        element_found = id_matches(&full_id, &info.global_id, query);
+                    }
+                    if let (Some(needle), false) = (&needle, text_found) {
+                        text_found = info
+                            .text_content
+                            .iter()
+                            .any(|line| line.to_lowercase().contains(needle));
+                    }
+                }
+                (element_found, text_found)
+            })?;
+
+        if let Some(query) = &opts.element_id {
+            checks.insert(
+                "element_id".into(),
+                json!({ "query": query, "found": element_found }),
+            );
+            holds &= element_found;
+        }
+        if let Some(text) = &opts.text {
+            checks.insert("text".into(), json!({ "query": text, "found": text_found }));
+            holds &= text_found;
+        }
+    }
+
+    if let Some(context) = &opts.key_context {
+        let needle = context.to_lowercase();
+        let focus = handle_get_focus_info(&json!({ "window_id": opts.window_id }), cx)?;
+        let active = focus["key_contexts"].as_array().is_some_and(|contexts| {
+            contexts.iter().any(|entry| {
+                entry
+                    .as_str()
+                    .is_some_and(|entry| entry.to_lowercase().contains(&needle))
+            })
+        });
+        checks.insert(
+            "key_context".into(),
+            json!({ "query": context, "active": active }),
+        );
+        holds &= active;
+    }
+
+    if let Some(path) = &opts.app_state_path {
+        let state = handle_get_app_state(cx)?;
+        let found = state.pointer(path).cloned();
+        let matches = match (&opts.app_state_equals, &found) {
+            (Some(expected), Some(actual)) => expected == actual,
+            // A pointer that resolves to nothing satisfies nothing, including
+            // "any value at all": the caller is waiting for the app to put
+            // something there.
+            (_, None) => false,
+            (None, Some(actual)) => !actual.is_null(),
+        };
+        checks.insert(
+            "app_state".into(),
+            json!({
+                "path": path,
+                "value": found,
+                "expected": opts.app_state_equals,
+                "matches": matches,
+            }),
+        );
+        holds &= matches;
+    }
+
+    let satisfied = if opts.absent { !holds } else { holds };
+    Ok((satisfied, serde_json::Value::Object(checks)))
+}
+
+/// Run several methods inside one request.
+///
+/// Nothing here is faster than sending the steps one at a time — the socket
+/// was never the slow part. What it saves is model turns: five steps sent
+/// separately cost five round trips through the agent, sent together they cost
+/// one.
+async fn run_batch(params: &serde_json::Value, cx: &AsyncApp) -> Result<serde_json::Value, String> {
+    let opts: BatchParams = serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
+
+    if opts.steps.is_empty() {
+        return Err("A batch needs at least one step.".into());
+    }
+    if opts.steps.len() > MAX_BATCH_STEPS {
+        return Err(format!(
+            "A batch takes at most {} steps, this one has {}.",
+            MAX_BATCH_STEPS,
+            opts.steps.len()
+        ));
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(MAX_BATCH_MS);
+    let mut results = Vec::with_capacity(opts.steps.len());
+    let mut failed = false;
+
+    for step in &opts.steps {
+        if Instant::now() >= deadline {
+            results.push(json!({
+                "method": step.method,
+                "ok": false,
+                "error": format!(
+                    "The batch deadline of {}ms passed before this step ran.",
+                    MAX_BATCH_MS
+                ),
+            }));
+            failed = true;
+            break;
+        }
+
+        let step_params = with_window_default(&step.params, opts.window_id.as_deref());
+        match dispatch(&step.method, &step_params, false, cx).await {
+            Ok(result) => results.push(json!({
+                "method": step.method,
+                "ok": true,
+                "result": result,
+            })),
+            Err(error) => {
+                results.push(json!({
+                    "method": step.method,
+                    "ok": false,
+                    "error": error,
+                }));
+                failed = true;
+                if opts.stop_on_error {
+                    break;
+                }
+            }
+        }
+    }
+
+    let answer = json!({
+        "ok": !failed,
+        "ran": results.len(),
+        "of": opts.steps.len(),
+        "steps": results,
+    });
+
+    let settled = settle(opts.window_id.as_deref(), cx).await;
+    Ok(cx.update(|cx| attach_post_state(answer, opts.window_id.as_deref(), settled, cx)))
+}
+
+/// Give a batch step the batch's window unless it named one itself.
+fn with_window_default(params: &serde_json::Value, window_id: Option<&str>) -> serde_json::Value {
+    let Some(window_id) = window_id else {
+        return params.clone();
+    };
+
+    let mut params = params.clone();
+    match params.as_object_mut() {
+        Some(object) => {
+            object
+                .entry("window_id")
+                .or_insert_with(|| json!(window_id));
+        }
+        // A step with no params at all still belongs to the batch's window.
+        None => params = json!({ "window_id": window_id }),
+    }
+    params
+}
+
+/// The three id forms every tool accepts: the full id, the global id, or a
+/// suffix of the global id — first match winning.
+///
+/// Also accepts an id copied out of `format: "compact"` output, where crate
+/// paths have been stripped from each segment and the `[instance]` suffix is
+/// still attached. Refusing those would punish an agent for using the cheap
+/// output format this server recommends, and "element not found" for an id
+/// this very server just printed is the most confusing answer available.
+fn id_matches(full_id: &str, global_id: &str, query: &str) -> bool {
+    if full_id == query || global_id == query || global_id.ends_with(query) {
+        return true;
+    }
+    if shorten_element_id(full_id) == query {
+        return true;
+    }
+
+    let path = strip_id_decoration(query);
+    let shortened = shorten_element_id(global_id);
+    global_id == path || global_id.ends_with(path) || shortened == path || shortened.ends_with(path)
+}
+
+/// Drop a leading `WindowId(..)/` and a trailing `[instance]` from an id, so
+/// what is left can be compared against a `global_id`.
+fn strip_id_decoration(id: &str) -> &str {
+    let without_window = id.find('/').map(|index| &id[index + 1..]).unwrap_or(id);
+    without_window
+        .rfind('[')
+        .map(|index| &without_window[..index])
+        .unwrap_or(without_window)
+}
+
+/// Run `f` over the inspector elements of the target window, which are the
+/// elements of the frame last painted.
+fn with_elements<T>(
+    window_id: Option<&str>,
+    cx: &mut App,
+    f: impl FnOnce(&[gpui::InspectorElementInfo], &str) -> T,
+) -> Result<T, String> {
+    let handle = resolve_window(window_id, cx)?;
+    let window_id = format!("{:?}", handle.window_id());
+
+    handle
+        .update(cx, |_, window, _| {
+            f(&window.inspector_elements(), &window_id)
+        })
+        .map_err(|e| e.to_string())
 }
 
 // ===== Helpers =====
@@ -421,14 +876,19 @@ fn not_found_error(query: &str, candidates: Vec<serde_json::Value>) -> String {
 ///
 /// The MCP driver handlers (`execute_action`, `send_key`, `click_element`,
 /// `type_text`) are almost always followed by a `get_app_state` +
-/// `get_focus_info` call to answer "what changed?". Inlining both into
-/// the driver response halves the round-trips for the most common pattern.
+/// `get_focus_info` call to answer "what changed?". Inlining both into the
+/// driver response saves that round trip — and since `dispatch` only calls
+/// this once the frame carrying the input has been painted, what it inlines is
+/// the state *after* the input rather than the state it replaced.
 ///
 /// `window_id` is the window the action targeted; it's used to scope
 /// `focus_info` to the same window. Pass `None` to use the default target.
+/// `settled` says whether that frame actually arrived: `false` means the
+/// window is not being drawn, and everything here describes an older frame.
 fn attach_post_state(
     mut response: serde_json::Value,
     window_id: Option<&str>,
+    settled: bool,
     cx: &mut App,
 ) -> serde_json::Value {
     let app_state = handle_get_app_state(cx).unwrap_or(serde_json::Value::Null);
@@ -437,6 +897,7 @@ fn attach_post_state(
     let focus_info = handle_get_focus_info(&focus_params, cx).unwrap_or(serde_json::Value::Null);
 
     if let Some(obj) = response.as_object_mut() {
+        obj.insert("settled".into(), json!(settled));
         obj.insert("app_state".into(), app_state);
         obj.insert("focus_info".into(), focus_info);
     }
@@ -518,7 +979,7 @@ fn handle_click_element(
             .as_object_mut()
             .map(|o| o.insert("resolved_element".into(), json!(id)));
     }
-    Ok(attach_post_state(result, event.window_id.as_deref(), cx))
+    Ok(result)
 }
 
 /// Resolve the center point of an element by ID.
@@ -543,10 +1004,7 @@ fn resolve_element_center(
             for info in window.inspector_elements() {
                 let full_id = format!("{}/{}[{}]", window_id_str, info.global_id, info.instance_id);
 
-                let matches =
-                    full_id == query || info.global_id == query || info.global_id.ends_with(query);
-
-                if matches {
+                if id_matches(&full_id, &info.global_id, query) {
                     let center_x = info.bounds.origin.x + info.bounds.size.width / 2.0;
                     let center_y = info.bounds.origin.y + info.bounds.size.height / 2.0;
                     return Some((point(center_x, center_y), full_id));
@@ -600,7 +1058,7 @@ fn handle_send_key(params: &serde_json::Value, cx: &mut App) -> Result<serde_jso
         "dispatched": dispatched,
         "keystroke": keystroke_str,
     });
-    Ok(attach_post_state(response, event.window_id.as_deref(), cx))
+    Ok(response)
 }
 
 fn handle_type_text(params: &serde_json::Value, cx: &mut App) -> Result<serde_json::Value, String> {
@@ -642,7 +1100,7 @@ fn handle_type_text(params: &serde_json::Value, cx: &mut App) -> Result<serde_js
         "chars": opts.text.len(),
         "dispatched": dispatched_count,
     });
-    Ok(attach_post_state(response, opts.window_id.as_deref(), cx))
+    Ok(response)
 }
 
 fn handle_get_app_state(cx: &mut App) -> Result<serde_json::Value, String> {
@@ -700,15 +1158,7 @@ fn handle_inspect_ui_tree(
     params: &serde_json::Value,
     cx: &mut App,
 ) -> Result<serde_json::Value, String> {
-    let opts: InspectUiTreeParams =
-        serde_json::from_value(params.clone()).unwrap_or(InspectUiTreeParams {
-            max_depth: 0,
-            window_id: None,
-            element_type_filter: None,
-            root_element_id: None,
-            format: None,
-            text_filter: None,
-        });
+    let opts: InspectUiTreeParams = serde_json::from_value(params.clone()).unwrap_or_default();
 
     let compact = opts.format.as_deref() == Some("compact");
     // `is_active` reports default dispatch target, not OS focus. See `default_target_window_id`.
@@ -844,28 +1294,9 @@ fn handle_inspect_ui_tree(
 /// Returns a clone of the matched element with its full subtree.
 fn find_subtree(elements: &[UiElement], query: &str) -> Option<UiElement> {
     for elem in elements {
-        // Match by full ID
-        if elem.id == query {
+        if id_matches(&elem.id, strip_id_decoration(&elem.id), query) {
             return Some(elem.clone());
         }
-        // Match by global_id portion (strip window prefix and instance suffix)
-        let global_id = elem
-            .id
-            .find('/')
-            .map(|i| &elem.id[i + 1..])
-            .unwrap_or(&elem.id);
-        let global_id = global_id
-            .rfind('[')
-            .map(|i| &global_id[..i])
-            .unwrap_or(global_id);
-        if global_id == query {
-            return Some(elem.clone());
-        }
-        // Match by suffix
-        if global_id.ends_with(query) {
-            return Some(elem.clone());
-        }
-        // Recurse into children
         if let Some(found) = find_subtree(&elem.children, query) {
             return Some(found);
         }
@@ -984,9 +1415,15 @@ fn filter_tree_by_text(elements: &mut Vec<UiElement>, filter_lower: &str) {
     });
 }
 
-/// Build a hierarchical tree from GPUI's flat inspector element list.
-/// Uses dot-separated global_id as hierarchy key.
-/// Optimized: builds parent lookup via sorted prefix matching instead of O(n²) scan.
+/// Build a hierarchical tree from GPUI's flat inspector element list, using
+/// the dot-separated `global_id` as the hierarchy key.
+///
+/// An element's parent is the longest *proper* prefix of its `global_id` that
+/// ends on a dot boundary and belongs to a real element. Trimming segments off
+/// the right finds it in as many steps as the element is deep. The previous
+/// version scanned every other element for every element to find the same
+/// thing — millions of string comparisons on a UI of any size, paid again on
+/// every inspect call.
 fn build_element_tree(
     window_id: &str,
     elements: Vec<gpui::InspectorElementInfo>,
@@ -994,7 +1431,6 @@ fn build_element_tree(
     use std::collections::HashMap;
 
     struct FlatEntry {
-        full_id: String,
         global_id: String,
         element: UiElement,
     }
@@ -1028,7 +1464,6 @@ fn build_element_tree(
             );
 
             FlatEntry {
-                full_id: full_id.clone(),
                 global_id: info.global_id.clone(),
                 element: UiElement {
                     id: full_id,
@@ -1053,60 +1488,79 @@ fn build_element_tree(
         depth_a.cmp(&depth_b).then(a.global_id.cmp(&b.global_id))
     });
 
-    // Build hierarchy using sorted order for efficient parent lookup
-    let mut id_to_element: HashMap<String, UiElement> = HashMap::new();
-    let mut id_to_global: HashMap<String, String> = HashMap::new();
-    let mut insertion_order: Vec<String> = Vec::new();
-
-    for entry in &entries {
-        id_to_element.insert(entry.full_id.clone(), entry.element.clone());
-        id_to_global.insert(entry.full_id.clone(), entry.global_id.clone());
-        insertion_order.push(entry.full_id.clone());
-    }
-
-    // Assign children to parents (deepest first)
-    let mut child_assigned: HashMap<String, bool> = HashMap::new();
-
-    for i in (0..insertion_order.len()).rev() {
-        let child_id = &insertion_order[i];
-        let child_global = id_to_global[child_id].clone();
-
-        let mut best_parent: Option<String> = None;
-        let mut best_prefix_len = 0;
-
-        for j in 0..insertion_order.len() {
-            if j == i {
-                continue;
-            }
-            let candidate_id = &insertion_order[j];
-            let candidate_global = &id_to_global[candidate_id];
-
-            if child_global.starts_with(candidate_global.as_str())
-                && child_global.len() > candidate_global.len()
-                && child_global.as_bytes().get(candidate_global.len()) == Some(&b'.')
-                && candidate_global.len() > best_prefix_len
-            {
-                best_prefix_len = candidate_global.len();
-                best_parent = Some(candidate_id.clone());
-            }
+    // Where each element's parent sits in `entries`. Computed while nothing is
+    // being moved, so the borrows of `entries` end before assembly starts.
+    let parent_index: Vec<Option<usize>> = {
+        let mut first_with_global: HashMap<&str, usize> = HashMap::new();
+        for (index, entry) in entries.iter().enumerate() {
+            // First one wins, which is how the previous version broke a tie
+            // between two elements sharing a global_id.
+            first_with_global
+                .entry(entry.global_id.as_str())
+                .or_insert(index);
         }
 
-        if let Some(parent_id) = best_parent {
-            if let Some(child_elem) = id_to_element.remove(child_id) {
-                if let Some(parent_elem) = id_to_element.get_mut(&parent_id) {
-                    parent_elem.children.push(child_elem);
-                    child_assigned.insert(child_id.clone(), true);
+        entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let mut prefix = entry.global_id.as_str();
+                loop {
+                    let dot = prefix.rfind('.')?;
+                    prefix = &prefix[..dot];
+                    if let Some(&parent) = first_with_global.get(prefix) {
+                        // An element sharing its global_id with its own prefix
+                        // would otherwise adopt itself.
+                        return (parent != index).then_some(parent);
+                    }
                 }
-            }
+            })
+            .collect()
+    };
+
+    // Assemble deepest-first, so a child is complete before it moves into its
+    // parent. Parents always sit at a lower index: their global_id has strictly
+    // fewer dots, and the sort above put fewer dots first.
+    let mut elements: Vec<Option<UiElement>> = entries
+        .into_iter()
+        .map(|entry| Some(entry.element))
+        .collect();
+
+    for index in (0..elements.len()).rev() {
+        let Some(parent) = parent_index[index] else {
+            continue;
+        };
+        let Some(child) = elements[index].take() else {
+            continue;
+        };
+        match elements.get_mut(parent) {
+            Some(Some(parent_element)) => parent_element.children.push(child),
+            // Cannot happen given the ordering above; keeping the element at
+            // top level beats dropping it from the tree.
+            _ => elements[index] = Some(child),
         }
     }
 
-    // Return only top-level elements
-    insertion_order
-        .iter()
-        .filter(|id| !child_assigned.contains_key(*id))
-        .filter_map(|id| id_to_element.remove(id))
+    elements
+        .into_iter()
+        .flatten()
+        .map(|mut element| {
+            restore_child_order(&mut element);
+            element
+        })
         .collect()
+}
+
+/// Put each child list back into layout order.
+///
+/// The tree is assembled deepest-first, which appends each parent's children
+/// in reverse; one pass undoes that so siblings read in the order the sort
+/// established rather than backwards.
+fn restore_child_order(element: &mut UiElement) {
+    element.children.reverse();
+    for child in &mut element.children {
+        restore_child_order(child);
+    }
 }
 
 fn handle_get_element(
@@ -1163,12 +1617,7 @@ fn handle_take_screenshot(
     params: &serde_json::Value,
     cx: &mut App,
 ) -> Result<serde_json::Value, String> {
-    let opts: TakeScreenshotParams =
-        serde_json::from_value(params.clone()).unwrap_or(TakeScreenshotParams {
-            highlight_elements: vec![],
-            window_id: None,
-            element_id: None,
-        });
+    let opts: TakeScreenshotParams = serde_json::from_value(params.clone()).unwrap_or_default();
 
     let handle = resolve_window(opts.window_id.as_deref(), cx)?;
 
@@ -1190,10 +1639,7 @@ fn handle_take_screenshot(
                 for info in window.inspector_elements() {
                     let full_id =
                         format!("{}/{}[{}]", window_id_str, info.global_id, info.instance_id);
-                    let matches = full_id == *element_id
-                        || info.global_id == *element_id
-                        || info.global_id.ends_with(element_id.as_str());
-                    if matches {
+                    if id_matches(&full_id, &info.global_id, element_id) {
                         return Some((info.bounds, full_id));
                     }
                 }
@@ -1229,11 +1675,42 @@ fn handle_take_screenshot(
         (image, None)
     };
 
+    // Downscale before writing. An image costs an agent tokens by its pixel
+    // dimensions, not by its file size, so a 4K window screenshot spends a
+    // large part of a context window on detail nobody asked for. Cropped
+    // element shots are usually below the limit already and pass through
+    // untouched.
+    let max_width = opts.max_width.unwrap_or(DEFAULT_SCREENSHOT_MAX_WIDTH);
+    let (final_image, scale) = match final_image.width() {
+        raw_width if max_width > 0 && raw_width > max_width => {
+            let ratio = max_width as f32 / raw_width as f32;
+            let scaled_height = ((final_image.height() as f32) * ratio).round().max(1.0) as u32;
+            (
+                image::imageops::resize(
+                    &final_image,
+                    max_width,
+                    scaled_height,
+                    image::imageops::FilterType::Triangle,
+                ),
+                Some(ratio),
+            )
+        }
+        _ => (final_image, None),
+    };
+
     let (width, height) = final_image.dimensions();
 
-    // Save as PNG to a temp file
-    let temp_path =
-        std::env::temp_dir().join(format!("gpui-screenshot-{}.png", std::process::id()));
+    // Save as PNG to a temp file. The name carries a sequence number as well
+    // as the pid: a batch may take several screenshots, and naming them all
+    // alike meant the last one overwrote the file the server had not read yet
+    // — the first image came back showing the last frame, and the last came
+    // back with no image at all.
+    let sequence = SCREENSHOT_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp_path = std::env::temp_dir().join(format!(
+        "gpui-screenshot-{}-{}.png",
+        std::process::id(),
+        sequence
+    ));
     final_image
         .save(&temp_path)
         .map_err(|e| format!("Failed to save screenshot: {}", e))?;
@@ -1255,10 +1732,16 @@ fn handle_take_screenshot(
         "format": "png",
         "path": temp_path.to_string_lossy(),
     });
-    if let Some(id) = element_info {
-        result
-            .as_object_mut()
-            .map(|o| o.insert("element_id".into(), json!(id)));
+    if let Some(object) = result.as_object_mut() {
+        if let Some(id) = element_info {
+            object.insert("element_id".into(), json!(id));
+        }
+        // Say so when the image was shrunk: a coordinate read off it is not a
+        // window coordinate any more, and a click sent there would land
+        // somewhere else entirely.
+        if let Some(scale) = scale {
+            object.insert("scale".into(), json!(scale));
+        }
     }
     Ok(result)
 }
@@ -1314,7 +1797,7 @@ fn handle_execute_action(
         "window_title": window_title,
         "window_had_focus": has_focus,
     });
-    Ok(attach_post_state(response, opts.window_id.as_deref(), cx))
+    Ok(response)
 }
 
 fn handle_list_actions(
@@ -1453,8 +1936,7 @@ fn handle_get_focus_info(
     params: &serde_json::Value,
     cx: &mut App,
 ) -> Result<serde_json::Value, String> {
-    let opts: GetFocusInfoParams =
-        serde_json::from_value(params.clone()).unwrap_or(GetFocusInfoParams { window_id: None });
+    let opts: GetFocusInfoParams = serde_json::from_value(params.clone()).unwrap_or_default();
 
     let handle = resolve_window(opts.window_id.as_deref(), cx)?;
 
@@ -1524,5 +2006,189 @@ mod tests {
         let path = socket_path_for("elane");
         let pid = std::process::id();
         assert!(path.ends_with(&format!("gpui-mcp-elane-{}.sock", pid)));
+    }
+
+    /// A painted element with nothing in it, for the tree tests below.
+    fn element(global_id: &str) -> gpui::InspectorElementInfo {
+        let bounds = gpui::Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: gpui::size(px(10.0), px(10.0)),
+        };
+        gpui::InspectorElementInfo {
+            bounds,
+            content_mask: gpui::ContentMask { bounds },
+            global_id: global_id.to_string(),
+            source_location: "crates/ui/src/button.rs:1:1".to_string(),
+            instance_id: 0,
+            text_content: vec![],
+        }
+    }
+
+    fn child_ids(element: &UiElement) -> Vec<&str> {
+        element.children.iter().map(|c| c.id.as_str()).collect()
+    }
+
+    #[test]
+    fn tree_nests_by_dotted_global_id() {
+        let tree = build_element_tree(
+            "W",
+            vec![
+                element("root"),
+                element("root.a"),
+                element("root.a.x"),
+                element("root.b"),
+            ],
+        );
+
+        assert_eq!(tree.len(), 1, "only `root` has no parent");
+        assert_eq!(tree[0].id, "W/root[0]");
+        assert_eq!(child_ids(&tree[0]), ["W/root.a[0]", "W/root.b[0]"]);
+        assert_eq!(child_ids(&tree[0].children[0]), ["W/root.a.x[0]"]);
+    }
+
+    /// Siblings must read in layout order. The tree is assembled deepest-first,
+    /// which appends them backwards, and only the final pass puts them right.
+    #[test]
+    fn tree_keeps_siblings_in_order() {
+        let tree = build_element_tree(
+            "W",
+            vec![
+                element("root"),
+                element("root.a"),
+                element("root.b"),
+                element("root.c"),
+                element("root.a.deep"),
+            ],
+        );
+
+        assert_eq!(
+            child_ids(&tree[0]),
+            ["W/root.a[0]", "W/root.b[0]", "W/root.c[0]"]
+        );
+    }
+
+    /// A prefix only counts when it ends on a dot: `rootish` is not inside
+    /// `root`, however much of the string they share.
+    #[test]
+    fn tree_respects_dot_boundaries() {
+        let tree = build_element_tree("W", vec![element("root"), element("rootish")]);
+        assert_eq!(tree.len(), 2);
+    }
+
+    /// gpui does not paint an inspector entry for every level, so the parent is
+    /// the nearest ancestor that exists — not necessarily the direct one.
+    #[test]
+    fn tree_attaches_to_the_nearest_existing_ancestor() {
+        let tree = build_element_tree("W", vec![element("root"), element("root.a.x")]);
+
+        assert_eq!(tree.len(), 1);
+        assert_eq!(child_ids(&tree[0]), ["W/root.a.x[0]"]);
+    }
+
+    #[test]
+    fn tree_keeps_an_element_with_no_ancestor_at_the_top() {
+        let tree = build_element_tree("W", vec![element("alone"), element("other")]);
+        assert_eq!(tree.len(), 2);
+        assert!(tree.iter().all(|element| element.children.is_empty()));
+    }
+
+    #[test]
+    fn an_id_matches_in_all_three_forms() {
+        let full = "WindowId(1)/view-1.panel[0]";
+        let global = "view-1.panel";
+
+        assert!(id_matches(full, global, full), "full id");
+        assert!(id_matches(full, global, global), "global id");
+        assert!(id_matches(full, global, "panel"), "suffix");
+        assert!(!id_matches(full, global, "sidebar"));
+    }
+
+    /// The id `format: "compact"` prints is shortened and keeps its instance
+    /// suffix. Handing it straight back must work, or the cheap output format
+    /// would be a trap.
+    #[test]
+    fn an_id_copied_from_compact_output_still_matches() {
+        let global = "view-1.gpui_component::sidebar::SidebarMenu.item";
+        let full = format!("WindowId(1)/{global}[0]");
+        let compact = shorten_element_id(&full);
+
+        assert_eq!(compact, "WindowId(1)/view-1.SidebarMenu.item[0]");
+        assert!(id_matches(&full, global, &compact), "compact full id");
+        assert!(
+            id_matches(&full, global, "view-1.SidebarMenu.item"),
+            "compact global id"
+        );
+        assert!(id_matches(&full, global, "SidebarMenu.item"), "suffix");
+        assert!(!id_matches(&full, global, "view-1.Sidebar.item"));
+    }
+
+    /// An instance suffix on the query used to make every path fail: it is not
+    /// part of a global_id, so nothing it was compared against could match.
+    #[test]
+    fn an_instance_suffix_does_not_break_a_query() {
+        let global = "view-1.panel";
+        let full = "WindowId(1)/view-1.panel[0]";
+
+        assert!(id_matches(full, global, "view-1.panel[0]"));
+        assert!(id_matches(full, global, "panel[0]"));
+    }
+
+    /// The methods whose answer has to wait for a frame are exactly the ones
+    /// that change something.
+    #[test]
+    fn only_the_inputs_count_as_input() {
+        for method in [
+            methods::CLICK_ELEMENT,
+            methods::SEND_KEY,
+            methods::TYPE_TEXT,
+            methods::EXECUTE_ACTION,
+        ] {
+            assert!(is_input_method(method), "{method} changes the app");
+        }
+        for method in [
+            methods::GET_WINDOWS,
+            methods::INSPECT_UI_TREE,
+            methods::TAKE_SCREENSHOT,
+            methods::GET_LOGS,
+            methods::WAIT_FOR,
+        ] {
+            assert!(!is_input_method(method), "{method} only reads");
+        }
+    }
+
+    #[test]
+    fn a_batch_step_inherits_the_window_but_may_override_it() {
+        let inherited = with_window_default(&json!({ "key": "enter" }), Some("WindowId(2)"));
+        assert_eq!(inherited["window_id"], "WindowId(2)");
+        assert_eq!(inherited["key"], "enter");
+
+        let explicit =
+            with_window_default(&json!({ "window_id": "WindowId(9)" }), Some("WindowId(2)"));
+        assert_eq!(explicit["window_id"], "WindowId(9)");
+
+        let no_params = with_window_default(&serde_json::Value::Null, Some("WindowId(2)"));
+        assert_eq!(no_params["window_id"], "WindowId(2)");
+
+        let no_batch_window = with_window_default(&json!({ "key": "enter" }), None);
+        assert!(no_batch_window.get("window_id").is_none());
+    }
+
+    #[test]
+    fn a_wait_with_nothing_to_wait_for_is_recognised() {
+        assert!(!has_conditions(&WaitForParams::default()));
+
+        assert!(has_conditions(&WaitForParams {
+            element_id: Some("results".into()),
+            ..Default::default()
+        }));
+        assert!(has_conditions(&WaitForParams {
+            app_state_path: Some("/app/rows".into()),
+            ..Default::default()
+        }));
+        // `absent` inverts a condition; on its own there is nothing to invert.
+        assert!(!has_conditions(&WaitForParams {
+            absent: true,
+            ..Default::default()
+        }));
     }
 }

@@ -108,6 +108,10 @@ split-debuginfo = "unpacked"
 
 [profile.dev.package]
 resvg = { opt-level = 3 }
+# Screenshot scaling for the `mcp` feature runs through `image`. Unoptimised
+# it costs a few hundred milliseconds per screenshot, which is the wrong place
+# to spend a dev build's honesty.
+image = { opt-level = 3 }
 rustybuzz = { opt-level = 3 }
 taffy = { opt-level = 3 }
 ttf-parser = { opt-level = 3 }
