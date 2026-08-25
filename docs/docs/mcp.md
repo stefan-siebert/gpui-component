@@ -101,6 +101,7 @@ server binary and registering it with an agent is described in the
 | `batch` | several of the above in one request |
 | `take_screenshot` | the window or one element, rendered by GPUI itself |
 | `get_logs` | the `mcp_log` buffer |
+| `replay_script` | replay a recorded session — to reach a state, or as a test |
 
 ## What the agent sees
 
