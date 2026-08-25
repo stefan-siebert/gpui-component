@@ -91,6 +91,7 @@ server binary and registering it with an agent is described in the
 |---|---|
 | `gpui_guide` | the server's own documentation, so an agent starts informed |
 | `ui_snapshot` | the window as one short line per meaningful element |
+| `a11y_audit` | controls nothing can name, ids that name several elements, targets under 24px |
 | `inspect_ui_tree` | the full element hierarchy, for layout questions |
 | `get_element` | one element with its subtree |
 | `get_windows`, `get_app_state` | windows, and your state provider's snapshot |
@@ -154,6 +155,33 @@ that line of the snapshot I just showed you". It works anywhere an element id
 is taken. Each snapshot replaces the whole set, so a ref from an older snapshot
 fails with a message saying to take a new one, rather than resolving to
 whatever now sits on that line.
+
+## Checking accessibility
+
+`a11y_audit` reports the problems the derived layer can see, and they turn out
+to be the ones that hurt a screen-reader user and an agent equally:
+
+| check | severity | what it means |
+|---|---|---|
+| `unnamed-control` | serious | an interactive element painting no text — nothing to announce, nothing to target by name |
+| `duplicate-id` | serious on a control, else warning | one id naming several elements; a suffix match takes the first |
+| `target-too-small` | warning | a side under 24 px (WCAG 2.2's minimum) |
+| `zero-size-control` | serious | an interactive element with no area at all |
+
+Run against this repository's own story app it finds nine unnamed controls —
+every icon-only button in the title bar, and the search field — that `#menu`
+names four buttons, and that `#item` names sixty-two sidebar rows.
+
+The fix serves both readers at once: give the element a label and an id of its
+own, and it becomes announceable *and* targetable. Contrast is not checked and
+cannot be, because colours never reach the MCP side.
+
+Put the audit into a recorded script and a failing one fails the replay, which
+keeps it checked:
+
+```json
+{ "method": "a11y_audit", "params": { "fail_on": "serious" } }
+```
 
 ## What the answers mean
 

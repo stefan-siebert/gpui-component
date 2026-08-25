@@ -393,6 +393,7 @@ fn dispatch_sync(
         methods::GET_APP_STATE => handle_get_app_state(cx),
         methods::GET_LOGS => handle_get_logs(),
         methods::UI_SNAPSHOT => handle_ui_snapshot(params, cx),
+        methods::A11Y_AUDIT => handle_a11y_audit(params, cx),
         methods::INSPECT_UI_TREE => handle_inspect_ui_tree(params, cx),
         methods::GET_ELEMENT => handle_get_element(params, cx),
         methods::TAKE_SCREENSHOT => handle_take_screenshot(params, cx),
@@ -1840,6 +1841,12 @@ struct SnapshotNode {
     name: Option<String>,
     test_id: Option<String>,
     full_id: String,
+    /// The source location gpui recorded for this element. For a
+    /// gpui-component widget that is the widget's own file, so it says *what*
+    /// the element is rather than where the app put it — the id and the
+    /// element path are what locate it. The snapshot leaves it out; the audit
+    /// prints it.
+    source: Option<String>,
     bounds: Bounds,
     children: Vec<SnapshotNode>,
 }
@@ -1873,6 +1880,7 @@ fn snapshot_nodes(elements: &[UiElement], interactive_only: bool) -> Vec<Snapsho
                 name,
                 test_id,
                 full_id: element.id.clone(),
+                source: element.source_location.clone(),
                 bounds: element.bounds.clone(),
                 children,
             });
@@ -2021,6 +2029,269 @@ fn handle_ui_snapshot(
         "truncated": rendered.truncated,
         "snapshot": rendered.text,
     }))
+}
+
+// ===== Accessibility audit =====
+
+/// One thing wrong with the UI, and where to fix it.
+struct Finding {
+    severity: &'static str,
+    check: &'static str,
+    message: String,
+    role: Option<&'static str>,
+    test_id: Option<String>,
+    element: String,
+    source: Option<String>,
+    bounds: Option<Bounds>,
+}
+
+impl Finding {
+    fn to_json(&self) -> serde_json::Value {
+        let mut value = json!({
+            "severity": self.severity,
+            "check": self.check,
+            "message": self.message,
+            "element": self.element,
+        });
+        let object = value.as_object_mut().expect("object");
+        if let Some(role) = self.role {
+            object.insert("role".into(), json!(role));
+        }
+        if let Some(test_id) = &self.test_id {
+            object.insert("test_id".into(), json!(test_id));
+        }
+        if let Some(source) = &self.source {
+            object.insert("source".into(), json!(source));
+        }
+        if let Some(bounds) = &self.bounds {
+            object.insert("bounds".into(), json!(bounds));
+        }
+        value
+    }
+}
+
+/// Severity ranks, so `fail_on` can be compared and findings sorted.
+fn severity_rank(severity: &str) -> u8 {
+    match severity {
+        "serious" => 2,
+        "warning" => 1,
+        _ => 0,
+    }
+}
+
+/// Whether an audit passes at a given threshold.
+///
+/// `none` always passes — it is how a script says "report, do not gate", and a
+/// threshold comparison that treats it as "warning" would take that away.
+fn audit_passes(findings: &[Finding], fail_on: &str) -> bool {
+    let threshold = severity_rank(fail_on);
+    threshold == 0
+        || !findings
+            .iter()
+            .any(|finding| severity_rank(finding.severity) >= threshold)
+}
+
+/// Every node in reading order, parents before children.
+fn flatten_snapshot<'a>(nodes: &'a [SnapshotNode], out: &mut Vec<&'a SnapshotNode>) {
+    for node in nodes {
+        out.push(node);
+        flatten_snapshot(&node.children, out);
+    }
+}
+
+/// Answer [`methods::A11Y_AUDIT`].
+///
+/// This reads the same derived layer the snapshot prints, so it sees what that
+/// layer sees and no more: no colours, so no contrast; no state, so nothing
+/// about what a control announces when it changes. What it does catch is the
+/// class of problem that hurts a screen reader and an agent alike: a control
+/// nothing can name, an id that names several things, a target too small to
+/// hit.
+fn handle_a11y_audit(
+    params: &serde_json::Value,
+    cx: &mut App,
+) -> Result<serde_json::Value, String> {
+    let opts: A11yAuditParams = serde_json::from_value(params.clone()).unwrap_or_default();
+
+    let handle = resolve_window(opts.window_id.as_deref(), cx)?;
+    let window_id = format!("{:?}", handle.window_id());
+
+    let mut elements = handle
+        .update(cx, |_, window, _| {
+            build_element_tree(&window_id, window.inspector_elements())
+        })
+        .map_err(|e| e.to_string())?;
+
+    if let Some(root) = &opts.root_element_id {
+        let root = expand_ref(root)?;
+        match find_subtree(&elements, &root) {
+            Some(subtree) => elements = vec![subtree],
+            None => {
+                let candidates = collect_match_candidates(&root, opts.window_id.as_deref(), cx, 5);
+                return Err(not_found_error(&root, candidates));
+            }
+        }
+    }
+
+    let nodes = snapshot_nodes(&elements, false);
+    let mut flat = Vec::new();
+    flatten_snapshot(&nodes, &mut flat);
+
+    let min_target = opts
+        .min_target_size
+        .unwrap_or(DEFAULT_MIN_TARGET_SIZE)
+        .max(0.0);
+    let mut findings = audit_controls(&flat, min_target);
+    findings.extend(audit_ids(&flat));
+
+    // Worst first: a list somebody reads from the top should start with what
+    // matters.
+    findings.sort_by_key(|finding| std::cmp::Reverse(severity_rank(finding.severity)));
+
+    let serious = findings.iter().filter(|f| f.severity == "serious").count();
+    let warnings = findings.iter().filter(|f| f.severity == "warning").count();
+
+    let fail_on = opts.fail_on.as_deref().unwrap_or("serious");
+    if !matches!(fail_on, "serious" | "warning" | "none") {
+        // A typo here would silently produce an audit that can never fail,
+        // which is the worst possible way for a gate to be broken.
+        return Err(format!(
+            "fail_on must be \"serious\", \"warning\" or \"none\", not \"{fail_on}\""
+        ));
+    }
+    let ok = audit_passes(&findings, fail_on);
+
+    let limit = opts.max_findings.unwrap_or(DEFAULT_MAX_FINDINGS).max(1);
+    let truncated = findings.len() > limit;
+    let listed: Vec<serde_json::Value> =
+        findings.iter().take(limit).map(Finding::to_json).collect();
+
+    mcp_log(format!(
+        "a11y audit of {}: {} serious, {} warnings over {} elements",
+        window_id,
+        serious,
+        warnings,
+        flat.len()
+    ));
+
+    Ok(json!({
+        "ok": ok,
+        "window_id": window_id,
+        "checked": flat.len(),
+        "fail_on": fail_on,
+        "serious": serious,
+        "warnings": warnings,
+        "truncated": truncated,
+        "findings": listed,
+    }))
+}
+
+/// Controls nobody can name, hit, or see.
+fn audit_controls(nodes: &[&SnapshotNode], min_target: f32) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    for node in nodes {
+        if !is_interactive(node.role) {
+            continue;
+        }
+        let role = node.role.unwrap_or("control");
+
+        if node.name.is_none() {
+            findings.push(Finding {
+                severity: "serious",
+                check: "unnamed-control",
+                message: format!(
+                    "This {role} paints no text, so nothing can name it: a screen reader has \
+                     nothing to announce and an agent has nothing to match on. Give it a label, \
+                     or a tooltip, or at least an id it can be targeted by."
+                ),
+                role: node.role,
+                test_id: node.test_id.clone(),
+                element: shorten_element_id(&node.full_id),
+                source: node.source.clone(),
+                bounds: None,
+            });
+        }
+
+        if node.bounds.width <= 0.0 || node.bounds.height <= 0.0 {
+            findings.push(Finding {
+                severity: "serious",
+                check: "zero-size-control",
+                message: format!("This {role} is painted with no area, so nobody can click it."),
+                role: node.role,
+                test_id: node.test_id.clone(),
+                element: shorten_element_id(&node.full_id),
+                source: node.source.clone(),
+                bounds: Some(node.bounds.clone()),
+            });
+        } else if node.bounds.width < min_target || node.bounds.height < min_target {
+            findings.push(Finding {
+                severity: "warning",
+                check: "target-too-small",
+                message: format!(
+                    "This {role} is {:.0}x{:.0} px, under the {:.0} px minimum. Small targets \
+                     are hard to hit with a shaky hand or a finger.",
+                    node.bounds.width, node.bounds.height, min_target
+                ),
+                role: node.role,
+                test_id: node.test_id.clone(),
+                element: shorten_element_id(&node.full_id),
+                source: node.source.clone(),
+                bounds: Some(node.bounds.clone()),
+            });
+        }
+    }
+
+    findings
+}
+
+/// Ids that name more than one thing.
+///
+/// This is an accessibility finding and a testing one at once. A suffix match
+/// takes the first element it fits, so an id shared by forty list rows means a
+/// recorded script targeting it clicks the wrong row — quietly, and only in
+/// the run where the order changed.
+fn audit_ids(nodes: &[&SnapshotNode]) -> Vec<Finding> {
+    let mut by_id: std::collections::HashMap<&str, Vec<&&SnapshotNode>> =
+        std::collections::HashMap::new();
+
+    for node in nodes {
+        if let Some(test_id) = &node.test_id {
+            by_id.entry(test_id.as_str()).or_default().push(node);
+        }
+    }
+
+    let mut duplicates: Vec<(&str, Vec<&&SnapshotNode>)> = by_id
+        .into_iter()
+        .filter(|(_, group)| group.len() > 1)
+        .collect();
+    // A map has no order of its own, and a finding list that reshuffles
+    // between runs is a bad diff.
+    duplicates.sort_by_key(|(test_id, _)| *test_id);
+
+    duplicates
+        .into_iter()
+        .map(|(test_id, group)| {
+            let interactive = group.iter().any(|node| is_interactive(node.role));
+            let first = group[0];
+
+            Finding {
+                severity: if interactive { "serious" } else { "warning" },
+                check: "duplicate-id",
+                message: format!(
+                    "#{test_id} names {} elements in this window. A suffix match takes the \
+                     first, so anything targeting it — a click, a wait, a recorded script — \
+                     may act on the wrong one. Give them ids of their own.",
+                    group.len()
+                ),
+                role: first.role,
+                test_id: Some(test_id.to_string()),
+                element: shorten_element_id(&first.full_id),
+                source: first.source.clone(),
+                bounds: None,
+            }
+        })
+        .collect()
 }
 
 fn handle_get_element(
@@ -2829,6 +3100,154 @@ mod tests {
         let error = expand_ref("@e9999").expect_err("no such ref");
         assert!(error.contains("@e9999"), "{error}");
         assert!(error.contains("ui_snapshot"), "{error}");
+    }
+
+    fn audit(tree: &[UiElement], min_target: f32) -> Vec<Finding> {
+        let nodes = snapshot_nodes(tree, false);
+        let mut flat = Vec::new();
+        flatten_snapshot(&nodes, &mut flat);
+        let mut findings = audit_controls(&flat, min_target);
+        findings.extend(audit_ids(&flat));
+        findings
+    }
+
+    fn button(id: &str, text: &[&str]) -> UiElement {
+        ui_element(
+            id,
+            Some("crates/ui/src/button/button.rs:42:5"),
+            text,
+            vec![],
+        )
+    }
+
+    /// An icon button with no label is the classic one: a screen reader has
+    /// nothing to say, and an agent has nothing to match on.
+    #[test]
+    fn a_control_with_no_text_is_serious() {
+        // A generous minimum, so only the naming check can fire.
+        let findings = audit(&[button("W/a.bell[0]", &[])], 1.0);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].check, "unnamed-control");
+        assert_eq!(findings[0].severity, "serious");
+        assert_eq!(findings[0].test_id.as_deref(), Some("bell"));
+        assert_eq!(
+            findings[0].source.as_deref(),
+            Some("crates/ui/src/button/button.rs:42:5"),
+            "a finding without a line to open is a chore"
+        );
+    }
+
+    #[test]
+    fn a_named_control_of_a_decent_size_is_fine() {
+        let findings = audit(&[button("W/a.save[0]", &["Save"])], 10.0);
+        assert!(findings.is_empty(), "{:?}", findings[0].check);
+    }
+
+    #[test]
+    fn a_target_under_the_minimum_is_a_warning() {
+        // The helper paints everything 10x10.
+        let findings = audit(&[button("W/a.save[0]", &["Save"])], 24.0);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].check, "target-too-small");
+        assert_eq!(findings[0].severity, "warning");
+        assert!(
+            findings[0].message.contains("10x10"),
+            "{}",
+            findings[0].message
+        );
+    }
+
+    /// Text alone does not make something a control, so a label is not audited
+    /// as one.
+    #[test]
+    fn only_interactive_elements_are_audited_as_controls() {
+        let label = ui_element(
+            "W/a.title[0]",
+            Some("crates/ui/src/label.rs:1:1"),
+            &["Settings"],
+            vec![],
+        );
+        assert!(audit(&[label], 24.0).is_empty());
+    }
+
+    /// The finding that matters to both readers of this tool: an id that names
+    /// several things breaks a screen reader's promise and a recorded script
+    /// alike.
+    #[test]
+    fn an_id_naming_several_controls_is_serious() {
+        let findings = audit(
+            &[
+                button("W/a.item[0]", &["One"]),
+                button("W/a.item[1]", &["Two"]),
+                button("W/a.item[2]", &["Three"]),
+            ],
+            10.0,
+        );
+
+        let duplicate = findings
+            .iter()
+            .find(|finding| finding.check == "duplicate-id")
+            .expect("a duplicate finding");
+        assert_eq!(duplicate.severity, "serious");
+        assert!(
+            duplicate.message.contains("names 3 elements"),
+            "{}",
+            duplicate.message
+        );
+        assert_eq!(duplicate.test_id.as_deref(), Some("item"));
+    }
+
+    #[test]
+    fn a_repeated_id_on_things_you_cannot_click_is_only_a_warning() {
+        let panel =
+            |id: &str| ui_element(id, Some("crates/ui/src/group_box.rs:1:1"), &["x"], vec![]);
+        let findings = audit(&[panel("W/a.panel[0]"), panel("W/a.panel[1]")], 1.0);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].check, "duplicate-id");
+        assert_eq!(findings[0].severity, "warning");
+    }
+
+    #[test]
+    fn severity_ranks_order_the_list() {
+        assert!(severity_rank("serious") > severity_rank("warning"));
+        assert!(severity_rank("warning") > severity_rank("none"));
+        assert_eq!(severity_rank("nonsense"), 0);
+    }
+
+    /// `none` means report without gating. An earlier version compared against
+    /// a floor of one, which quietly turned it into "warning" — caught by
+    /// running the audit against a real app, not by reading the code.
+    #[test]
+    fn fail_on_none_always_passes() {
+        let findings = audit(&[button("W/a.bell[0]", &[])], 1.0);
+        assert_eq!(findings.len(), 1, "a serious finding to gate on");
+
+        assert!(!audit_passes(&findings, "serious"));
+        assert!(!audit_passes(&findings, "warning"));
+        assert!(audit_passes(&findings, "none"));
+    }
+
+    #[test]
+    fn a_warning_only_fails_at_the_warning_threshold() {
+        // 10x10, named: too small, nothing worse.
+        let findings = audit(&[button("W/a.save[0]", &["Save"])], 24.0);
+        assert_eq!(findings[0].severity, "warning");
+
+        assert!(audit_passes(&findings, "serious"));
+        assert!(!audit_passes(&findings, "warning"));
+    }
+
+    #[test]
+    fn a_clean_window_passes_at_every_threshold() {
+        let findings = audit(&[button("W/a.save[0]", &["Save"])], 1.0);
+        assert!(findings.is_empty());
+
+        for threshold in ["serious", "warning", "none"] {
+            assert!(audit_passes(&findings, threshold), "{threshold}");
+        }
     }
 
     #[test]
