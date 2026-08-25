@@ -213,9 +213,8 @@ fn handle_ipc_connection(
 
         let response = resp_rx
             .recv_timeout(Duration::from_secs(10))
-            .unwrap_or_else(|_| IpcResponse {
-                id: String::new(),
-                result: Err("Request timeout (10s)".into()),
+            .unwrap_or_else(|_| {
+                IpcResponse::new(String::new(), Err("Request timeout (10s)".into()))
             });
 
         let response_json = serde_json::to_string(&response)?;
@@ -229,6 +228,19 @@ fn handle_ipc_connection(
 
 /// Handle an IPC request on the GPUI main thread
 fn handle_request(request: &IpcRequest, cx: &mut App) -> IpcResponse {
+    // Refuse before dispatching: this app and the server that called it are
+    // built from one crate but by different mechanisms, so they can drift
+    // apart, and a silently misread request is worse than a named refusal.
+    // The complaint travels back as a normal error, which is what puts it in
+    // front of whoever is driving the app.
+    if let Some(complaint) = version_complaint(
+        request.protocol_version,
+        "MCP server",
+        "`cargo build --release` inside the gpui-mcp checkout",
+    ) {
+        return IpcResponse::new(request.id.clone(), Err(complaint));
+    }
+
     let result = match request.method.as_str() {
         methods::GET_WINDOWS => handle_get_windows(cx),
         methods::CLICK_ELEMENT => handle_click_element(&request.params, cx),
@@ -245,10 +257,7 @@ fn handle_request(request: &IpcRequest, cx: &mut App) -> IpcResponse {
         _ => Err(format!("Unknown method: {}", request.method)),
     };
 
-    IpcResponse {
-        id: request.id.clone(),
-        result,
-    }
+    IpcResponse::new(request.id.clone(), result)
 }
 
 // ===== Helpers =====
