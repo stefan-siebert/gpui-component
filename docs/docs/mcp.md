@@ -168,9 +168,9 @@ to be the ones that hurt a screen-reader user and an agent equally:
 | `target-too-small` | warning | a side under 24 px (WCAG 2.2's minimum) |
 | `zero-size-control` | serious | an interactive element with no area at all |
 
-Run against this repository's own story app it finds nine unnamed controls —
-every icon-only button in the title bar, and the search field — that `#menu`
-names four buttons, and that `#item` names sixty-two sidebar rows.
+Icon-only buttons and repeated list-row ids are what a first run usually turns
+up, in any application — they are the normal state of a UI that nobody has had
+reason to name yet.
 
 The fix serves both readers at once: give the element a label and an id of its
 own, and it becomes announceable *and* targetable. Contrast is not checked and
