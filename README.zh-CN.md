@@ -19,6 +19,7 @@
 - **图表**：丰富的图表组件，用于可视化数据。
 - **编辑器**：高性能代码编辑器（支持最多 200K 行稳定性能），集成 LSP（诊断、补全、悬停提示等）。
 - **语法高亮**：基于 Tree Sitter 的 Editor 和 Markdown 组件的语法高亮。
+- **可被助手检查**（本 fork）：可选的 `mcp` feature，让 AI 助手在应用运行时查看并操作界面 —— 见 [MCP Inspector](https://github.com/stefan-siebert/gpui-component/blob/main/docs/zh-CN/docs/mcp.md)。
 
 ## Showcase
 

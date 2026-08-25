@@ -19,6 +19,7 @@ UI components for building fantastic desktop applications using [GPUI](https://g
 - **Charting**: Built-in charts for visualizing your data.
 - **Editor**: High performance code editor (Up to 200K lines for stable performance) with LSP (diagnostics, completion, hover, etc).
 - **Syntax Highlighting**: Syntax highlighting for editor and markdown components using Tree Sitter.
+- **Agent-Inspectable** (this fork): an optional `mcp` feature that lets an AI agent see and drive the running app — see [MCP Inspector](https://github.com/stefan-siebert/gpui-component/blob/main/docs/docs/mcp.md).
 
 ## Showcase
 

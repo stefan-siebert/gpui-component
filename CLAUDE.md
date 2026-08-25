@@ -192,6 +192,30 @@ Uses `rust-i18n` crate.
 - Localization files are located in `crates/ui/locales/`.
 - Only add `en`, `zh-CN`, `zh-HK` by default.
 
+## MCP Inspector (`mcp` feature)
+
+`crates/ui/src/mcp.rs` runs an IPC server inside the app so an AI agent can
+read the UI and drive it, through the separate `gpui-mcp-server` binary
+([stefan-siebert/gpui-mcp](https://github.com/stefan-siebert/gpui-mcp)). Fork
+only: it needs inspector APIs upstream gpui does not expose.
+
+- User-facing docs: `docs/docs/mcp.md` (and the `zh-CN` mirror). Design notes
+  and the reasons behind the behaviour: `docs/ARCHITECTURE.md` in the gpui-mcp
+  repo.
+- The wire types come from `gpui-mcp-protocol`; changing them is a wire change
+  affecting both repos. `PROTOCOL_VERSION` is bumped only when a mismatch
+  would fail *silently*.
+- Input methods answer only after the frame showing their effect was painted.
+  Anything reading `inspector_elements()` sees the last **painted** frame, so
+  that wait is what makes an answer true. Do not "simplify" `settle()` to one
+  frame callback: callbacks run before the draw, so one still sees the old
+  frame.
+- Roles in `ui_snapshot` are derived from the file that rendered an element,
+  which works because this crate keeps one widget per file. A new widget file
+  belongs in the `ROLES` table.
+
+Test it with the story app: `cargo run -p gpui-component-story --features mcp`.
+
 ## Documentation
 
 - Documentation source files are in `docs/`.
