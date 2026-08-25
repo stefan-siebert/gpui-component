@@ -1,7 +1,14 @@
-//! MCP (Model Context Protocol) Integration for GPUI Apps.
+//! MCP (Model Context Protocol) integration for GPUI apps.
 //!
-//! Starts an IPC server that allows the gpui-mcp-server to
-//! access UI state and dispatch events.
+//! Starts an IPC server inside the running app so an AI agent — through the
+//! separate `gpui-mcp-server` binary — can look at the UI and drive it: read
+//! what is on screen, click, type, press keys, dispatch named actions, take
+//! screenshots, and read a state snapshot the app defines. The agent checks a
+//! UI change the way a person would, by using the app.
+//!
+//! The prose version of all this, aimed at someone integrating the feature,
+//! is the *MCP Inspector* page in `docs/`. The agent-facing documentation is
+//! served by the server itself, from its `gpui_guide` tool.
 //!
 //! ## Usage
 //!
@@ -25,6 +32,42 @@
 //! Including both the app name and the PID lets multiple GPUI apps — and
 //! multiple instances of the same app — coexist without collision, while
 //! still allowing the `gpui-mcp-server` to discover and filter by app.
+//!
+//! ## How a request is answered
+//!
+//! A listener thread accepts a connection, reads one newline-delimited JSON
+//! request, and hands it to the GPUI main thread, which wakes for it — an
+//! idle app does no work here. Requests are answered one at a time, in
+//! arrival order: an agent drives one thing at a time, and letting a later
+//! call overtake a [`methods::WAIT_FOR`] would reorder inputs it meant as a
+//! sequence.
+//!
+//! ## The frame contract
+//!
+//! Everything readable here — the element tree, the snapshot, screenshots —
+//! comes from the **last painted frame**, because that is where gpui's
+//! inspector data lives. An answer assembled straight after a click would
+//! therefore describe the app *before* the click.
+//!
+//! So the input methods do not answer until the frame showing their effect
+//! has been painted, and `settled` says whether that frame arrived. What this
+//! cannot cover is work the app starts on its own — an async load, a
+//! debounce, an animation — which is what [`methods::WAIT_FOR`] is for.
+//!
+//! ## Naming things
+//!
+//! [`methods::UI_SNAPSHOT`] prints one line per element that means something.
+//! An element earns its line by having a role, an id somebody wrote, or text;
+//! the rest is layout scaffolding and is dropped, its children taking its
+//! place. Roles come from the file that rendered the element — one widget per
+//! file means `button/button.rs` renders a `button` — so an app on this crate
+//! gets a semantic vocabulary without annotating anything.
+//!
+//! ## Security
+//!
+//! This gives anything that can reach the socket full control of the UI and a
+//! view of its state. It is a development tool: keep it behind a feature flag
+//! and never enable it in a shipped build.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
@@ -349,6 +392,7 @@ fn dispatch_sync(
         methods::SEND_KEY => handle_send_key(params, cx),
         methods::GET_APP_STATE => handle_get_app_state(cx),
         methods::GET_LOGS => handle_get_logs(),
+        methods::UI_SNAPSHOT => handle_ui_snapshot(params, cx),
         methods::INSPECT_UI_TREE => handle_inspect_ui_tree(params, cx),
         methods::GET_ELEMENT => handle_get_element(params, cx),
         methods::TAKE_SCREENSHOT => handle_take_screenshot(params, cx),
@@ -498,7 +542,7 @@ fn evaluate_wait(opts: &WaitForParams, cx: &mut App) -> Result<(bool, serde_json
     let mut holds = true;
 
     if opts.element_id.is_some() || opts.text.is_some() {
-        let query = opts.element_id.clone();
+        let query = opts.element_id.as_deref().map(expand_ref).transpose()?;
         let needle = opts.text.as_ref().map(|text| text.to_lowercase());
 
         let (element_found, text_found) =
@@ -989,6 +1033,8 @@ fn resolve_element_center(
     window_id: Option<&str>,
     cx: &mut App,
 ) -> Result<(gpui::Point<Pixels>, String), String> {
+    let query = expand_ref(query)?;
+    let query = query.as_str();
     let windows: Vec<gpui::AnyWindowHandle> = if let Some(wid) = window_id {
         cx.windows()
             .into_iter()
@@ -1160,6 +1206,13 @@ fn handle_inspect_ui_tree(
 ) -> Result<serde_json::Value, String> {
     let opts: InspectUiTreeParams = serde_json::from_value(params.clone()).unwrap_or_default();
 
+    // Expand a `@ref` from the last snapshot before anything looks for it.
+    let root_element_id = opts
+        .root_element_id
+        .as_deref()
+        .map(expand_ref)
+        .transpose()?;
+
     let compact = opts.format.as_deref() == Some("compact");
     // `is_active` reports default dispatch target, not OS focus. See `default_target_window_id`.
     let active_window_id = default_target_window_id(cx);
@@ -1187,7 +1240,7 @@ fn handle_inspect_ui_tree(
                     let mut element_children = build_element_tree(&window_id_str, inspector_elems);
 
                     // If root_element_id is set, find that subtree
-                    if let Some(ref root_id) = opts.root_element_id {
+                    if let Some(ref root_id) = root_element_id {
                         element_children = find_subtree(&element_children, root_id)
                             .map(|e| vec![e])
                             .unwrap_or_default();
@@ -1563,13 +1616,421 @@ fn restore_child_order(element: &mut UiElement) {
     }
 }
 
+// ===== Snapshot =====
+
+/// What this crate's own source layout says an element is.
+///
+/// The file that rendered an element is already in its `source_location`, and
+/// for gpui-component's widgets the file name *is* the role: `button/button.rs`
+/// renders a button. So every app built on this crate gets a semantic
+/// vocabulary for nothing, with not a line to annotate. An app's own widgets
+/// get no role here — they are recognised by the ids their author chose and by
+/// the text they paint.
+const ROLES: &[(&str, &str)] = &[
+    ("accordion", "group"),
+    ("alert", "alert"),
+    ("alert_dialog", "alertdialog"),
+    ("app_menu_bar", "menubar"),
+    ("avatar", "img"),
+    ("badge", "status"),
+    ("breadcrumb", "navigation"),
+    ("button", "button"),
+    ("button_group", "group"),
+    ("button_icon", "button"),
+    ("checkbox", "checkbox"),
+    ("collapsible", "group"),
+    ("color_picker", "colorpicker"),
+    ("combobox", "combobox"),
+    ("context_menu", "menu"),
+    ("data_table", "table"),
+    ("dialog", "dialog"),
+    ("dropdown_button", "button"),
+    ("dropdown_menu", "menu"),
+    ("group", "group"),
+    ("group_box", "group"),
+    ("hover_card", "tooltip"),
+    ("icon", "img"),
+    ("input", "textbox"),
+    ("kbd", "text"),
+    ("label", "text"),
+    ("link", "link"),
+    ("list", "list"),
+    ("list_item", "listitem"),
+    ("menu", "menu"),
+    ("menu_item", "menuitem"),
+    ("notification", "alert"),
+    ("number_input", "spinbutton"),
+    ("otp_input", "textbox"),
+    ("pagination", "navigation"),
+    ("popover", "dialog"),
+    ("popup_menu", "menu"),
+    ("progress", "progressbar"),
+    ("progress_circle", "progressbar"),
+    ("radio", "radio"),
+    ("rating", "rating"),
+    ("searchable_list", "list"),
+    ("select", "combobox"),
+    ("separator", "separator"),
+    ("sheet", "dialog"),
+    ("slider", "slider"),
+    ("spinner", "progressbar"),
+    ("status_bar", "status"),
+    ("stepper", "group"),
+    ("switch", "switch"),
+    ("tab", "tab"),
+    ("tab_bar", "tablist"),
+    ("table", "table"),
+    ("tag", "text"),
+    ("text_view", "text"),
+    ("title_bar", "banner"),
+    ("toggle", "button"),
+    ("tooltip", "tooltip"),
+    ("tree", "tree"),
+    ("virtual_list", "list"),
+];
+
+/// Roles that describe a region rather than a control.
+///
+/// A file renders more than one kind of thing: `title_bar.rs` paints the title
+/// bar *and* its close button, so the file name alone would label that button
+/// "banner". A region role is therefore only used for an element that has
+/// something inside it; a leaf falls back to its id and its text, which is
+/// vague but not wrong.
+const REGION_ROLES: &[&str] = &[
+    "alert",
+    "alertdialog",
+    "banner",
+    "dialog",
+    "form",
+    "group",
+    "list",
+    "menu",
+    "menubar",
+    "navigation",
+    "status",
+    "table",
+    "tablist",
+    "tree",
+];
+
+/// Roles an agent can act on, for `interactive_only`.
+const INTERACTIVE_ROLES: &[&str] = &[
+    "button",
+    "checkbox",
+    "colorpicker",
+    "combobox",
+    "link",
+    "listitem",
+    "menuitem",
+    "radio",
+    "rating",
+    "slider",
+    "spinbutton",
+    "switch",
+    "tab",
+    "textbox",
+    "tree",
+];
+
+fn is_path_separator(c: char) -> bool {
+    c == '/' || c == std::path::MAIN_SEPARATOR
+}
+
+fn role_for(source_location: &str) -> Option<&'static str> {
+    let file = source_location
+        .rsplit(is_path_separator)
+        .next()
+        .unwrap_or(source_location);
+    let stem = file.split('.').next().unwrap_or(file);
+
+    ROLES
+        .iter()
+        .find(|(name, _)| *name == stem)
+        .map(|(_, role)| *role)
+}
+
+fn is_interactive(role: Option<&str>) -> bool {
+    role.is_some_and(|role| INTERACTIVE_ROLES.contains(&role))
+}
+
+/// The last id segment an app actually chose, if it chose one.
+///
+/// gpui ids mix names somebody wrote with names it generated:
+/// `view-4294967734`, numeric paths like `1-0-0`, and type names in CamelCase.
+/// A lowercase, dashed or underscored segment is the written kind — the only
+/// kind worth printing and worth telling an agent to target.
+fn test_id_of(global_id: &str) -> Option<&str> {
+    let segment = global_id.rsplit('.').next()?;
+
+    if segment.starts_with("view-") {
+        return None;
+    }
+    let written = segment
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase())
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+
+    written.then_some(segment)
+}
+
+/// The text painted inside an element, short enough to read in a list.
+fn name_of(element: &UiElement) -> Option<String> {
+    let joined = element
+        .text_content
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    (!joined.is_empty()).then(|| truncate_chars(&joined, 60))
+}
+
+fn truncate_chars(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let mut short: String = text.chars().take(limit).collect();
+    short.push('…');
+    short
+}
+
+/// What the last snapshot handed out, so `@e7` can be turned back into an
+/// element.
+///
+/// One table, replaced whole by each snapshot: refs are a shorthand for "the
+/// thing on line 7 of what I just showed you", and keeping older ones alive
+/// would let an agent act on a line it can no longer see.
+static SNAPSHOT_REFS: std::sync::LazyLock<Mutex<SnapshotRefs>> =
+    std::sync::LazyLock::new(|| Mutex::new(SnapshotRefs::default()));
+
+#[derive(Default)]
+struct SnapshotRefs {
+    id: u64,
+    by_ref: std::collections::HashMap<String, String>,
+}
+
+/// Turn `@e7` back into the element the last snapshot gave that name to.
+/// Anything not starting with `@` passes through untouched.
+fn expand_ref(query: &str) -> Result<String, String> {
+    let Some(reference) = query.strip_prefix('@') else {
+        return Ok(query.to_string());
+    };
+
+    let refs = SNAPSHOT_REFS
+        .lock()
+        .map_err(|_| "The snapshot ref table is poisoned.".to_string())?;
+
+    refs.by_ref.get(reference).cloned().ok_or_else(|| {
+        format!(
+            "Unknown ref '{}'. Refs are handed out by ui_snapshot and the next snapshot \
+             replaces them; take a fresh snapshot and use a ref it printed. \
+             (Current snapshot: {}.)",
+            query, refs.id
+        )
+    })
+}
+
+/// One line of a snapshot.
+struct SnapshotNode {
+    role: Option<&'static str>,
+    name: Option<String>,
+    test_id: Option<String>,
+    full_id: String,
+    bounds: Bounds,
+    children: Vec<SnapshotNode>,
+}
+
+/// Keep the elements that mean something and flatten away the rest.
+///
+/// An element earns a line by having a role, an id somebody chose, or text.
+/// Everything else is layout scaffolding: it is dropped and its children take
+/// its place, which is where most of the size difference against the full tree
+/// comes from.
+fn snapshot_nodes(elements: &[UiElement], interactive_only: bool) -> Vec<SnapshotNode> {
+    let mut nodes = Vec::new();
+
+    for element in elements {
+        let children = snapshot_nodes(&element.children, interactive_only);
+
+        let role = element
+            .source_location
+            .as_deref()
+            .and_then(role_for)
+            .filter(|role| !REGION_ROLES.contains(role) || !children.is_empty());
+        let test_id = test_id_of(strip_id_decoration(&element.id)).map(str::to_string);
+        let name = name_of(element);
+
+        let says_something = role.is_some() || test_id.is_some() || name.is_some();
+        let wanted = says_something && (!interactive_only || is_interactive(role));
+
+        if wanted {
+            nodes.push(SnapshotNode {
+                role,
+                name,
+                test_id,
+                full_id: element.id.clone(),
+                bounds: element.bounds.clone(),
+                children,
+            });
+        } else {
+            nodes.extend(children);
+        }
+    }
+
+    nodes
+}
+
+/// Keep matching nodes and the ancestors that lead to them.
+fn filter_snapshot(nodes: &mut Vec<SnapshotNode>, needle: &str) {
+    nodes.retain_mut(|node| {
+        filter_snapshot(&mut node.children, needle);
+
+        let hit = node.role.is_some_and(|role| role.contains(needle))
+            || node
+                .name
+                .as_ref()
+                .is_some_and(|name| name.to_lowercase().contains(needle))
+            || node
+                .test_id
+                .as_ref()
+                .is_some_and(|test_id| test_id.contains(needle));
+
+        hit || !node.children.is_empty()
+    });
+}
+
+/// A rendered snapshot, and the refs it handed out.
+#[derive(Default)]
+struct RenderedSnapshot {
+    text: String,
+    refs: std::collections::HashMap<String, String>,
+    shown: usize,
+    truncated: bool,
+}
+
+fn render_snapshot(
+    nodes: &[SnapshotNode],
+    depth: usize,
+    include_bounds: bool,
+    limit: usize,
+    out: &mut RenderedSnapshot,
+) {
+    for node in nodes {
+        if out.shown >= limit {
+            out.truncated = true;
+            return;
+        }
+
+        out.shown += 1;
+        let reference = format!("e{}", out.shown);
+        out.refs.insert(reference.clone(), node.full_id.clone());
+
+        out.text.push_str(&"  ".repeat(depth));
+        out.text.push_str("- ");
+        out.text.push_str(node.role.unwrap_or("node"));
+        if let Some(name) = &node.name {
+            out.text.push_str(&format!(" \"{}\"", name));
+        }
+        if let Some(test_id) = &node.test_id {
+            out.text.push_str(&format!(" #{}", test_id));
+        }
+        out.text.push_str(&format!(" @{}", reference));
+        if include_bounds {
+            out.text.push_str(&format!(
+                " [{:.0},{:.0} {:.0}x{:.0}]",
+                node.bounds.x, node.bounds.y, node.bounds.width, node.bounds.height
+            ));
+        }
+        out.text.push('\n');
+
+        render_snapshot(&node.children, depth + 1, include_bounds, limit, out);
+        if out.truncated {
+            return;
+        }
+    }
+}
+
+/// Answer [`methods::UI_SNAPSHOT`]: the window as a short, readable list.
+///
+/// This is what an agent should look at first. The full tree costs tens of
+/// thousands of tokens on a real UI and answers questions about layout; this
+/// costs a fraction of that and answers the question actually being asked,
+/// which is "what is on screen and what can I do to it".
+fn handle_ui_snapshot(
+    params: &serde_json::Value,
+    cx: &mut App,
+) -> Result<serde_json::Value, String> {
+    let opts: UiSnapshotParams = serde_json::from_value(params.clone()).unwrap_or_default();
+
+    let handle = resolve_window(opts.window_id.as_deref(), cx)?;
+    let window_id = format!("{:?}", handle.window_id());
+
+    let mut elements = handle
+        .update(cx, |_, window, _| {
+            build_element_tree(&window_id, window.inspector_elements())
+        })
+        .map_err(|e| e.to_string())?;
+    let painted = count_elements(&elements);
+
+    if let Some(root) = &opts.root_element_id {
+        let root = expand_ref(root)?;
+        match find_subtree(&elements, &root) {
+            Some(subtree) => elements = vec![subtree],
+            None => {
+                let candidates = collect_match_candidates(&root, opts.window_id.as_deref(), cx, 5);
+                return Err(not_found_error(&root, candidates));
+            }
+        }
+    }
+
+    let mut nodes = snapshot_nodes(&elements, opts.interactive_only);
+    if let Some(filter) = &opts.filter {
+        filter_snapshot(&mut nodes, &filter.to_lowercase());
+    }
+
+    let limit = opts
+        .max_elements
+        .unwrap_or(DEFAULT_SNAPSHOT_ELEMENTS)
+        .max(1);
+    let mut rendered = RenderedSnapshot::default();
+    render_snapshot(&nodes, 0, opts.include_bounds, limit, &mut rendered);
+
+    let snapshot_id = {
+        let mut refs = SNAPSHOT_REFS
+            .lock()
+            .map_err(|_| "The snapshot ref table is poisoned.".to_string())?;
+        refs.id += 1;
+        refs.by_ref = rendered.refs;
+        refs.id
+    };
+
+    mcp_log(format!(
+        "Snapshot {} of {}: {} lines from {} painted elements",
+        snapshot_id, window_id, rendered.shown, painted
+    ));
+
+    Ok(json!({
+        "snapshot_id": snapshot_id,
+        "window_id": window_id,
+        "elements": rendered.shown,
+        "painted_elements": painted,
+        "truncated": rendered.truncated,
+        "snapshot": rendered.text,
+    }))
+}
+
 fn handle_get_element(
     params: &serde_json::Value,
     cx: &mut App,
 ) -> Result<serde_json::Value, String> {
     let params: GetElementParams =
         serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
-    let query = &params.element_id;
+    let query = expand_ref(&params.element_id)?;
+    let query = query.as_str();
 
     // Build the full tree for each window and search by ID.
     // This ensures the returned element includes its full subtree and text content.
@@ -1580,7 +2041,7 @@ fn handle_get_element(
             let children = build_element_tree(&window_id_str, inspector_elems);
 
             // Check if query matches the window itself
-            if &window_id_str == query {
+            if window_id_str == query {
                 let converted = convert_bounds(window.bounds());
                 return Some(UiElement {
                     id: window_id_str,
@@ -1620,6 +2081,7 @@ fn handle_take_screenshot(
     let opts: TakeScreenshotParams = serde_json::from_value(params.clone()).unwrap_or_default();
 
     let handle = resolve_window(opts.window_id.as_deref(), cx)?;
+    let crop_to = opts.element_id.as_deref().map(expand_ref).transpose()?;
 
     let (image, scale_factor) = handle
         .update(cx, |_, window, _cx| {
@@ -1631,7 +2093,7 @@ fn handle_take_screenshot(
         .map_err(|e| format!("Failed to render screenshot: {}", e))?;
 
     // If element_id is set, resolve bounds and crop
-    let (final_image, element_info) = if let Some(ref element_id) = opts.element_id {
+    let (final_image, element_info) = if let Some(ref element_id) = crop_to {
         // Resolve element bounds (in logical pixels)
         let bounds_result = handle
             .update(cx, |_, window, _cx| {
@@ -2090,6 +2552,283 @@ mod tests {
         let tree = build_element_tree("W", vec![element("alone"), element("other")]);
         assert_eq!(tree.len(), 2);
         assert!(tree.iter().all(|element| element.children.is_empty()));
+    }
+
+    /// A painted element for the snapshot tests.
+    fn ui_element(
+        id: &str,
+        source: Option<&str>,
+        text: &[&str],
+        children: Vec<UiElement>,
+    ) -> UiElement {
+        UiElement {
+            id: id.to_string(),
+            element_type: "test".into(),
+            bounds: Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            visible: true,
+            children,
+            properties: Default::default(),
+            source_location: source.map(str::to_string),
+            style_json: None,
+            content_size: None,
+            text_content: text.iter().map(|line| line.to_string()).collect(),
+        }
+    }
+
+    fn render(nodes: &[SnapshotNode]) -> String {
+        let mut out = RenderedSnapshot::default();
+        render_snapshot(nodes, 0, false, 100, &mut out);
+        out.text
+    }
+
+    /// The file that rendered an element is its role, for this crate's own
+    /// widgets — that is the whole trick, so it had better hold.
+    #[test]
+    fn a_role_comes_from_the_file_that_rendered_it() {
+        assert_eq!(
+            role_for("crates/ui/src/button/button.rs:42:5"),
+            Some("button")
+        );
+        assert_eq!(
+            role_for("crates/ui/src/input/input.rs:1:1"),
+            Some("textbox")
+        );
+        assert_eq!(
+            role_for("crates/ui/src/list/list_item.rs:9:3"),
+            Some("listitem")
+        );
+        // Windows records its paths with backslashes.
+        let windows_path =
+            ["crates", "ui", "src", "checkbox.rs:7:1"].join(std::path::MAIN_SEPARATOR_STR);
+        assert_eq!(role_for(&windows_path), Some("checkbox"));
+        // An app's own widget has no role until it says what it is.
+        assert_eq!(role_for("src/my_widget.rs:3:1"), None);
+        assert_eq!(role_for("crates/ui/src/button/mod.rs:1:1"), None);
+    }
+
+    #[test]
+    fn only_written_id_segments_count_as_test_ids() {
+        assert_eq!(test_id_of("view-1.root.save-button"), Some("save-button"));
+        assert_eq!(test_id_of("view-1.search_input"), Some("search_input"));
+        assert_eq!(test_id_of("view-1.item"), Some("item"));
+
+        // Generated: a view handle, a numeric path, a type name.
+        assert_eq!(test_id_of("root.view-4294967734"), None);
+        assert_eq!(test_id_of("root.1-0-0"), None);
+        assert_eq!(test_id_of("root.ResizablePanelGroup"), None);
+    }
+
+    #[test]
+    fn a_name_is_the_painted_text_kept_short() {
+        let element = ui_element("W/a[0]", None, &["  Save  ", "", "changes"], vec![]);
+        assert_eq!(name_of(&element).as_deref(), Some("Save changes"));
+
+        let empty = ui_element("W/a[0]", None, &["", "   "], vec![]);
+        assert!(name_of(&empty).is_none());
+
+        let long = "x".repeat(80);
+        let wordy = ui_element("W/a[0]", None, &[&long], vec![]);
+        let name = name_of(&wordy).unwrap();
+        assert_eq!(name.chars().count(), 61, "60 characters plus the ellipsis");
+        assert!(name.ends_with('…'));
+    }
+
+    /// The size difference against the full tree comes from dropping the
+    /// scaffolding, so the scaffolding must actually be dropped — and what was
+    /// inside it must survive.
+    #[test]
+    fn layout_wrappers_are_dropped_and_their_children_kept() {
+        let tree = vec![ui_element(
+            "W/view-1.ResizablePanelGroup[0]",
+            Some("crates/ui/src/resizable/mod.rs:1:1"),
+            &[],
+            vec![ui_element(
+                "W/view-1.ResizablePanelGroup.1-0-0[0]",
+                Some("src/layout.rs:1:1"),
+                &[],
+                vec![ui_element(
+                    "W/view-1.ResizablePanelGroup.1-0-0.save-button[0]",
+                    Some("crates/ui/src/button/button.rs:1:1"),
+                    &["Save"],
+                    vec![],
+                )],
+            )],
+        )];
+
+        let nodes = snapshot_nodes(&tree, false);
+        assert_eq!(render(&nodes), "- button \"Save\" #save-button @e1\n");
+    }
+
+    #[test]
+    fn an_element_earns_a_line_by_role_id_or_text() {
+        let tree = vec![
+            ui_element("W/a.plain[0]", Some("src/x.rs:1:1"), &[], vec![]),
+            ui_element("W/a.1-0-0[0]", Some("src/x.rs:1:1"), &["hello"], vec![]),
+            ui_element(
+                "W/a.2-0-0[0]",
+                Some("crates/ui/src/switch.rs:1:1"),
+                &[],
+                vec![],
+            ),
+        ];
+
+        assert_eq!(
+            render(&snapshot_nodes(&tree, false)),
+            "- node #plain @e1\n- node \"hello\" @e2\n- switch @e3\n"
+        );
+    }
+
+    /// `title_bar.rs` paints the title bar and its close button alike, so the
+    /// file name would call that button a banner. A region role has to earn
+    /// itself by containing something.
+    #[test]
+    fn a_region_role_needs_something_inside_it() {
+        let tree = vec![ui_element(
+            "W/a.title-bar[0]",
+            Some("crates/ui/src/title_bar.rs:1:1"),
+            &[],
+            vec![ui_element(
+                "W/a.title-bar.close[0]",
+                Some("crates/ui/src/title_bar.rs:9:1"),
+                &[],
+                vec![],
+            )],
+        )];
+
+        assert_eq!(
+            render(&snapshot_nodes(&tree, false)),
+            "- banner #title-bar @e1\n  - node #close @e2\n"
+        );
+    }
+
+    #[test]
+    fn interactive_only_lifts_the_things_you_can_act_on() {
+        let tree = vec![ui_element(
+            "W/a.panel[0]",
+            Some("crates/ui/src/group_box.rs:1:1"),
+            &[],
+            vec![
+                ui_element(
+                    "W/a.panel.title[0]",
+                    Some("crates/ui/src/label.rs:1:1"),
+                    &["Settings"],
+                    vec![],
+                ),
+                ui_element(
+                    "W/a.panel.dark-mode[0]",
+                    Some("crates/ui/src/switch.rs:1:1"),
+                    &[],
+                    vec![],
+                ),
+            ],
+        )];
+
+        assert_eq!(
+            render(&snapshot_nodes(&tree, true)),
+            "- switch #dark-mode @e1\n"
+        );
+    }
+
+    #[test]
+    fn nesting_shows_as_indentation_and_refs_run_in_reading_order() {
+        let tree = vec![ui_element(
+            "W/a.sidebar[0]",
+            Some("crates/ui/src/sidebar/menu.rs:1:1"),
+            &[],
+            vec![
+                ui_element(
+                    "W/a.sidebar.item[0]",
+                    Some("crates/ui/src/list/list_item.rs:1:1"),
+                    &["One"],
+                    vec![],
+                ),
+                ui_element(
+                    "W/a.sidebar.item[1]",
+                    Some("crates/ui/src/list/list_item.rs:1:1"),
+                    &["Two"],
+                    vec![],
+                ),
+            ],
+        )];
+
+        assert_eq!(
+            render(&snapshot_nodes(&tree, false)),
+            "- menu #sidebar @e1\n  - listitem \"One\" #item @e2\n  - listitem \"Two\" #item @e3\n"
+        );
+    }
+
+    #[test]
+    fn a_filter_keeps_the_path_to_what_matched() {
+        let tree = vec![ui_element(
+            "W/a.sidebar[0]",
+            Some("crates/ui/src/sidebar/menu.rs:1:1"),
+            &[],
+            vec![
+                ui_element(
+                    "W/a.sidebar.item[0]",
+                    Some("crates/ui/src/list/list_item.rs:1:1"),
+                    &["Accordion"],
+                    vec![],
+                ),
+                ui_element(
+                    "W/a.sidebar.item[1]",
+                    Some("crates/ui/src/list/list_item.rs:1:1"),
+                    &["Badge"],
+                    vec![],
+                ),
+            ],
+        )];
+
+        let mut nodes = snapshot_nodes(&tree, false);
+        filter_snapshot(&mut nodes, "accordion");
+        assert_eq!(
+            render(&nodes),
+            "- menu #sidebar @e1\n  - listitem \"Accordion\" #item @e2\n"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_says_when_it_stopped_early() {
+        let tree: Vec<UiElement> = (0..5)
+            .map(|index| {
+                ui_element(
+                    &format!("W/a.row-{index}[0]"),
+                    Some("crates/ui/src/button/button.rs:1:1"),
+                    &[],
+                    vec![],
+                )
+            })
+            .collect();
+
+        let mut out = RenderedSnapshot::default();
+        render_snapshot(&snapshot_nodes(&tree, false), 0, false, 2, &mut out);
+
+        assert!(out.truncated);
+        assert_eq!(out.shown, 2);
+        assert_eq!(out.refs.len(), 2);
+    }
+
+    #[test]
+    fn an_id_that_is_not_a_ref_passes_through_untouched() {
+        assert_eq!(expand_ref("save-button").unwrap(), "save-button");
+        assert_eq!(
+            expand_ref("WindowId(1)/view-1.panel[0]").unwrap(),
+            "WindowId(1)/view-1.panel[0]"
+        );
+    }
+
+    /// A ref from a snapshot that has been replaced must fail loudly rather
+    /// than resolve to whatever now sits on that line.
+    #[test]
+    fn an_unknown_ref_says_to_take_a_new_snapshot() {
+        let error = expand_ref("@e9999").expect_err("no such ref");
+        assert!(error.contains("@e9999"), "{error}");
+        assert!(error.contains("ui_snapshot"), "{error}");
     }
 
     #[test]
