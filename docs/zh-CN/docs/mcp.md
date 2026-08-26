@@ -68,6 +68,14 @@ app.run(|cx| {
         gpui_component::mcp::mcp_set_app_state_provider(|cx| {
             serde_json::json!({ "rows": 0, "selected": null })
         });
+
+        // 可选：定义什么是「已知的初始状态」，供 `reset_app` 使用。
+        // 这样录制好的脚本就能从一个确定的状态开始，而不是从上一次
+        // 会话留下的任何状态开始。
+        gpui_component::mcp::mcp_set_reset_hook(|_arguments, cx| {
+            // 关闭文档、清除选择、回到第一个标签页
+            Ok(())
+        });
     }
 
     // ... windows, views ...
@@ -99,6 +107,8 @@ GPUI 主线程上处理，因此能看到一致的状态，也能派发真实输
 | `batch` | 把上面多个调用合成一个请求 |
 | `take_screenshot` | 由 GPUI 自己渲染窗口或单个元素 |
 | `get_logs` | `mcp_log` 缓冲区 |
+| `set_viewport` | 把窗口调整到确定的内容尺寸，使布局可复现 |
+| `reset_app` | 通过 `mcp_set_reset_hook` 把应用恢复到已知的初始状态 |
 | `replay_script` | 回放录制好的会话 —— 既可用于恢复到某个状态，也可作为测试 |
 
 ## 助手看到的内容

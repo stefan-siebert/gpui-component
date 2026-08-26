@@ -3152,6 +3152,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
+ "image",
  "serde",
  "serde_json",
  "uds_windows",

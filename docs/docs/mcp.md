@@ -70,6 +70,14 @@ app.run(|cx| {
         gpui_component::mcp::mcp_set_app_state_provider(|cx| {
             serde_json::json!({ "rows": 0, "selected": null })
         });
+
+        // Optional: what a known starting state is, for `reset_app`. A
+        // recorded script can then begin from one instead of from
+        // whatever the last session left behind.
+        gpui_component::mcp::mcp_set_reset_hook(|_arguments, cx| {
+            // close documents, clear selection, go back to the first tab
+            Ok(())
+        });
     }
 
     // ... windows, views ...
@@ -103,6 +111,8 @@ server binary and registering it with an agent is described in the
 | `batch` | several of the above in one request |
 | `take_screenshot` | the window or one element, rendered by GPUI itself |
 | `get_logs` | the `mcp_log` buffer |
+| `set_viewport` | resize a window to an exact content size, so layout is reproducible |
+| `reset_app` | put the app back into a known starting state, via `mcp_set_reset_hook` |
 | `replay_script` | replay a recorded session — to reach a state, or as a test |
 
 ## What the agent sees

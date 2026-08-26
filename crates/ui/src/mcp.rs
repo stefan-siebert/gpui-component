@@ -145,6 +145,32 @@ pub fn mcp_set_app_state_provider(provider: impl Fn(&App) -> serde_json::Value +
     }
 }
 
+/// Registered once at startup via [`mcp_set_reset_hook`].
+static RESET_HOOK: std::sync::LazyLock<
+    Mutex<Option<Box<dyn Fn(Option<&serde_json::Value>, &mut App) -> Result<(), String> + Send>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(None));
+
+/// Register what `reset_app` should do: put the app back into a known
+/// starting state.
+///
+/// This is the other half of determinism, and the half only the app can
+/// supply. Pinning the window size makes layout reproducible; nothing on the
+/// MCP side can make an app that was left on the third tab with two files open
+/// behave like one that just started. A replay from an undefined state passes
+/// or fails for reasons that have nothing to do with the change under test.
+///
+/// The hook runs on the main thread and receives whatever `arguments` the
+/// caller passed, so an app with more than one starting state can name which
+/// one it wants. Returning `Err` is how it says a reset was not possible;
+/// that reaches the caller and fails a replay step, which is the honest
+/// outcome. Only one hook can be registered; calling this again replaces it.
+pub fn mcp_set_reset_hook(
+    hook: impl Fn(Option<&serde_json::Value>, &mut App) -> Result<(), String> + Send + 'static,
+) {
+    if let Ok(mut guard) = RESET_HOOK.lock() {
+        *guard = Some(Box::new(hook));
+    }
+}
 /// Add a log entry (can be called from anywhere)
 pub fn mcp_log(message: impl Into<String>) {
     if let Ok(mut buffer) = LOG_BUFFER.lock() {
@@ -354,6 +380,9 @@ async fn dispatch(
     if method == methods::A11Y_TREE {
         return run_a11y_tree(params, cx).await;
     }
+    if method == methods::SET_VIEWPORT {
+        return run_set_viewport(params, cx).await;
+    }
 
     let window_id = params
         .get("window_id")
@@ -386,7 +415,11 @@ async fn dispatch(
 fn is_input_method(method: &str) -> bool {
     matches!(
         method,
-        methods::CLICK_ELEMENT | methods::SEND_KEY | methods::TYPE_TEXT | methods::EXECUTE_ACTION
+        methods::CLICK_ELEMENT
+            | methods::SEND_KEY
+            | methods::TYPE_TEXT
+            | methods::EXECUTE_ACTION
+            | methods::RESET_APP
     )
 }
 
@@ -411,8 +444,9 @@ fn dispatch_sync(
         methods::LIST_ACTIONS => handle_list_actions(params, cx),
         methods::GET_FOCUS_INFO => handle_get_focus_info(params, cx),
         methods::TYPE_TEXT => handle_type_text(params, cx),
+        methods::RESET_APP => handle_reset_app(params, cx),
         // All three are answered by `dispatch`, which never sends them here.
-        methods::WAIT_FOR | methods::BATCH | methods::A11Y_TREE => {
+        methods::WAIT_FOR | methods::BATCH | methods::A11Y_TREE | methods::SET_VIEWPORT => {
             Err(format!("{method} is answered asynchronously"))
         }
         _ => Err(format!("Unknown method: {}", method)),
@@ -2414,6 +2448,85 @@ async fn ensure_a11y_tree(window_id: Option<&str>, cx: &AsyncApp) {
     }
 }
 
+/// Answer [`methods::SET_VIEWPORT`].
+///
+/// Answered after the frame that shows the new size, like an input method and
+/// for the same reason: a caller that resizes and immediately reads the tree
+/// would be told about the layout it just replaced.
+async fn run_set_viewport(
+    params: &serde_json::Value,
+    cx: &AsyncApp,
+) -> Result<serde_json::Value, String> {
+    let opts: SetViewportParams =
+        serde_json::from_value(params.clone()).map_err(|e| format!("set_viewport: {e}"))?;
+
+    if !(opts.width.is_finite() && opts.height.is_finite()) || opts.width < 1.0 || opts.height < 1.0
+    {
+        return Err(format!(
+            "set_viewport needs a positive width and height in logical pixels, not {}x{}",
+            opts.width, opts.height
+        ));
+    }
+
+    let window_id = opts.window_id.clone();
+    cx.update(|cx| {
+        let handle = resolve_window(window_id.as_deref(), cx)?;
+        handle
+            .update(cx, |_, window, _| {
+                window.resize(gpui::size(px(opts.width), px(opts.height)));
+            })
+            .map_err(|e| e.to_string())
+    })?;
+
+    let settled = settle(window_id.as_deref(), cx).await;
+
+    cx.update(|cx| {
+        let handle = resolve_window(window_id.as_deref(), cx)?;
+        let (id, bounds) = (
+            format!("{:?}", handle.window_id()),
+            handle
+                .update(cx, |_, window, _| convert_bounds(window.bounds()))
+                .map_err(|e| e.to_string())?,
+        );
+
+        // The platform is allowed to refuse: a minimum size, a tiling window
+        // manager, a maximised window. Reporting what was actually reached
+        // rather than what was asked for is the difference between a script
+        // that is deterministic and one that believes it is.
+        Ok(json!({
+            "window_id": id,
+            "requested": { "width": opts.width, "height": opts.height },
+            "viewport": { "width": bounds.width, "height": bounds.height },
+            "honoured": (bounds.width - opts.width).abs() < 1.0
+                && (bounds.height - opts.height).abs() < 1.0,
+            "settled": settled,
+        }))
+    })
+}
+
+/// Answer [`methods::RESET_APP`] by calling the hook the app registered.
+fn handle_reset_app(params: &serde_json::Value, cx: &mut App) -> Result<serde_json::Value, String> {
+    let opts: ResetAppParams = serde_json::from_value(params.clone()).unwrap_or_default();
+
+    let hook = RESET_HOOK
+        .lock()
+        .map_err(|_| "The reset hook is poisoned.".to_string())?;
+    let Some(hook) = hook.as_ref() else {
+        // Saying "nothing happened" is the point. A replay that believes it
+        // started from a known state and did not is a green run hiding a bug.
+        return Err(
+            "This app has registered no reset hook, so there is nothing to reset to. \
+                    Call gpui_component::mcp::mcp_set_reset_hook at startup to define what a \
+                    known starting state is."
+                .to_string(),
+        );
+    };
+
+    hook(opts.arguments.as_ref(), cx)?;
+    mcp_log("reset_app: the app's reset hook ran");
+
+    Ok(json!({ "reset": true }))
+}
 /// Answer [`methods::A11Y_TREE`].
 ///
 /// Two things have to happen before the tree can be read, which is why this is
