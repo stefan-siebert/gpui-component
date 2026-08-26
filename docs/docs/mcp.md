@@ -196,12 +196,26 @@ offers.
 It is sparser than the window, because a node exists only where somebody
 annotated the element. Against this repo's own gallery that is 11 nodes over
 96 painted elements, and the answer reports both numbers rather than letting
-the tree pass for the whole UI. So `ui_snapshot` is how you see the window and
-`a11y_tree` is how you see what the annotated part of it announces; each node
-carries `element_id` and `source_location` to line the two up.
+the tree pass for the whole UI.
 
-GPUI builds the tree only while assistive technology is attached. The call
-switches the window into building it and waits a frame, which needs
+You rarely need the tool itself. `ui_snapshot` already folds the tree into its
+lines: where an element has a node, the declared role wins over the one
+inferred from the source file, the label supplies a name when nothing is
+painted, state is appended (`checked`, `selected`, `value="…"`), and the line
+ends in `✓` so a declared fact is never mistaken for an inferred one. The
+audit uses the same overlay — it reports `announced` beside `checked`, and
+`unnamed-control` now distinguishes an element that needs a label from one
+that needs a role first.
+
+The join is exact rather than approximate: gpui derives a node's id from the
+same `GlobalElementId` the inspector reports, and `InspectorElementInfo`
+carries it. Matching on the node's own leaf element id and source location
+would not do — this repo's four title-bar buttons share both.
+
+GPUI builds the tree only while assistive technology is attached. Reading it
+switches the window into building it and waits one frame, which is why the
+first `ui_snapshot`, `a11y_audit` or `a11y_tree` against a window costs a
+frame more than the ones after it. That needs
 `Window::set_a11y_force_active` from the patched gpui this crate builds
 against.
 

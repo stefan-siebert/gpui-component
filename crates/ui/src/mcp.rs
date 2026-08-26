@@ -360,6 +360,13 @@ async fn dispatch(
         .and_then(|value| value.as_str())
         .map(str::to_string);
 
+    // The snapshot and the audit read the accessibility tree wherever it
+    // reaches, so they switch it on themselves rather than reporting whatever
+    // an earlier call happened to leave behind.
+    if matches!(method, methods::UI_SNAPSHOT | methods::A11Y_AUDIT) {
+        ensure_a11y_tree(window_id.as_deref(), cx).await;
+    }
+
     let result = cx.update(|cx| dispatch_sync(method, params, cx))?;
 
     if !is_input_method(method) {
@@ -1308,6 +1315,7 @@ fn handle_inspect_ui_tree(
                             Some((converted.width, converted.height))
                         },
                         text_content: vec![],
+                        accesskit_node_id: 0,
                     }
                 })
                 .ok()
@@ -1333,6 +1341,7 @@ fn handle_inspect_ui_tree(
             style_json: None,
             content_size: None,
             text_content: vec![],
+            accesskit_node_id: 0,
         },
         window_count: cx.windows().len(),
         timestamp: std::time::SystemTime::now()
@@ -1535,6 +1544,7 @@ fn build_element_tree(
                     style_json: None,
                     content_size: Some((bounds.width, bounds.height)),
                     text_content: info.text_content,
+                    accesskit_node_id: info.accesskit_node_id,
                 },
             }
         })
@@ -1847,6 +1857,132 @@ fn expand_ref(query: &str) -> Result<String, String> {
     })
 }
 
+/// What the accessibility tree says about one element, in the snapshot's own
+/// vocabulary.
+///
+/// The tree is the better source wherever it reaches: a role there was
+/// declared by the widget, not inferred from the file that rendered it, and a
+/// label is what the control announces even when it paints nothing. It only
+/// reaches the elements somebody annotated, which is why this overlays the
+/// derived layer rather than replacing it.
+#[derive(Default)]
+struct A11yNode {
+    role: Option<&'static str>,
+    label: Option<String>,
+    /// Rendered state, in the order a line should read it.
+    state: Vec<String>,
+}
+
+/// Every annotated element of the last frame, keyed by the id gpui derives
+/// from the same `GlobalElementId` the inspector reports.
+///
+/// That key is the whole reason this is exact. A node records only the leaf of
+/// its element id and its source location, and the gallery's four title-bar
+/// buttons share both — matching on those would pick one of the four at
+/// random, which is the class of bug this project keeps finding in other
+/// people's ids.
+type A11yNodes = std::collections::HashMap<u64, A11yNode>;
+
+/// AccessKit roles in the vocabulary the snapshot already prints.
+///
+/// A role missing here leaves the derived one in place rather than printing
+/// something in a second vocabulary: `filter`, `interactive_only` and the
+/// audit all match on these strings, and two spellings of "button" would
+/// quietly halve every one of them.
+const A11Y_ROLES: &[(&str, &str)] = &[
+    ("Button", "button"),
+    ("CheckBox", "checkbox"),
+    ("ComboBox", "combobox"),
+    ("Dialog", "dialog"),
+    ("Link", "link"),
+    ("List", "list"),
+    ("ListBox", "listbox"),
+    ("ListItem", "listitem"),
+    ("Menu", "menu"),
+    ("MenuBar", "menubar"),
+    ("MenuItem", "menuitem"),
+    ("MultilineTextInput", "textbox"),
+    ("RadioButton", "radio"),
+    ("SearchInput", "textbox"),
+    ("Slider", "slider"),
+    ("Switch", "switch"),
+    ("Tab", "tab"),
+    ("TabList", "tablist"),
+    ("TextInput", "textbox"),
+];
+
+/// Read the accessibility tree of the last frame into a lookup.
+///
+/// An empty map is the honest answer whenever the tree was not built — no
+/// window, accessibility never switched on, a frame that never arrived. Every
+/// caller then prints exactly what it printed before this existed.
+fn a11y_nodes(window_id: Option<&str>, cx: &mut App) -> A11yNodes {
+    let Ok(handle) = resolve_window(window_id, cx) else {
+        return A11yNodes::new();
+    };
+    let Ok(Some(json)) = handle.update(cx, |_, window, _| window.debug_a11y_tree_json()) else {
+        return A11yNodes::new();
+    };
+    let Ok(tree) = serde_json::from_str::<serde_json::Value>(&json) else {
+        return A11yNodes::new();
+    };
+    let Some(nodes) = tree.get("nodes").and_then(|nodes| nodes.as_object()) else {
+        return A11yNodes::new();
+    };
+
+    nodes
+        .values()
+        .filter_map(|node| {
+            let id: u64 = node.get("accesskit_id")?.as_str()?.parse().ok()?;
+            let aria = node.get("aria")?;
+            Some((id, a11y_node_of(aria)))
+        })
+        .collect()
+}
+
+fn a11y_node_of(aria: &serde_json::Value) -> A11yNode {
+    let role = aria
+        .get("role")
+        .and_then(|role| role.as_str())
+        .and_then(|role| {
+            A11Y_ROLES
+                .iter()
+                .find(|(accesskit, _)| *accesskit == role)
+                .map(|(_, ours)| *ours)
+        });
+
+    let label = aria
+        .get("label")
+        .and_then(|label| label.as_str())
+        .map(|label| truncate_chars(label, 60));
+
+    let mut state = Vec::new();
+    // `toggled` covers checkbox, switch and toggle button alike. Both sides of
+    // it are printed: a screen reader announces "not checked" too, and a
+    // snapshot that only ever said `checked` would leave an agent unable to
+    // tell "off" from "not a checkbox".
+    match aria.get("toggled").and_then(|value| value.as_str()) {
+        Some("True") => state.push("checked".into()),
+        Some("False") => state.push("unchecked".into()),
+        Some("Mixed") => state.push("mixed".into()),
+        _ => {}
+    }
+    match aria.get("selected").and_then(|value| value.as_bool()) {
+        Some(true) => state.push("selected".into()),
+        Some(false) => state.push("unselected".into()),
+        None => {}
+    }
+    match aria.get("expanded").and_then(|value| value.as_bool()) {
+        Some(true) => state.push("expanded".into()),
+        Some(false) => state.push("collapsed".into()),
+        None => {}
+    }
+    if let Some(value) = aria.get("value").and_then(|value| value.as_str()) {
+        state.push(format!("value=\"{}\"", truncate_chars(value, 40)));
+    }
+
+    A11yNode { role, label, state }
+}
 /// One line of a snapshot.
 struct SnapshotNode {
     role: Option<&'static str>,
@@ -1860,6 +1996,14 @@ struct SnapshotNode {
     /// prints it.
     source: Option<String>,
     bounds: Bounds,
+    /// State read off the accessibility tree: `checked`, `selected`,
+    /// `value="…"`. Empty for an element with no node, which is most of them.
+    state: Vec<String>,
+    /// Whether an accessibility node backed this line. Printed, because a role
+    /// the widget declared and a role guessed from a file name are not the
+    /// same claim, and an agent deciding what to trust should be able to see
+    /// which it got.
+    announced: bool,
     children: Vec<SnapshotNode>,
 }
 
@@ -1869,19 +2013,37 @@ struct SnapshotNode {
 /// Everything else is layout scaffolding: it is dropped and its children take
 /// its place, which is where most of the size difference against the full tree
 /// comes from.
-fn snapshot_nodes(elements: &[UiElement], interactive_only: bool) -> Vec<SnapshotNode> {
+///
+/// Where the accessibility tree reaches an element, it wins on role: that role
+/// was declared by the widget rather than inferred from the file that rendered
+/// it. It does not win on name — painted text is what a person sees and what
+/// an agent matches on — but it supplies one where nothing is painted, which
+/// is exactly the icon-only button the audit has always had to report as
+/// nameless.
+fn snapshot_nodes(
+    elements: &[UiElement],
+    interactive_only: bool,
+    a11y: &A11yNodes,
+) -> Vec<SnapshotNode> {
     let mut nodes = Vec::new();
 
     for element in elements {
-        let children = snapshot_nodes(&element.children, interactive_only);
+        let children = snapshot_nodes(&element.children, interactive_only, a11y);
+        let node = a11y.get(&element.accesskit_node_id);
 
-        let role = element
+        let derived = element
             .source_location
             .as_deref()
             .and_then(role_for)
+            // A region role is only used when the element contains something,
+            // because one file paints both a title bar and its close button.
+            // A declared role needs no such guard, so this filter stays on the
+            // derived half.
             .filter(|role| !REGION_ROLES.contains(role) || !children.is_empty());
+        let role = node.and_then(|node| node.role).or(derived);
+
         let test_id = test_id_of(strip_id_decoration(&element.id)).map(str::to_string);
-        let name = name_of(element);
+        let name = name_of(element).or_else(|| node.and_then(|node| node.label.clone()));
 
         let says_something = role.is_some() || test_id.is_some() || name.is_some();
         let wanted = says_something && (!interactive_only || is_interactive(role));
@@ -1894,6 +2056,8 @@ fn snapshot_nodes(elements: &[UiElement], interactive_only: bool) -> Vec<Snapsho
                 full_id: element.id.clone(),
                 source: element.source_location.clone(),
                 bounds: element.bounds.clone(),
+                state: node.map(|node| node.state.clone()).unwrap_or_default(),
+                announced: node.is_some(),
                 children,
             });
         } else {
@@ -1959,6 +2123,15 @@ fn render_snapshot(
             out.text.push_str(&format!(" #{}", test_id));
         }
         out.text.push_str(&format!(" @{}", reference));
+        for state in &node.state {
+            out.text.push(' ');
+            out.text.push_str(state);
+        }
+        // One character rather than a word: the marker appears on every
+        // annotated line, and this format earns its keep by being small.
+        if node.announced {
+            out.text.push_str(" ✓");
+        }
         if include_bounds {
             out.text.push_str(&format!(
                 " [{:.0},{:.0} {:.0}x{:.0}]",
@@ -2007,7 +2180,8 @@ fn handle_ui_snapshot(
         }
     }
 
-    let mut nodes = snapshot_nodes(&elements, opts.interactive_only);
+    let a11y = a11y_nodes(opts.window_id.as_deref(), cx);
+    let mut nodes = snapshot_nodes(&elements, opts.interactive_only, &a11y);
     if let Some(filter) = &opts.filter {
         filter_snapshot(&mut nodes, &filter.to_lowercase());
     }
@@ -2145,7 +2319,8 @@ fn handle_a11y_audit(
         }
     }
 
-    let nodes = snapshot_nodes(&elements, false);
+    let a11y = a11y_nodes(opts.window_id.as_deref(), cx);
+    let nodes = snapshot_nodes(&elements, false, &a11y);
     let mut flat = Vec::new();
     flatten_snapshot(&nodes, &mut flat);
 
@@ -2187,16 +2362,56 @@ fn handle_a11y_audit(
         flat.len()
     ));
 
+    // How much of the window a screen reader can see at all. This is a count
+    // rather than a finding per element on purpose: on a normal UI most
+    // elements have no node — 9 of 91 on this repo's own gallery — and 82
+    // findings saying so would bury the four that name a real defect. The
+    // number says the same thing in one line and cannot be tuned out.
+    let announced = flat.iter().filter(|node| node.announced).count();
+
     Ok(json!({
         "ok": ok,
         "window_id": window_id,
         "checked": flat.len(),
+        "announced": announced,
         "fail_on": fail_on,
         "serious": serious,
         "warnings": warnings,
         "truncated": truncated,
         "findings": listed,
     }))
+}
+
+/// Make sure the window is building its accessibility tree, and wait for the
+/// frame that carries it when it was not already.
+///
+/// Every reader of the tree goes through here, so that what the snapshot and
+/// the audit report never depends on whether something else happened to switch
+/// it on first. A hidden dependency like that produces an audit whose findings
+/// change between two identical runs, which is worse than not having the data.
+///
+/// A window that cannot be resolved is left alone rather than reported: the
+/// handler about to run says that better, and with the right candidates.
+async fn ensure_a11y_tree(window_id: Option<&str>, cx: &AsyncApp) {
+    let was_building = cx.update(|cx| {
+        let Ok(handle) = resolve_window(window_id, cx) else {
+            return None;
+        };
+        handle
+            .update(cx, |_, window, _| {
+                let was = window.is_a11y_active();
+                window.set_a11y_force_active(true);
+                was
+            })
+            .ok()
+    });
+
+    // Only a window that was not building one owes a frame; the flag takes
+    // effect from the next one, since the frame on screen latched its answer
+    // before the first node was pushed.
+    if was_building == Some(false) {
+        settle(window_id, cx).await;
+    }
 }
 
 /// Answer [`methods::A11Y_TREE`].
@@ -2214,22 +2429,7 @@ async fn run_a11y_tree(
     let opts: A11yTreeParams = serde_json::from_value(params.clone()).unwrap_or_default();
     let window_id = opts.window_id.clone();
 
-    let was_building = cx.update(|cx| {
-        let handle = resolve_window(window_id.as_deref(), cx)?;
-        handle
-            .update(cx, |_, window, _| {
-                let was = window.is_a11y_active();
-                window.set_a11y_force_active(true);
-                was
-            })
-            .map_err(|e| e.to_string())
-    })?;
-
-    // Already building means the frame on screen already carries a tree, and
-    // waiting would cost a frame to learn nothing.
-    if !was_building {
-        settle(window_id.as_deref(), cx).await;
-    }
+    ensure_a11y_tree(window_id.as_deref(), cx).await;
 
     cx.update(|cx| read_a11y_tree(window_id.as_deref(), cx))
 }
@@ -2294,14 +2494,31 @@ fn audit_controls(nodes: &[&SnapshotNode], min_target: f32) -> Vec<Finding> {
         let role = node.role.unwrap_or("control");
 
         if node.name.is_none() {
+            // Two different bugs wear the same face here, and they have
+            // different fixes. An element with an accessibility node is
+            // already reachable — a screen reader finds it and announces its
+            // role, and only the name is missing. An element without one is
+            // not there at all. Saying "give it a label" to the second is
+            // advice that cannot work.
+            let message = if node.announced {
+                format!(
+                    "This {role} has an accessibility node but no label, so a screen reader \
+                     announces its role and nothing else, and an agent has nothing to match on. \
+                     Give it an `.aria_label(...)`."
+                )
+            } else {
+                format!(
+                    "This {role} paints no text and has no accessibility node, so nothing can \
+                     name it: a screen reader has nothing to announce and an agent has nothing \
+                     to match on. Give it a `.role(...)` and an `.aria_label(...)`, or at least \
+                     an id it can be targeted by."
+                )
+            };
+
             findings.push(Finding {
                 severity: "serious",
                 check: "unnamed-control",
-                message: format!(
-                    "This {role} paints no text, so nothing can name it: a screen reader has \
-                     nothing to announce and an agent has nothing to match on. Give it a label, \
-                     or a tooltip, or at least an id it can be targeted by."
-                ),
+                message,
                 role: node.role,
                 test_id: node.test_id.clone(),
                 element: shorten_element_id(&node.full_id),
@@ -2487,6 +2704,7 @@ fn handle_get_element(
                     style_json: None,
                     content_size: Some((converted.width, converted.height)),
                     text_content: vec![],
+                    accesskit_node_id: 0,
                 });
             }
 
@@ -2912,6 +3130,7 @@ mod tests {
             source_location: "crates/ui/src/button.rs:1:1".to_string(),
             instance_id: 0,
             text_content: vec![],
+            accesskit_node_id: 0,
         }
     }
 
@@ -3006,6 +3225,7 @@ mod tests {
             style_json: None,
             content_size: None,
             text_content: text.iter().map(|line| line.to_string()).collect(),
+            accesskit_node_id: 0,
         }
     }
 
@@ -3013,6 +3233,142 @@ mod tests {
         let mut out = RenderedSnapshot::default();
         render_snapshot(nodes, 0, false, 100, &mut out);
         out.text
+    }
+
+    /// One annotated element, so the overlay has something to attach to. The
+    /// join key is the one gpui derives from the element's global id, which is
+    /// what makes it exact where the node's own leaf id and source location
+    /// are not.
+    fn annotated(id: &str, node_id: u64, aria: serde_json::Value) -> (UiElement, A11yNodes) {
+        let mut element = ui_element(id, Some("crates/ui/src/styled.rs:1:1"), &[], vec![]);
+        element.accesskit_node_id = node_id;
+
+        let mut a11y = A11yNodes::new();
+        a11y.insert(node_id, a11y_node_of(&aria));
+        (element, a11y)
+    }
+
+    /// The four title-bar buttons of this repo's gallery share an element id
+    /// and a source location and differ only by what they announce. If the
+    /// overlay used either of those as its key it would name all four the
+    /// same, which is the exact bug this project keeps reporting in other
+    /// people's ids.
+    #[test]
+    fn a_label_names_a_control_that_paints_nothing() {
+        let (element, a11y) = annotated(
+            "W/a.menu[0]",
+            7,
+            json!({ "role": "Button", "label": "Edit" }),
+        );
+
+        let rendered = render(&snapshot_nodes(&[element], false, &a11y));
+        assert_eq!(rendered.trim(), "- button \"Edit\" #menu @e1 ✓");
+    }
+
+    /// A role the widget declared beats one guessed from a file name. Here the
+    /// file says nothing at all, so without the node there would be no role.
+    #[test]
+    fn a_declared_role_wins_over_the_derived_one() {
+        let (element, a11y) = annotated("W/a.bar[0]", 8, json!({ "role": "MenuBar" }));
+
+        let rendered = render(&snapshot_nodes(&[element], false, &a11y));
+        assert!(rendered.contains("- menubar #bar"), "{rendered}");
+    }
+
+    /// State is the half of stage 2 the derived layer could never reach: a
+    /// file name cannot say whether a checkbox is ticked.
+    #[test]
+    fn state_and_value_are_printed() {
+        let (checkbox, a11y) = annotated(
+            "W/a.wrap[0]",
+            9,
+            json!({ "role": "CheckBox", "label": "Wrap", "toggled": "True" }),
+        );
+        let rendered = render(&snapshot_nodes(&[checkbox], false, &a11y));
+        assert!(rendered.contains("checkbox \"Wrap\" #wrap"), "{rendered}");
+        assert!(rendered.contains(" checked "), "{rendered}");
+
+        let (input, a11y) = annotated(
+            "W/a.search[0]",
+            10,
+            json!({ "role": "TextInput", "value": "main.rs" }),
+        );
+        let rendered = render(&snapshot_nodes(&[input], false, &a11y));
+        assert!(rendered.contains("value=\"main.rs\""), "{rendered}");
+    }
+
+    /// Painted text is what a person sees and what an agent matches on, so it
+    /// stays the name. The label is the fallback, not the winner.
+    #[test]
+    fn painted_text_still_beats_a_label() {
+        let mut element = ui_element(
+            "W/a.save[0]",
+            Some("crates/ui/src/button/button.rs:1:1"),
+            &["Save"],
+            vec![],
+        );
+        element.accesskit_node_id = 11;
+        let mut a11y = A11yNodes::new();
+        a11y.insert(
+            11,
+            a11y_node_of(&json!({ "role": "Button", "label": "Save file" })),
+        );
+
+        let rendered = render(&snapshot_nodes(&[element], false, &a11y));
+        assert!(rendered.contains("\"Save\""), "{rendered}");
+    }
+
+    /// An unknown AccessKit role must not introduce a second vocabulary:
+    /// `filter`, `interactive_only` and the audit all match these strings.
+    #[test]
+    fn an_unmapped_role_leaves_the_derived_one_alone() {
+        let mut element = ui_element(
+            "W/a.thing[0]",
+            Some("crates/ui/src/button/button.rs:1:1"),
+            &["x"],
+            vec![],
+        );
+        element.accesskit_node_id = 12;
+        let mut a11y = A11yNodes::new();
+        a11y.insert(12, a11y_node_of(&json!({ "role": "GenericContainer" })));
+
+        let rendered = render(&snapshot_nodes(&[element], false, &a11y));
+        assert!(rendered.contains("- button "), "{rendered}");
+    }
+
+    /// With no tree — nothing annotated, or accessibility never switched on —
+    /// every line reads exactly as it did before the overlay existed.
+    #[test]
+    fn without_a_tree_nothing_changes() {
+        let element = ui_element(
+            "W/a.save[0]",
+            Some("crates/ui/src/button/button.rs:1:1"),
+            &["Save"],
+            vec![],
+        );
+        let rendered = render(&snapshot_nodes(&[element], false, &A11yNodes::new()));
+        assert_eq!(rendered.trim(), "- button \"Save\" #save @e1");
+    }
+
+    /// A node without a label and no node at all are different bugs with
+    /// different fixes, and the finding has to say which one it found.
+    #[test]
+    fn an_unnamed_control_says_whether_it_has_a_node() {
+        let (element, a11y) = annotated("W/a.bell[0]", 13, json!({ "role": "Button" }));
+        let nodes = snapshot_nodes(&[element], false, &a11y);
+        let mut flat = Vec::new();
+        flatten_snapshot(&nodes, &mut flat);
+        let findings = audit_controls(&flat, 1.0);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].check, "unnamed-control");
+        assert!(
+            findings[0]
+                .message
+                .contains("has an accessibility node but no label"),
+            "{}",
+            findings[0].message
+        );
     }
 
     /// The file that rendered an element is its role, for this crate's own
@@ -3089,7 +3445,7 @@ mod tests {
             )],
         )];
 
-        let nodes = snapshot_nodes(&tree, false);
+        let nodes = snapshot_nodes(&tree, false, &A11yNodes::new());
         assert_eq!(render(&nodes), "- button \"Save\" #save-button @e1\n");
     }
 
@@ -3107,7 +3463,7 @@ mod tests {
         ];
 
         assert_eq!(
-            render(&snapshot_nodes(&tree, false)),
+            render(&snapshot_nodes(&tree, false, &A11yNodes::new())),
             "- node #plain @e1\n- node \"hello\" @e2\n- switch @e3\n"
         );
     }
@@ -3130,7 +3486,7 @@ mod tests {
         )];
 
         assert_eq!(
-            render(&snapshot_nodes(&tree, false)),
+            render(&snapshot_nodes(&tree, false, &A11yNodes::new())),
             "- banner #title-bar @e1\n  - node #close @e2\n"
         );
     }
@@ -3158,7 +3514,7 @@ mod tests {
         )];
 
         assert_eq!(
-            render(&snapshot_nodes(&tree, true)),
+            render(&snapshot_nodes(&tree, true, &A11yNodes::new())),
             "- switch #dark-mode @e1\n"
         );
     }
@@ -3186,7 +3542,7 @@ mod tests {
         )];
 
         assert_eq!(
-            render(&snapshot_nodes(&tree, false)),
+            render(&snapshot_nodes(&tree, false, &A11yNodes::new())),
             "- menu #sidebar @e1\n  - listitem \"One\" #item @e2\n  - listitem \"Two\" #item @e3\n"
         );
     }
@@ -3213,7 +3569,7 @@ mod tests {
             ],
         )];
 
-        let mut nodes = snapshot_nodes(&tree, false);
+        let mut nodes = snapshot_nodes(&tree, false, &A11yNodes::new());
         filter_snapshot(&mut nodes, "accordion");
         assert_eq!(
             render(&nodes),
@@ -3235,7 +3591,13 @@ mod tests {
             .collect();
 
         let mut out = RenderedSnapshot::default();
-        render_snapshot(&snapshot_nodes(&tree, false), 0, false, 2, &mut out);
+        render_snapshot(
+            &snapshot_nodes(&tree, false, &A11yNodes::new()),
+            0,
+            false,
+            2,
+            &mut out,
+        );
 
         assert!(out.truncated);
         assert_eq!(out.shown, 2);
@@ -3270,7 +3632,7 @@ mod tests {
     }
 
     fn audit(tree: &[UiElement], min_target: f32) -> Vec<Finding> {
-        let nodes = snapshot_nodes(tree, false);
+        let nodes = snapshot_nodes(tree, false, &A11yNodes::new());
         let mut flat = Vec::new();
         flatten_snapshot(&nodes, &mut flat);
         let mut findings = audit_controls(&flat, min_target);

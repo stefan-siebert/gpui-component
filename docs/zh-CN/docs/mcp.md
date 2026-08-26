@@ -180,10 +180,20 @@ AI 助手：
 
 它比窗口稀疏得多，因为只有被标注过的元素才会生成节点。在本仓库自带的画廊里，是
 96 个已绘制元素对应 11 个节点；返回结果会同时给出这两个数字，以免这棵树被当成整个
-界面。所以：用 `ui_snapshot` 看窗口，用 `a11y_tree` 看其中已标注的部分会朗读什么。
-每个节点都带 `element_id` 和 `source_location`，用来把两者对上。
+界面。
 
-GPUI 只在辅助技术连接时才构建这棵树。该调用会让窗口开始构建并等待一帧，这需要本
+多数时候并不需要这个工具本身。`ui_snapshot` 已经把这棵树折进了它的每一行：元素有
+节点时，声明的角色优先于从源文件推导出来的角色，标签会在没有绘制文本时补上名字，
+状态会附在后面（`checked`、`selected`、`value="…"`），行尾以 `✓` 结束——这样声明
+出来的事实不会被误当成推导出来的。审计用的是同一套叠加：它在 `checked` 旁边报告
+`announced`，并且 `unnamed-control` 现在会区分「缺标签」和「先缺角色」。
+
+对应关系是精确的，而不是近似的：gpui 用与检查器相同的 `GlobalElementId` 推导节点
+id，而 `InspectorElementInfo` 会把它带上。仅凭节点自带的末段 element id 和源码位置
+是不够的——本仓库标题栏上的四个按钮这两项完全相同。
+
+GPUI 只在辅助技术连接时才构建这棵树。读取它会让窗口开始构建并等待一帧，因此对某个
+窗口的第一次 `ui_snapshot`、`a11y_audit` 或 `a11y_tree` 都会多花一帧。这需要本
 crate 所依赖的补丁版 gpui 中的 `Window::set_a11y_force_active`。
 
 目前已自行标注的组件是 Button、ToggleButton、Checkbox、Radio、Switch、Tab、List、
