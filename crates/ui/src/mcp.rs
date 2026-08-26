@@ -1010,12 +1010,20 @@ fn handle_get_windows(cx: &mut App) -> Result<serde_json::Value, String> {
             handle
                 .update(cx, |_, window, _cx| {
                     let bounds = window.bounds();
+                    // `bounds` is the outer frame, which on macOS includes
+                    // the title bar. The content size is what layout sees,
+                    // and what a recorded script pins with `set_viewport`.
+                    let content = window.viewport_size();
                     WindowInfo {
                         id: format!("{:?}", handle.window_id()),
                         title: window.window_title(),
                         bounds: convert_bounds(bounds),
                         is_active: active_window_id == Some(handle.window_id()),
                         display_id: None,
+                        content_size: Some(Size {
+                            width: px_to_f32(content.width),
+                            height: px_to_f32(content.height),
+                        }),
                     }
                 })
                 .ok()
@@ -2482,12 +2490,16 @@ async fn run_set_viewport(
 
     cx.update(|cx| {
         let handle = resolve_window(window_id.as_deref(), cx)?;
-        let (id, bounds) = (
+        // Measured as the content size, which is what `resize` set and what
+        // layout sees. `window.bounds()` is the outer frame, and on macOS a
+        // title bar would make every honest resize look refused.
+        let (id, reached) = (
             format!("{:?}", handle.window_id()),
             handle
-                .update(cx, |_, window, _| convert_bounds(window.bounds()))
+                .update(cx, |_, window, _| window.viewport_size())
                 .map_err(|e| e.to_string())?,
         );
+        let (width, height) = (px_to_f32(reached.width), px_to_f32(reached.height));
 
         // The platform is allowed to refuse: a minimum size, a tiling window
         // manager, a maximised window. Reporting what was actually reached
@@ -2496,9 +2508,8 @@ async fn run_set_viewport(
         Ok(json!({
             "window_id": id,
             "requested": { "width": opts.width, "height": opts.height },
-            "viewport": { "width": bounds.width, "height": bounds.height },
-            "honoured": (bounds.width - opts.width).abs() < 1.0
-                && (bounds.height - opts.height).abs() < 1.0,
+            "viewport": { "width": width, "height": height },
+            "honoured": (width - opts.width).abs() < 1.0 && (height - opts.height).abs() < 1.0,
             "settled": settled,
         }))
     })
@@ -2953,6 +2964,11 @@ fn handle_take_screenshot(
         "height": height,
         "format": "png",
         "path": temp_path.to_string_lossy(),
+        // Device pixels above, logical pixels everywhere else; this is the
+        // factor between them, and what lets a golden comparison tell a
+        // size mismatch that came from the display from one that came from
+        // the window.
+        "scale_factor": scale_factor,
     });
     if let Some(object) = result.as_object_mut() {
         if let Some(id) = element_info {
