@@ -110,6 +110,7 @@ GPUI 主线程上处理，因此能看到一致的状态，也能派发真实输
 | `set_viewport` | 把窗口调整到确定的内容尺寸，使布局可复现 |
 | `reset_app` | 通过 `mcp_set_reset_hook` 把应用恢复到已知的初始状态 |
 | `replay_script` | 回放录制好的会话 —— 既可用于恢复到某个状态，也可作为测试 |
+| `expect_screenshot` | 把窗口与脚本旁边存放的基准截图（golden）对比；设置 `GPUI_MCP_UPDATE_GOLDENS=1` 可接受新的外观 |
 
 ## 助手看到的内容
 

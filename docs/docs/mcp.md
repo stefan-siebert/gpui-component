@@ -114,6 +114,7 @@ server binary and registering it with an agent is described in the
 | `set_viewport` | resize a window to an exact content size, so layout is reproducible |
 | `reset_app` | put the app back into a known starting state, via `mcp_set_reset_hook` |
 | `replay_script` | replay a recorded session — to reach a state, or as a test |
+| `expect_screenshot` | compare the window against a golden image stored beside the script; `GPUI_MCP_UPDATE_GOLDENS=1` accepts a change |
 
 ## What the agent sees
 
