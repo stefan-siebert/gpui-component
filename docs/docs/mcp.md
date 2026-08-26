@@ -167,6 +167,7 @@ to be the ones that hurt a screen-reader user and an agent equally:
 | `duplicate-id` | serious on a control, else warning | one id naming several elements; a suffix match takes the first |
 | `target-too-small` | warning | a side under 24 px (WCAG 2.2's minimum) |
 | `zero-size-control` | serious | an interactive element with no area at all |
+| `unstable-id` | warning | an id ending in a number generated fresh on every start, like `#input-4294967299` — it reads like a name and is not one |
 
 Icon-only buttons and repeated list-row ids are what a first run usually turns
 up, in any application — they are the normal state of a UI that nobody has had

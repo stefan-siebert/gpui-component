@@ -157,6 +157,7 @@ AI 助手：
 | `duplicate-id` | 控件为 serious，其他为 warning | 一个 id 指向多个元素；后缀匹配只会取第一个 |
 | `target-too-small` | warning | 边长小于 24px（WCAG 2.2 的最小值）|
 | `zero-size-control` | serious | 交互元素完全没有面积 |
+| `unstable-id` | warning | id 以每次启动都会重新生成的数字结尾，例如 `#input-4294967299` —— 看起来像名字，其实不是 |
 
 首次运行时最常见的结果，是纯图标按钮以及列表行共用同一个 id —— 任何应用都是如此，
 这只是「还没有人有理由为它们命名」的正常状态。

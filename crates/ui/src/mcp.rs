@@ -1814,11 +1814,18 @@ struct SnapshotRefs {
     by_ref: std::collections::HashMap<String, String>,
 }
 
-/// Turn `@e7` back into the element the last snapshot gave that name to.
-/// Anything not starting with `@` passes through untouched.
+/// Turn what a step named into something [`id_matches`] can compare against.
+///
+/// Two of the forms an agent has in front of it come from the snapshot rather
+/// than from gpui: `@e7`, the thing on line seven of what was last printed,
+/// and `#item`, which is how that snapshot writes an id. Neither is an id as
+/// gpui stores it, and "element not found" for a string this very server just
+/// printed is the most confusing answer available — so both are resolved here
+/// instead of only the raw id underneath them. Anything else passes through
+/// untouched.
 fn expand_ref(query: &str) -> Result<String, String> {
     let Some(reference) = query.strip_prefix('@') else {
-        return Ok(query.to_string());
+        return Ok(query.strip_prefix('#').unwrap_or(query).to_string());
     };
 
     let refs = SNAPSHOT_REFS
@@ -2143,6 +2150,7 @@ fn handle_a11y_audit(
         .max(0.0);
     let mut findings = audit_controls(&flat, min_target);
     findings.extend(audit_ids(&flat));
+    findings.extend(audit_unstable_ids(&flat));
 
     // Worst first: a list somebody reads from the top should start with what
     // matters.
@@ -2283,6 +2291,67 @@ fn audit_ids(nodes: &[&SnapshotNode]) -> Vec<Finding> {
                      first, so anything targeting it — a click, a wait, a recorded script — \
                      may act on the wrong one. Give them ids of their own.",
                     group.len()
+                ),
+                role: first.role,
+                test_id: Some(test_id.to_string()),
+                element: shorten_element_id(&first.full_id),
+                source: first.source.clone(),
+                bounds: None,
+            }
+        })
+        .collect()
+}
+
+/// Ids that will name nothing tomorrow.
+///
+/// `#input-4294967299` passes every test for an id somebody chose — lowercase,
+/// dashed, as deliberate-looking as `#save-button` — and the number in it is an
+/// entity id gpui hands out fresh on every app start. So the snapshot prints
+/// it, an agent targets it, a recorded script stores it, and the next run
+/// finds nothing. That is the one class of bad id the derived layer cannot
+/// tell apart from a good one by looking at it, which is why it gets a check
+/// of its own.
+///
+/// Reported once per id, not once per element: sixty rows sharing a generated
+/// id are one problem with one fix.
+fn audit_unstable_ids(nodes: &[&SnapshotNode]) -> Vec<Finding> {
+    let mut by_id: std::collections::HashMap<&str, Vec<&&SnapshotNode>> =
+        std::collections::HashMap::new();
+
+    for node in nodes {
+        if let Some(test_id) = &node.test_id {
+            if id_looks_generated(test_id) {
+                by_id.entry(test_id.as_str()).or_default().push(node);
+            }
+        }
+    }
+
+    let mut unstable: Vec<(&str, Vec<&&SnapshotNode>)> = by_id.into_iter().collect();
+    // Same reason as the duplicates: a map has no order, and a finding list
+    // that reshuffles between runs is a bad diff.
+    unstable.sort_by_key(|(test_id, _)| *test_id);
+
+    unstable
+        .into_iter()
+        .map(|(test_id, group)| {
+            let first = group[0];
+            let subject = if group.len() > 1 {
+                format!("these {} elements", group.len())
+            } else {
+                "it".to_string()
+            };
+
+            Finding {
+                // A warning rather than serious: nothing here is broken for
+                // anyone using the app right now. What breaks is everything
+                // written down against it, on the next start, quietly.
+                severity: "warning",
+                check: "unstable-id",
+                message: format!(
+                    "#{test_id} ends in a number the app generates fresh on every start, so it \
+                     reads like a name and is not one. Anything written down against it — a \
+                     recorded script, a bug report, a note to yourself — matches nothing after a \
+                     restart. Give {subject} an id of its own."
                 ),
                 role: first.role,
                 test_id: Some(test_id.to_string()),
@@ -3093,6 +3162,15 @@ mod tests {
         );
     }
 
+    /// The snapshot prints `#item`, so `#item` is what an agent copies. An
+    /// earlier version accepted only the bare `item` and answered "element not
+    /// found" for a string it had just printed itself.
+    #[test]
+    fn the_hash_a_snapshot_prints_is_accepted() {
+        assert_eq!(expand_ref("#save-button").unwrap(), "save-button");
+        assert_eq!(expand_ref("save-button").unwrap(), "save-button");
+    }
+
     /// A ref from a snapshot that has been replaced must fail loudly rather
     /// than resolve to whatever now sits on that line.
     #[test]
@@ -3108,6 +3186,7 @@ mod tests {
         flatten_snapshot(&nodes, &mut flat);
         let mut findings = audit_controls(&flat, min_target);
         findings.extend(audit_ids(&flat));
+        findings.extend(audit_unstable_ids(&flat));
         findings
     }
 
@@ -3197,6 +3276,51 @@ mod tests {
             duplicate.message
         );
         assert_eq!(duplicate.test_id.as_deref(), Some("item"));
+    }
+
+    /// The one bad id that looks exactly like a good one. Nothing else in the
+    /// derived layer can tell `#input-4294967299` from `#save-button`, and the
+    /// difference only shows on the next app start.
+    #[test]
+    fn an_id_carrying_an_entity_number_is_reported() {
+        let findings = audit(&[button("W/a.input-4294967299[0]", &["Search"])], 10.0);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].check, "unstable-id");
+        assert_eq!(findings[0].severity, "warning");
+        assert_eq!(findings[0].test_id.as_deref(), Some("input-4294967299"));
+    }
+
+    /// A counter is something somebody wrote. Reporting `#item-3` would train
+    /// the reader to skip the check.
+    #[test]
+    fn a_small_number_in_an_id_is_left_alone() {
+        let findings = audit(&[button("W/a.item-3[0]", &["One"])], 10.0);
+        assert!(findings.is_empty(), "{} findings", findings.len());
+    }
+
+    /// Sixty rows sharing a generated id are one problem with one fix, so they
+    /// get one line — the duplicate check is what says how many there are.
+    #[test]
+    fn one_generated_id_on_many_elements_is_one_finding() {
+        let findings = audit(
+            &[
+                button("W/a.row-4294967300[0]", &["One"]),
+                button("W/a.row-4294967300[1]", &["Two"]),
+            ],
+            10.0,
+        );
+
+        let unstable: Vec<_> = findings
+            .iter()
+            .filter(|finding| finding.check == "unstable-id")
+            .collect();
+        assert_eq!(unstable.len(), 1);
+        assert!(
+            unstable[0].message.contains("these 2 elements"),
+            "{}",
+            unstable[0].message
+        );
     }
 
     #[test]
