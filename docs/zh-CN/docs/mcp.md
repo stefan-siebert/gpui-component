@@ -88,6 +88,7 @@ GPUI 主线程上处理，因此能看到一致的状态，也能派发真实输
 | `gpui_guide` | 服务端自带的说明文档，让助手一开始就知道怎么用 |
 | `ui_snapshot` | 把窗口渲染成一行一个有意义元素的简短列表 |
 | `a11y_audit` | 无法命名的控件、指向多个元素的 id、小于 24px 的点击目标 |
+| `a11y_tree` | AccessKit 树：真实的角色、朗读出的标签、输入框的值、节点支持的操作 —— 仅包含已标注的元素 |
 | `inspect_ui_tree` | 完整的元素树，适合排查布局问题 |
 | `get_element` | 单个元素及其子树 |
 | `get_windows`、`get_app_state` | 窗口列表，以及状态提供者返回的快照 |
@@ -170,6 +171,24 @@ AI 助手：
 ```json
 { "method": "a11y_audit", "params": { "fail_on": "serious" } }
 ```
+
+## 真正的无障碍树
+
+审计读的是推导层。GPUI 同时会构建真正的 AccessKit 树——也就是交给屏幕阅读器的那
+一棵——`a11y_tree` 返回的正是它：真实的角色（`Button`、`MenuBar`、`TextInput`）、
+控件即使只绘制了图标也会朗读出的标签、输入框当前的值，以及每个节点支持的操作。
+
+它比窗口稀疏得多，因为只有被标注过的元素才会生成节点。在本仓库自带的画廊里，是
+96 个已绘制元素对应 11 个节点；返回结果会同时给出这两个数字，以免这棵树被当成整个
+界面。所以：用 `ui_snapshot` 看窗口，用 `a11y_tree` 看其中已标注的部分会朗读什么。
+每个节点都带 `element_id` 和 `source_location`，用来把两者对上。
+
+GPUI 只在辅助技术连接时才构建这棵树。该调用会让窗口开始构建并等待一帧，这需要本
+crate 所依赖的补丁版 gpui 中的 `Window::set_a11y_force_active`。
+
+目前已自行标注的组件是 Button、ToggleButton、Checkbox、Radio、Switch、Tab、List、
+MenuItem 和 PopupMenu。应用中的其他元素需要先加上 `.role(...)` 和
+`.aria_label(...)` 才会出现。
 
 ## 返回结果的含义
 

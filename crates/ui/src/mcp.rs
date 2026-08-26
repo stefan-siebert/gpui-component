@@ -351,6 +351,9 @@ async fn dispatch(
     if method == methods::WAIT_FOR {
         return run_wait_for(params, with_state, cx).await;
     }
+    if method == methods::A11Y_TREE {
+        return run_a11y_tree(params, cx).await;
+    }
 
     let window_id = params
         .get("window_id")
@@ -401,8 +404,10 @@ fn dispatch_sync(
         methods::LIST_ACTIONS => handle_list_actions(params, cx),
         methods::GET_FOCUS_INFO => handle_get_focus_info(params, cx),
         methods::TYPE_TEXT => handle_type_text(params, cx),
-        // Both are answered by `dispatch`, which never sends them here.
-        methods::WAIT_FOR | methods::BATCH => Err(format!("{method} is answered asynchronously")),
+        // All three are answered by `dispatch`, which never sends them here.
+        methods::WAIT_FOR | methods::BATCH | methods::A11Y_TREE => {
+            Err(format!("{method} is answered asynchronously"))
+        }
         _ => Err(format!("Unknown method: {}", method)),
     }
 }
@@ -2194,6 +2199,90 @@ fn handle_a11y_audit(
     }))
 }
 
+/// Answer [`methods::A11Y_TREE`].
+///
+/// Two things have to happen before the tree can be read, which is why this is
+/// answered asynchronously rather than from the frame already on screen.
+/// GPUI builds the accessibility tree only while assistive technology is
+/// attached — right for shipping, useless for checking — so the window is
+/// switched into building it, and the flag takes effect from the *next* frame:
+/// the one being painted latched its answer before the first node was pushed.
+async fn run_a11y_tree(
+    params: &serde_json::Value,
+    cx: &AsyncApp,
+) -> Result<serde_json::Value, String> {
+    let opts: A11yTreeParams = serde_json::from_value(params.clone()).unwrap_or_default();
+    let window_id = opts.window_id.clone();
+
+    let was_building = cx.update(|cx| {
+        let handle = resolve_window(window_id.as_deref(), cx)?;
+        handle
+            .update(cx, |_, window, _| {
+                let was = window.is_a11y_active();
+                window.set_a11y_force_active(true);
+                was
+            })
+            .map_err(|e| e.to_string())
+    })?;
+
+    // Already building means the frame on screen already carries a tree, and
+    // waiting would cost a frame to learn nothing.
+    if !was_building {
+        settle(window_id.as_deref(), cx).await;
+    }
+
+    cx.update(|cx| read_a11y_tree(window_id.as_deref(), cx))
+}
+
+/// Read the tree the last frame built, and say how much of the window it covers.
+///
+/// The count is the point of the answer as much as the tree is. Only elements
+/// somebody annotated get a node, so a tree of eleven nodes over a window of
+/// ninety-six painted elements is not a small window — it is a mostly
+/// unannotated one, and an agent that is not told this will read the tree as
+/// the whole UI.
+fn read_a11y_tree(window_id: Option<&str>, cx: &mut App) -> Result<serde_json::Value, String> {
+    let handle = resolve_window(window_id, cx)?;
+    let id = format!("{:?}", handle.window_id());
+
+    let (active, json, painted) = handle
+        .update(cx, |_, window, _| {
+            (
+                window.is_a11y_active(),
+                window.debug_a11y_tree_json(),
+                window.inspector_elements().len(),
+            )
+        })
+        .map_err(|e| e.to_string())?;
+
+    let Some(json) = json.filter(|_| active) else {
+        return Err(format!(
+            "No accessibility tree for {id}. The window was asked to build one and no frame \
+             carrying it arrived — an occluded or stalled window does that. Try again, or take a \
+             ui_snapshot, which reads the frame already painted."
+        ));
+    };
+
+    let tree: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|e| format!("The accessibility tree was not JSON: {e}"))?;
+
+    let nodes = tree
+        .get("nodes")
+        .and_then(|nodes| nodes.as_object())
+        .map(serde_json::Map::len)
+        .unwrap_or(0);
+
+    mcp_log(format!(
+        "a11y tree of {id}: {nodes} nodes over {painted} painted elements"
+    ));
+
+    Ok(json!({
+        "window_id": id,
+        "nodes": nodes,
+        "painted": painted,
+        "tree": tree,
+    }))
+}
 /// Controls nobody can name, hit, or see.
 fn audit_controls(nodes: &[&SnapshotNode], min_target: f32) -> Vec<Finding> {
     let mut findings = Vec::new();

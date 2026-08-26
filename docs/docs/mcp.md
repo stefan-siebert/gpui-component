@@ -92,6 +92,7 @@ server binary and registering it with an agent is described in the
 | `gpui_guide` | the server's own documentation, so an agent starts informed |
 | `ui_snapshot` | the window as one short line per meaningful element |
 | `a11y_audit` | controls nothing can name, ids that name several elements, targets under 24px |
+| `a11y_tree` | the AccessKit tree: real roles, announced labels, input values, node actions — annotated elements only |
 | `inspect_ui_tree` | the full element hierarchy, for layout questions |
 | `get_element` | one element with its subtree |
 | `get_windows`, `get_app_state` | windows, and your state provider's snapshot |
@@ -183,6 +184,30 @@ keeps it checked:
 ```json
 { "method": "a11y_audit", "params": { "fail_on": "serious" } }
 ```
+
+## The real accessibility tree
+
+The audit reads a derived layer. GPUI also builds the actual AccessKit tree —
+the one a screen reader is handed — and `a11y_tree` returns it: real roles
+(`Button`, `MenuBar`, `TextInput`), the label a control announces even when it
+paints only an icon, an input's current value, and the actions each node
+offers.
+
+It is sparser than the window, because a node exists only where somebody
+annotated the element. Against this repo's own gallery that is 11 nodes over
+96 painted elements, and the answer reports both numbers rather than letting
+the tree pass for the whole UI. So `ui_snapshot` is how you see the window and
+`a11y_tree` is how you see what the annotated part of it announces; each node
+carries `element_id` and `source_location` to line the two up.
+
+GPUI builds the tree only while assistive technology is attached. The call
+switches the window into building it and waits a frame, which needs
+`Window::set_a11y_force_active` from the patched gpui this crate builds
+against.
+
+The widgets that already annotate themselves are Button, ToggleButton,
+Checkbox, Radio, Switch, Tab, List, MenuItem and PopupMenu. Anything else in
+your app needs `.role(...)` and `.aria_label(...)` before it appears.
 
 ## What the answers mean
 
