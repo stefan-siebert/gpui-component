@@ -14,6 +14,20 @@ use gpui::{
 
 #[cfg(target_os = "linux")]
 mod linux;
+/// An owned, UI-thread-local handle to the raw wry webview.
+///
+/// Cloning this handle prolongs the native webview's lifetime. Dropping the owning [`WebView`]
+/// entity hides the child view, but final native destruction waits until all handle and frame
+/// clones are dropped. All handles must be dropped before the parent window is destroyed.
+#[derive(Clone)]
+pub struct WebViewHandle(Rc<wry::WebView>);
+
+impl WebViewHandle {
+    /// Get the raw wry webview.
+    pub fn raw(&self) -> &wry::WebView {
+        &self.0
+    }
+}
 
 /// A webview based on wry WebView.
 ///
@@ -145,6 +159,11 @@ impl WebView {
     /// Get the raw wry webview.
     pub fn raw(&self) -> &wry::WebView {
         &self.webview
+    }
+
+    /// Get an owned, UI-thread-local handle to the raw wry webview.
+    pub fn handle(&self) -> WebViewHandle {
+        WebViewHandle(self.webview.clone())
     }
 }
 

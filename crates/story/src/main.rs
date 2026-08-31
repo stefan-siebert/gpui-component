@@ -11,6 +11,9 @@ fn main() {
         init(cx);
         #[cfg(feature = "mcp")]
         gpui_component::mcp::init_mcp(cx, "story");
+        // Required for system notifications on Windows; macOS only shows them
+        // when running from a bundled .app.
+        cx.set_app_identity("com.longbridge.gpui-component.story", "GPUI Component");
         cx.activate(true);
 
         create_new_window(
