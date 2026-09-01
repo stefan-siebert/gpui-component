@@ -387,9 +387,11 @@ impl ResizableState {
         self.bounds = bounds;
         let current = self.container_size();
 
-        // No previous layout to keep a proportion of, and sub-pixel jitter is
-        // not a resize.
-        if previous.is_zero() || (current - previous).abs() < px(1.) {
+        // Sub-pixel jitter is not a resize. The first layout is, though —
+        // `previous` is zero there and the described sizes still have to be
+        // scaled to the window, which is what upstream's dock test
+        // `a_dumped_split_writes_the_sizes_it_is_actually_drawn_at` pins.
+        if (current - previous).abs() < px(1.) {
             return;
         }
         // A drag in flight computes the sizes itself, from the bounds Taffy
