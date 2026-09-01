@@ -326,7 +326,7 @@ impl RenderOnce for WindowControls {
         // decorated, mirroring the `is_client_decorated` gating of the
         // title bar's window-menu overlay.
         #[cfg(target_os = "linux")]
-        if !matches!(window.window_decorations(), Decorations::Client { .. }) {
+        if !matches!(window.window_decorations(), gpui::Decorations::Client { .. }) {
             return div().id("window-controls");
         }
 
