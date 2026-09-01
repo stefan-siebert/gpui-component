@@ -1067,7 +1067,7 @@ impl SyntaxHighlighter {
         theme: &dyn gpui_base::input::HighlightStyleResolver,
     ) -> Vec<(Range<usize>, HighlightStyle)> {
         let highlights = self.match_styles(range.clone());
-        Self::styles_from_items(&highlights, range, theme)
+        self.styles_from_items(&highlights, range, theme)
     }
 
     /// Run the tree-sitter query for a byte range, returning raw highlight items.
@@ -1085,9 +1085,10 @@ impl SyntaxHighlighter {
     /// This is the same processing as `styles()` but uses pre-computed items
     /// instead of running a new tree-sitter query.
     pub(crate) fn styles_from_items(
+        &self,
         highlights: &[HighlightItem],
         range: &Range<usize>,
-        theme: &HighlightTheme,
+        theme: &dyn gpui_base::input::HighlightStyleResolver,
     ) -> Vec<(Range<usize>, HighlightStyle)> {
         let mut styles = vec![];
         let start_offset = range.start;
