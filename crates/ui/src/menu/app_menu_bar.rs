@@ -91,7 +91,13 @@ impl AppMenuBar {
         self.set_selected_index(None, window, cx);
     }
 
-    fn set_selected_index(
+    /// Open the menu at `ix`, or close whichever one is open with `None`.
+    ///
+    /// Opening remembers the currently focused element as the action context,
+    /// so items dispatch into the view the user came from, and closing gives
+    /// the focus back to it. Public so a host can drive the bar from a menu
+    /// key (F10) or from a collapsed trigger rendered in its place.
+    pub fn set_selected_index(
         &mut self,
         ix: Option<usize>,
         window: &mut Window,
@@ -110,8 +116,9 @@ impl AppMenuBar {
         cx.notify();
     }
 
+    /// Whether one of the bar's menus is currently open.
     #[inline]
-    fn has_activated_menu(&self) -> bool {
+    pub fn has_activated_menu(&self) -> bool {
         self.selected_index.is_some()
     }
 }
