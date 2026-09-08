@@ -415,13 +415,18 @@ impl RenderOnce for Checkbox {
                         .map(|this| {
                             if let Some(label) = self.label {
                                 this.child(
+                                    // No line_height of its own: the column
+                                    // above sets 1.2, and a line box exactly
+                                    // as tall as the font puts every
+                                    // descender outside it — which the
+                                    // column's overflow_hidden then clips,
+                                    // so "Manager" lost the tail of its `g`.
                                     div()
                                         .size_full()
                                         .text_color(cx.theme().foreground)
                                         .when(self.disabled, |this| {
                                             this.text_color(cx.theme().muted_foreground)
                                         })
-                                        .line_height(relative(1.))
                                         .child(label),
                                 )
                             } else {
