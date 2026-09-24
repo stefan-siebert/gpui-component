@@ -8,7 +8,7 @@ use crate::{
     v_flex,
 };
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, InteractiveElement as _, IntoElement,
+    AnyElement, App, ClickEvent, ElementId, FocusHandle, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled,
     Window, div, percentage, prelude::FluentBuilder,
 };
@@ -19,6 +19,7 @@ use std::rc::Rc;
 pub struct SidebarMenu {
     style: StyleRefinement,
     collapsed: bool,
+    key_context: Option<SharedString>,
     items: Vec<SidebarMenuItem>,
 }
 
@@ -29,7 +30,17 @@ impl SidebarMenu {
             style: StyleRefinement::default(),
             items: Vec::new(),
             collapsed: false,
+            key_context: None,
         }
+    }
+
+    /// Set a key context on the element holding the menu items.
+    ///
+    /// The context is active only while focus is on an item (or its caret),
+    /// so bindings registered for it do not reach a sidebar header or footer.
+    pub fn key_context(mut self, key_context: impl Into<SharedString>) -> Self {
+        self.key_context = Some(key_context.into());
+        self
     }
 
     /// Add a [`SidebarMenuItem`] child menu item to the sidebar menu.
@@ -72,6 +83,9 @@ impl SidebarItem for SidebarMenu {
 
         v_flex()
             .gap_2()
+            .when_some(self.key_context, |this, key_context| {
+                this.key_context(key_context.as_ref())
+            })
             .refine_style(&self.style)
             .children(self.items.into_iter().enumerate().map(|(ix, item)| {
                 let id = SharedString::from(format!("{}-{}", id, ix));
@@ -103,6 +117,9 @@ pub struct SidebarMenuItem {
     suffix: Option<Rc<dyn Fn(&mut Window, &mut App) -> AnyElement + 'static>>,
     disabled: bool,
     context_menu: Option<Rc<dyn Fn(PopupMenu, &mut Window, &mut App) -> PopupMenu + 'static>>,
+    focus_handle: Option<FocusHandle>,
+    open: Option<bool>,
+    on_open_change: Option<Rc<dyn Fn(bool, &mut Window, &mut App)>>,
 }
 
 impl SidebarMenuItem {
@@ -121,6 +138,9 @@ impl SidebarMenuItem {
             suffix: None,
             disabled: false,
             context_menu: None,
+            focus_handle: None,
+            open: None,
+            on_open_change: None,
         }
     }
 
@@ -202,6 +222,37 @@ impl SidebarMenuItem {
         self
     }
 
+    /// Use a caller-owned focus handle for the item.
+    ///
+    /// By default every item is its own tab stop. An owner that navigates the
+    /// menu with arrow keys passes a handle per item instead and makes only
+    /// one of them a tab stop (a roving tabindex): its handle's `tab_stop`
+    /// decides, and the submenu caret stops being a tab stop of its own.
+    pub fn track_focus(mut self, focus_handle: &FocusHandle) -> Self {
+        self.focus_handle = Some(focus_handle.clone());
+        self
+    }
+
+    /// Control whether the submenu is open, instead of the item's own state.
+    ///
+    /// Pair with [`on_open_change`](Self::on_open_change): the caret and
+    /// `click_to_open` / `click_to_toggle` then report the requested state
+    /// there, and the owner renders it back through this method.
+    pub fn open(mut self, open: bool) -> Self {
+        self.open = Some(open);
+        self
+    }
+
+    /// Called with the requested open state when the submenu is controlled
+    /// through [`open`](Self::open).
+    pub fn on_open_change(
+        mut self,
+        handler: impl Fn(bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_open_change = Some(Rc::new(handler));
+        self
+    }
+
     fn is_submenu(&self) -> bool {
         self.children.len() > 0
     }
@@ -246,19 +297,40 @@ impl SidebarItem for SidebarMenuItem {
         let collapsed_tooltip = self.collapsed_tooltip();
         let id = id.into();
         let is_submenu = self.is_submenu();
-        let open_state = if is_submenu {
+        let controlled_open = self.open;
+        let on_open_change = self.on_open_change.clone();
+        let open_state = if is_submenu && controlled_open.is_none() {
             Some(window.use_keyed_state(id.clone(), cx, |_, _| default_open))
         } else {
             None
         };
+        let is_open_state =
+            controlled_open.unwrap_or_else(|| open_state.as_ref().map_or(false, |s| *s.read(cx)));
+        // Requests a new open state from whichever side owns it.
+        let set_open: Option<Rc<dyn Fn(bool, &mut Window, &mut App)>> = if !is_submenu {
+            None
+        } else if let Some(open_state) = open_state.clone() {
+            Some(Rc::new(move |open, _, cx: &mut App| {
+                open_state.update(cx, |is_open, cx| {
+                    *is_open = open;
+                    cx.notify();
+                })
+            }))
+        } else {
+            Some(Rc::new(move |open, window, cx| {
+                if let Some(on_open_change) = &on_open_change {
+                    on_open_change(open, window, cx);
+                }
+            }))
+        };
+        let focus_handle = self.focus_handle.clone();
+        let owns_focus = focus_handle.is_some();
         let handler = self.handler.clone();
         let is_collapsed = self.collapsed;
         let is_active = self.active;
         let is_hoverable = !is_active && !self.disabled;
         let is_disabled = self.disabled;
-        let is_open = open_state
-            .as_ref()
-            .map_or(false, |s| !is_collapsed && *s.read(cx));
+        let is_open = !is_collapsed && is_submenu && is_open_state;
 
         div()
             .id(id.clone())
@@ -267,7 +339,10 @@ impl SidebarItem for SidebarMenuItem {
                 h_flex()
                     .size_full()
                     .id("item")
-                    .when(!is_disabled, |this| this.tab_index(0))
+                    .when(!is_disabled, |this| match &focus_handle {
+                        Some(focus_handle) => this.track_focus(focus_handle),
+                        None => this.tab_index(0),
+                    })
                     .focus_visible({
                         let accent = cx.theme().sidebar_accent;
                         let fg = cx.theme().sidebar_accent_foreground;
@@ -315,11 +390,15 @@ impl SidebarItem for SidebarMenuItem {
                                         this.child(suffix(window, cx).into_any_element())
                                     }),
                             )
-                            .when_some(open_state.clone(), |this, open_state| {
+                            .when_some(set_open.clone(), |this, set_open| {
                                 this.child(
                                     Button::new("caret")
                                         .xsmall()
                                         .ghost()
+                                        // The owner of a roving tabindex expands
+                                        // with the arrow keys; the caret is the
+                                        // mouse equivalent, not a stop of its own.
+                                        .when(owns_focus, |this| this.tab_stop(false))
                                         .icon(
                                             Icon::new(IconName::ChevronRight)
                                                 .size_4()
@@ -328,13 +407,10 @@ impl SidebarItem for SidebarMenuItem {
                                                 }),
                                         )
                                         .on_click({
-                                            move |_, _, cx| {
+                                            move |_, window, cx| {
                                                 // Avoid trigger item click, just expand/collapse submenu
                                                 cx.stop_propagation();
-                                                open_state.update(cx, |is_open, cx| {
-                                                    *is_open = !*is_open;
-                                                    cx.notify();
-                                                })
+                                                set_open(!is_open_state, window, cx);
                                             }
                                         }),
                                 )
@@ -345,21 +421,13 @@ impl SidebarItem for SidebarMenuItem {
                     })
                     .when(!is_disabled, |this| {
                         this.on_click({
-                            let open_state = open_state.clone();
+                            let set_open = set_open.clone();
                             move |ev, window, cx| {
-                                if click_to_open {
-                                    if let Some(ref s) = open_state {
-                                        s.update(cx, |is_open: &mut bool, cx| {
-                                            *is_open = true;
-                                            cx.notify();
-                                        });
-                                    }
-                                } else if click_to_toggle {
-                                    if let Some(ref s) = open_state {
-                                        s.update(cx, |is_open: &mut bool, cx| {
-                                            *is_open = !*is_open;
-                                            cx.notify();
-                                        });
+                                if let Some(set_open) = &set_open {
+                                    if click_to_open {
+                                        set_open(true, window, cx);
+                                    } else if click_to_toggle {
+                                        set_open(!is_open_state, window, cx);
                                     }
                                 }
                                 handler(ev, window, cx)

@@ -144,6 +144,7 @@ pub fn init(cx: &mut App) {
     menu::init(cx);
     table::init(cx);
     tooltip::init(cx);
+    setting::init(cx);
 }
 
 #[inline]

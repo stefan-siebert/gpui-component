@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
 use crate::{
     IconName, Sizable, Size, StyledExt,
+    actions::{Confirm, SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp},
     group_box::GroupBoxVariant,
     h_resizable,
     input::{Input, InputState},
@@ -11,13 +13,162 @@ use crate::{
     sidebar::{Sidebar, SidebarMenu, SidebarMenuItem},
 };
 use gpui::{
-    App, AppContext as _, Axis, ElementId, Entity, IntoElement, ParentElement as _, Pixels,
-    RenderOnce, StyleRefinement, Styled, Window, container_query, div, prelude::FluentBuilder as _,
-    px, relative,
+    App, AppContext as _, Axis, ElementId, Entity, FocusHandle, InteractiveElement as _,
+    IntoElement, KeyBinding, ParentElement as _, Pixels, RenderOnce, SharedString, StyleRefinement,
+    Styled, Window, container_query, div, prelude::FluentBuilder as _, px, relative,
 };
 use rust_i18n::t;
 
 const STACKED_LAYOUT_MAX_WIDTH: Pixels = px(480.);
+
+/// Key context of the navigation list, active while an entry has focus.
+const NAV_CONTEXT: &str = "SettingsNav";
+
+pub(crate) fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("up", SelectUp, Some(NAV_CONTEXT)),
+        KeyBinding::new("down", SelectDown, Some(NAV_CONTEXT)),
+        KeyBinding::new("home", SelectFirst, Some(NAV_CONTEXT)),
+        KeyBinding::new("end", SelectLast, Some(NAV_CONTEXT)),
+        KeyBinding::new("right", SelectRight, Some(NAV_CONTEXT)),
+        KeyBinding::new("left", SelectLeft, Some(NAV_CONTEXT)),
+        KeyBinding::new("enter", Confirm { secondary: false }, Some(NAV_CONTEXT)),
+        KeyBinding::new("space", Confirm { secondary: false }, Some(NAV_CONTEXT)),
+    ]);
+}
+
+type PageChangeFn = Rc<dyn Fn(usize, &mut App)>;
+
+/// Identifies one entry of the navigation list.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct NavKey {
+    page_ix: usize,
+    /// Index among the page's titled groups; `None` for the page itself.
+    group_ix: Option<usize>,
+}
+
+/// One visible entry of the navigation list, in display order.
+struct NavEntry {
+    key: NavKey,
+    /// The page's title, which keys its open state.
+    page_title: SharedString,
+    has_submenu: bool,
+    is_open: bool,
+    focus_handle: FocusHandle,
+}
+
+/// The navigation list as rendered, for the keyboard handlers.
+///
+/// Exactly one entry is a tab stop (a roving tabindex): the selected one. Tab
+/// therefore leaves the list in one step, and the arrow keys move within it.
+struct Nav {
+    entries: Vec<NavEntry>,
+    tab_stop: usize,
+}
+
+impl Nav {
+    fn build(pages: &[SettingPage], state: &mut SettingsState, cx: &mut App) -> Self {
+        let mut entries = Vec::new();
+        for (page_ix, page) in pages.iter().enumerate() {
+            let has_submenu = page_has_submenu(page);
+            let is_open = has_submenu && state.is_page_open(page);
+            entries.push(NavEntry {
+                key: NavKey {
+                    page_ix,
+                    group_ix: None,
+                },
+                page_title: page.title.clone(),
+                has_submenu,
+                is_open,
+                focus_handle: state.nav_focus_handle(
+                    NavKey {
+                        page_ix,
+                        group_ix: None,
+                    },
+                    cx,
+                ),
+            });
+            if is_open {
+                for group_ix in 0..page.groups.iter().filter(|g| g.title.is_some()).count() {
+                    let key = NavKey {
+                        page_ix,
+                        group_ix: Some(group_ix),
+                    };
+                    entries.push(NavEntry {
+                        key,
+                        page_title: page.title.clone(),
+                        has_submenu: false,
+                        is_open: false,
+                        focus_handle: state.nav_focus_handle(key, cx),
+                    });
+                }
+            }
+        }
+
+        let selected = state.selected_index;
+        let position = |group_ix| {
+            entries.iter().position(|entry| {
+                entry.key
+                    == NavKey {
+                        page_ix: selected.page_ix,
+                        group_ix,
+                    }
+            })
+        };
+        // A selected group whose page is collapsed hands the stop to the page.
+        let tab_stop = position(selected.group_ix)
+            .or_else(|| position(None))
+            .unwrap_or(0);
+
+        Self { entries, tab_stop }
+    }
+
+    fn handle(&self, key: NavKey) -> Option<FocusHandle> {
+        self.entries
+            .iter()
+            .find(|entry| entry.key == key)
+            .map(|entry| entry.focus_handle.clone())
+    }
+
+    fn is_tab_stop(&self, key: NavKey) -> bool {
+        self.entries
+            .get(self.tab_stop)
+            .is_some_and(|entry| entry.key == key)
+    }
+
+    /// The entry with keyboard focus, or the tab stop if focus is elsewhere
+    /// in the list (on a submenu caret the mouse left focused).
+    fn focused(&self, window: &Window) -> usize {
+        self.entries
+            .iter()
+            .position(|entry| entry.focus_handle.is_focused(window))
+            .unwrap_or(self.tab_stop)
+    }
+}
+
+fn page_has_submenu(page: &SettingPage) -> bool {
+    page.groups.len() > 1
+}
+
+/// Select a navigation entry, as a click on it does.
+fn select_entry(
+    state: &Entity<SettingsState>,
+    key: NavKey,
+    on_page_change: Option<&PageChangeFn>,
+    cx: &mut App,
+) {
+    state.update(cx, |state, cx| {
+        state.selected_index = SelectIndex {
+            page_ix: key.page_ix,
+            group_ix: key.group_ix,
+        };
+        state.deferred_scroll_group_ix = key.group_ix;
+        cx.notify();
+    });
+    if let Some(on_page_change) = on_page_change {
+        on_page_change(key.page_ix, cx);
+    }
+}
 
 /// The settings structure containing multiple pages for app settings.
 ///
@@ -46,7 +197,7 @@ pub struct Settings {
     /// If set, override the selected page on every render.
     force_page: Option<usize>,
     /// Callback when the selected page changes (via sidebar click or keyboard).
-    on_page_change: Option<Rc<dyn Fn(usize, &mut App)>>,
+    on_page_change: Option<PageChangeFn>,
     /// Whether to auto-focus the search input on first render.
     auto_focus_search: bool,
 }
@@ -220,14 +371,21 @@ impl Settings {
         &self,
         state: &Entity<SettingsState>,
         pages: &Vec<SettingPage>,
+        nav: &Rc<Nav>,
         _: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
         let selected_index = state.read(cx).selected_index;
         let search_input = state.read(cx).search_input.clone();
         let on_page_change = self.on_page_change.clone();
+        let entry_focus = |key: NavKey| {
+            nav.handle(key).map(|handle| {
+                let is_tab_stop = nav.is_tab_stop(key);
+                handle.tab_index(0).tab_stop(is_tab_stop)
+            })
+        };
 
-        Sidebar::new("settings-sidebar")
+        let sidebar = Sidebar::new("settings-sidebar")
             .w(relative(1.))
             .border_0()
             .refine_style(&self.sidebar_style)
@@ -239,64 +397,211 @@ impl Settings {
                     .refine_style(&self.header_style)
                     .child(Input::new(&search_input).prefix(IconName::Search)),
             )
-            .child(
-                SidebarMenu::new().children(pages.iter().enumerate().map(|(page_ix, page)| {
+            .child(SidebarMenu::new().key_context(NAV_CONTEXT).children(
+                pages.iter().enumerate().map(|(page_ix, page)| {
+                    let page_key = NavKey {
+                        page_ix,
+                        group_ix: None,
+                    };
                     let is_page_active =
                         selected_index.page_ix == page_ix && selected_index.group_ix.is_none();
                     SidebarMenuItem::new(page.title.clone())
                         .click_to_open(true)
                         .when_some(page.icon.clone(), |this, icon| this.icon(icon))
-                        .default_open(page.default_open)
+                        .when_some(entry_focus(page_key), |this, handle| {
+                            this.track_focus(&handle)
+                        })
+                        .when(page_has_submenu(page), |this| {
+                            let page_title = page.title.clone();
+                            let state = state.clone();
+                            this.open(state.read(cx).is_page_open(page)).on_open_change(
+                                move |open, _, cx| {
+                                    state.update(cx, |state, cx| {
+                                        state.open_pages.insert(page_title.clone(), open);
+                                        cx.notify();
+                                    })
+                                },
+                            )
+                        })
                         .active(is_page_active)
                         .on_click({
                             let state = state.clone();
                             let on_page_change = on_page_change.clone();
                             move |_, _, cx| {
-                                state.update(cx, |state, cx| {
-                                    state.selected_index = SelectIndex {
-                                        page_ix,
-                                        ..Default::default()
-                                    };
-                                    cx.notify();
-                                });
-                                if let Some(cb) = &on_page_change {
-                                    cb(page_ix, cx);
-                                }
+                                select_entry(&state, page_key, on_page_change.as_ref(), cx)
                             }
                         })
-                        .when(page.groups.len() > 1, |this| {
+                        .when(page_has_submenu(page), |this| {
                             this.children(
                                 page.groups
                                     .iter()
                                     .filter(|g| g.title.is_some())
                                     .enumerate()
                                     .map(|(group_ix, group)| {
+                                        let group_key = NavKey {
+                                            page_ix,
+                                            group_ix: Some(group_ix),
+                                        };
                                         let is_active = selected_index.page_ix == page_ix
                                             && selected_index.group_ix == Some(group_ix);
                                         let title = group.title.clone().unwrap_or_default();
 
-                                        SidebarMenuItem::new(title).active(is_active).on_click({
-                                            let state = state.clone();
-                                            let on_page_change = on_page_change.clone();
-                                            move |_, _, cx| {
-                                                state.update(cx, |state, cx| {
-                                                    state.selected_index = SelectIndex {
-                                                        page_ix,
-                                                        group_ix: Some(group_ix),
-                                                    };
-                                                    state.deferred_scroll_group_ix = Some(group_ix);
-                                                    cx.notify();
-                                                });
-                                                if let Some(cb) = &on_page_change {
-                                                    cb(page_ix, cx);
+                                        SidebarMenuItem::new(title)
+                                            .when_some(entry_focus(group_key), |this, handle| {
+                                                this.track_focus(&handle)
+                                            })
+                                            .active(is_active)
+                                            .on_click({
+                                                let state = state.clone();
+                                                let on_page_change = on_page_change.clone();
+                                                move |_, _, cx| {
+                                                    select_entry(
+                                                        &state,
+                                                        group_key,
+                                                        on_page_change.as_ref(),
+                                                        cx,
+                                                    )
                                                 }
-                                            }
-                                        })
+                                            })
                                     }),
                             )
                         })
-                })),
-            )
+                }),
+            ));
+
+        let on_page_change = self.on_page_change.clone();
+        let handlers = Rc::new(NavHandlers {
+            state: state.clone(),
+            nav: nav.clone(),
+            on_page_change,
+        });
+        div()
+            .size_full()
+            .on_action({
+                let handlers = handlers.clone();
+                move |_: &SelectUp, window, cx| handlers.step(-1, window, cx)
+            })
+            .on_action({
+                let handlers = handlers.clone();
+                move |_: &SelectDown, window, cx| handlers.step(1, window, cx)
+            })
+            .on_action({
+                let handlers = handlers.clone();
+                move |_: &SelectFirst, window, cx| handlers.move_to(0, window, cx)
+            })
+            .on_action({
+                let handlers = handlers.clone();
+                move |_: &SelectLast, window, cx| {
+                    let last = handlers.nav.entries.len().saturating_sub(1);
+                    handlers.move_to(last, window, cx)
+                }
+            })
+            .on_action({
+                let handlers = handlers.clone();
+                move |_: &SelectRight, window, cx| handlers.expand_or_enter(window, cx)
+            })
+            .on_action({
+                let handlers = handlers.clone();
+                move |_: &SelectLeft, window, cx| handlers.collapse_or_parent(window, cx)
+            })
+            .on_action({
+                let handlers = handlers.clone();
+                move |_: &Confirm, window, cx| handlers.activate(window, cx)
+            })
+            .child(sidebar)
+    }
+}
+
+/// The navigation list's keyboard handlers, over the list as last rendered.
+struct NavHandlers {
+    state: Entity<SettingsState>,
+    nav: Rc<Nav>,
+    on_page_change: Option<PageChangeFn>,
+}
+
+impl NavHandlers {
+    /// ↑ / ↓: the neighbouring entry, which switches the page at once.
+    fn step(&self, delta: isize, window: &mut Window, cx: &mut App) {
+        cx.stop_propagation();
+        let target = self.nav.focused(window).saturating_add_signed(delta);
+        if target < self.nav.entries.len() {
+            self.move_to(target, window, cx);
+        }
+    }
+
+    fn move_to(&self, ix: usize, window: &mut Window, cx: &mut App) {
+        cx.stop_propagation();
+        let Some(entry) = self.nav.entries.get(ix) else {
+            return;
+        };
+        select_entry(&self.state, entry.key, self.on_page_change.as_ref(), cx);
+        entry.focus_handle.focus(window, cx);
+    }
+
+    /// →: open a closed submenu, otherwise go into the content pane.
+    fn expand_or_enter(&self, window: &mut Window, cx: &mut App) {
+        cx.stop_propagation();
+        let Some(entry) = self.nav.entries.get(self.nav.focused(window)) else {
+            return;
+        };
+        if entry.has_submenu && !entry.is_open {
+            self.set_open(entry, true, cx);
+        } else {
+            self.enter_content(entry, cx);
+        }
+    }
+
+    /// ←: close an open submenu, otherwise go to the parent entry.
+    fn collapse_or_parent(&self, window: &mut Window, cx: &mut App) {
+        cx.stop_propagation();
+        let Some(entry) = self.nav.entries.get(self.nav.focused(window)) else {
+            return;
+        };
+        if entry.key.group_ix.is_some() {
+            let parent = NavKey {
+                group_ix: None,
+                ..entry.key
+            };
+            if let Some(parent_ix) = self.nav.entries.iter().position(|e| e.key == parent) {
+                self.move_to(parent_ix, window, cx);
+            }
+        } else if entry.is_open {
+            self.set_open(entry, false, cx);
+        }
+    }
+
+    /// Enter / Space: select the entry and go into the content pane.
+    ///
+    /// The entry's own keyboard click never fires on top of this: gpui maps
+    /// Enter / Space to a click on the key-*up*, and only while focus has not
+    /// moved since the key-down (`Window::focus_generation`). This action
+    /// runs on the key-down and moves focus, so the click is dropped — which
+    /// is what keeps the page from being selected twice. Do not "simplify"
+    /// this into an `on_click`.
+    fn activate(&self, window: &mut Window, cx: &mut App) {
+        cx.stop_propagation();
+        let Some(entry) = self.nav.entries.get(self.nav.focused(window)) else {
+            return;
+        };
+        self.enter_content(entry, cx);
+    }
+
+    fn set_open(&self, entry: &NavEntry, open: bool, cx: &mut App) {
+        self.state.update(cx, |state, cx| {
+            state.open_pages.insert(entry.page_title.clone(), open);
+            cx.notify();
+        });
+    }
+
+    fn enter_content(&self, entry: &NavEntry, cx: &mut App) {
+        let selected = self.state.read(cx).selected_index;
+        if selected.page_ix != entry.key.page_ix || selected.group_ix != entry.key.group_ix {
+            select_entry(&self.state, entry.key, self.on_page_change.as_ref(), cx);
+        }
+        self.state.update(cx, |state, cx| {
+            state.enter_content_pending = true;
+            cx.notify();
+        });
     }
 }
 
@@ -314,6 +619,32 @@ pub struct SettingsState {
     pub search_input: Entity<InputState>,
     /// Track whether auto-focus has been applied.
     auto_focused: bool,
+    /// Submenus opened or closed by the user, by page title. A page not in
+    /// here follows its `default_open`.
+    open_pages: HashMap<SharedString, bool>,
+    /// Focus handles of the navigation entries.
+    nav_focus: HashMap<NavKey, FocusHandle>,
+    /// Focusable but not a tab stop: focusing it and then moving to the next
+    /// tab stop lands on the first control of the active page.
+    content_focus: FocusHandle,
+    /// Move focus into the content pane once the page it shows is drawn.
+    enter_content_pending: bool,
+}
+
+impl SettingsState {
+    fn is_page_open(&self, page: &SettingPage) -> bool {
+        self.open_pages
+            .get(&page.title)
+            .copied()
+            .unwrap_or(page.default_open)
+    }
+
+    fn nav_focus_handle(&mut self, key: NavKey, cx: &mut App) -> FocusHandle {
+        self.nav_focus
+            .entry(key)
+            .or_insert_with(|| cx.focus_handle())
+            .clone()
+    }
 }
 
 /// Options for rendering setting item.
@@ -439,6 +770,10 @@ impl RenderOnce for Settings {
                 selected_index: self.default_selected_index,
                 deferred_scroll_group_ix: None,
                 auto_focused: false,
+                open_pages: HashMap::new(),
+                nav_focus: HashMap::new(),
+                content_focus: cx.focus_handle(),
+                enter_content_pending: false,
             }
         });
 
@@ -473,8 +808,33 @@ impl RenderOnce for Settings {
             .with_size(self.size)
             .with_group_variant(self.group_variant);
         let sidebar_size_range = self.sidebar_size_range.clone();
+        let nav = Rc::new(state.update(cx, |state, cx| Nav::build(&filtered_pages, state, cx)));
+        let content_focus = state.read(cx).content_focus.clone();
+
+        // Tab stops are read from the last drawn frame, and the page that
+        // focus should enter is being drawn only now — so go in on the next
+        // frame. A page without any focusable control gives focus back to the
+        // navigation instead of stranding it on the invisible container.
+        if state.read(cx).enter_content_pending {
+            state.update(cx, |state, _| state.enter_content_pending = false);
+            let content_focus = content_focus.clone();
+            let entry_focus = nav
+                .entries
+                .get(nav.tab_stop)
+                .map(|entry| entry.focus_handle.clone());
+            window.on_next_frame(move |window, cx| {
+                content_focus.focus(window, cx);
+                window.focus_next(cx);
+                let landed_inside =
+                    content_focus.contains_focused(window, cx) && !content_focus.is_focused(window);
+                if !landed_inside && let Some(entry_focus) = entry_focus {
+                    entry_focus.focus(window, cx);
+                }
+            });
+        }
+
         let sidebar = self
-            .render_sidebar(&state, &filtered_pages, window, cx)
+            .render_sidebar(&state, &filtered_pages, &nav, window, cx)
             .into_any_element();
 
         h_resizable(self.id.clone())
@@ -490,15 +850,223 @@ impl RenderOnce for Settings {
                     // translucent settings window styles the content pane
                     // through it, so the refinement must reach the panel.
                     .refine_style(&self.content_style)
-                    .child(container_query(move |size, window, cx| {
-                        let options =
-                            options.with_layout(if size.width <= STACKED_LAYOUT_MAX_WIDTH {
-                                Axis::Vertical
-                            } else {
-                                Axis::Horizontal
-                            });
-                        self.render_active_page(&state, &filtered_pages, &options, window, cx)
-                    })),
+                    .child(
+                        div()
+                            .id("settings-content")
+                            .track_focus(&content_focus.tab_index(0).tab_stop(false))
+                            .size_full()
+                            .child(container_query(move |size, window, cx| {
+                                let options = options.with_layout(
+                                    if size.width <= STACKED_LAYOUT_MAX_WIDTH {
+                                        Axis::Vertical
+                                    } else {
+                                        Axis::Horizontal
+                                    },
+                                );
+                                self.render_active_page(
+                                    &state,
+                                    &filtered_pages,
+                                    &options,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
+
+    use gpui::{
+        Context, KeyDownEvent, KeyUpEvent, Keystroke, Render, TestAppContext, VisualTestContext,
+    };
+
+    use super::*;
+    use crate::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
+
+    struct SettingsHarness {
+        page_changes: Rc<RefCell<Vec<usize>>>,
+        toggled: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    impl SettingsHarness {
+        fn switch(&self, name: &'static str) -> SettingItem {
+            let toggled = self.toggled.clone();
+            SettingItem::new(
+                name,
+                SettingField::switch(|_| false, move |_, _| toggled.borrow_mut().push(name)),
+            )
+        }
+    }
+
+    impl Render for SettingsHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let page_changes = self.page_changes.clone();
+            div().size(px(800.)).child(
+                Settings::new("settings")
+                    .page(
+                        SettingPage::new("General")
+                            .group(
+                                SettingGroup::new()
+                                    .title("Files")
+                                    .item(self.switch("files")),
+                            )
+                            .group(
+                                SettingGroup::new()
+                                    .title("Index")
+                                    .item(self.switch("index")),
+                            ),
+                    )
+                    .page(
+                        SettingPage::new("Panels")
+                            .group(SettingGroup::new().item(self.switch("panels"))),
+                    )
+                    .page(
+                        SettingPage::new("Network")
+                            .group(SettingGroup::new().item(self.switch("network"))),
+                    )
+                    .on_page_change(move |page_ix, _| page_changes.borrow_mut().push(page_ix)),
+            )
+        }
+    }
+
+    fn harness(
+        cx: &mut TestAppContext,
+    ) -> (
+        &mut VisualTestContext,
+        Rc<RefCell<Vec<usize>>>,
+        Rc<RefCell<Vec<&'static str>>>,
+    ) {
+        cx.update(crate::init);
+        let page_changes = Rc::new(RefCell::new(Vec::new()));
+        let toggled = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view({
+            let page_changes = page_changes.clone();
+            let toggled = toggled.clone();
+            move |_, _| SettingsHarness {
+                page_changes,
+                toggled,
+            }
+        });
+        settle(cx);
+        (cx, page_changes, toggled)
+    }
+
+    /// Draw, then deliver the next frame, which is when focus enters the
+    /// content pane.
+    fn settle(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    fn tab(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.focus_next(cx));
+        settle(cx);
+    }
+
+    fn key(cx: &mut VisualTestContext, key: &str) {
+        let keystroke = Keystroke::parse(key).unwrap();
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
+        settle(cx);
+    }
+
+    #[gpui::test]
+    fn one_tab_leads_from_the_navigation_into_the_content(cx: &mut TestAppContext) {
+        let (cx, page_changes, toggled) = harness(cx);
+        // Search input, then the selected entry — the only tab stop of the list.
+        tab(cx);
+        tab(cx);
+        tab(cx);
+
+        key(cx, "space");
+
+        assert_eq!(*toggled.borrow(), ["files"]);
+        assert!(page_changes.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn arrows_move_through_the_navigation_and_switch_the_page(cx: &mut TestAppContext) {
+        let (cx, page_changes, _) = harness(cx);
+        tab(cx);
+        tab(cx);
+
+        key(cx, "down");
+        key(cx, "down");
+        key(cx, "down");
+        assert_eq!(
+            *page_changes.borrow(),
+            [1, 2],
+            "no step past the last entry"
+        );
+
+        key(cx, "home");
+        key(cx, "end");
+        assert_eq!(*page_changes.borrow(), [1, 2, 0, 2]);
+    }
+
+    #[gpui::test]
+    fn right_opens_a_submenu_and_left_returns_to_its_page(cx: &mut TestAppContext) {
+        let (cx, page_changes, _) = harness(cx);
+        tab(cx);
+        tab(cx);
+
+        key(cx, "right");
+        assert!(page_changes.borrow().is_empty(), "opening does not select");
+        key(cx, "down");
+        assert_eq!(*page_changes.borrow(), [0], "the first group of General");
+        key(cx, "left");
+        assert_eq!(*page_changes.borrow(), [0, 0], "back on General");
+        key(cx, "left");
+        key(cx, "down");
+        assert_eq!(*page_changes.borrow(), [0, 0, 1], "closed: Panels is next");
+    }
+
+    #[gpui::test]
+    fn enter_selects_the_page_once_and_moves_into_its_content(cx: &mut TestAppContext) {
+        let (cx, page_changes, toggled) = harness(cx);
+        tab(cx);
+        tab(cx);
+        key(cx, "down");
+
+        key(cx, "enter");
+        assert_eq!(
+            *page_changes.borrow(),
+            [1],
+            "the entry's keyboard click must not select the page a second time"
+        );
+        assert!(
+            toggled.borrow().is_empty(),
+            "the key-up must not reach the control focus moved to"
+        );
+
+        key(cx, "space");
+        assert_eq!(*toggled.borrow(), ["panels"]);
+    }
+
+    #[gpui::test]
+    fn right_on_an_entry_without_submenu_moves_into_the_content(cx: &mut TestAppContext) {
+        let (cx, _, toggled) = harness(cx);
+        tab(cx);
+        tab(cx);
+        key(cx, "end");
+
+        key(cx, "right");
+        key(cx, "space");
+
+        assert_eq!(*toggled.borrow(), ["network"]);
     }
 }
