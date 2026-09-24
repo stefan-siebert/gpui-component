@@ -189,6 +189,12 @@ impl RenderOnce for Switch {
 
         div().refine_style(&self.style).child(
             BaseSwitch::new(self.id.clone())
+                // The ring below checks this handle, so the base switch must
+                // track it rather than create its own one element-id level
+                // deeper (a `RenderOnce` renders under its type name).
+                .track_focus(&focus_handle)
+                .tab_stop(self.tab_stop)
+                .tab_index(self.tab_index)
                 .checked(checked)
                 .disabled(self.disabled)
                 .styles(|styles| {
@@ -205,13 +211,6 @@ impl RenderOnce for Switch {
                 .h_flex()
                 .gap_2()
                 .items_start()
-                .when(!self.disabled, |this| {
-                    this.track_focus(
-                        &focus_handle
-                            .tab_stop(self.tab_stop)
-                            .tab_index(self.tab_index),
-                    )
-                })
                 .when(self.label_side.is_left(), |this| this.flex_row_reverse())
                 .child(
                     // Switch Bar

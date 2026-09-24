@@ -31,6 +31,7 @@ pub struct Switch {
     accessibility_label: Option<SharedString>,
     tab_index: isize,
     tab_stop: bool,
+    provided_focus_handle: Option<FocusHandle>,
 }
 
 /// Semantic root styles supported by [`Switch`].
@@ -254,6 +255,7 @@ impl Switch {
             accessibility_label: None,
             tab_index: 0,
             tab_stop: true,
+            provided_focus_handle: None,
         }
     }
 
@@ -314,11 +316,23 @@ impl Switch {
         self
     }
 
+    /// Uses a caller-owned focus handle instead of creating keyed state.
+    ///
+    /// A styled wrapper that draws its own focus ring must pass the handle it
+    /// checks: this switch renders one element-id level deeper than its
+    /// wrapper, so keyed state it creates on its own is a different handle.
+    pub fn track_focus(mut self, focus_handle: &FocusHandle) -> Self {
+        self.provided_focus_handle = Some(focus_handle.clone());
+        self
+    }
+
     fn focus_handle(&self, window: &mut Window, cx: &mut App) -> FocusHandle {
-        window
-            .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
-            .read(cx)
-            .clone()
+        self.provided_focus_handle.clone().unwrap_or_else(|| {
+            window
+                .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
+                .read(cx)
+                .clone()
+        })
     }
 }
 
@@ -724,5 +738,37 @@ mod tests {
         // GPUI currently has no aria-disabled setter. Keep the limitation
         // explicit instead of claiming an AccessKit disabled state.
         assert!(!disabled.is_disabled());
+    }
+
+    struct ProvidedFocusHarness {
+        focus_handle: FocusHandle,
+    }
+
+    impl Render for ProvidedFocusHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().id("switch-parent").tab_group().size(px(100.)).child(
+                Switch::new("switch")
+                    .track_focus(&self.focus_handle)
+                    .size_full(),
+            )
+        }
+    }
+
+    /// A styled wrapper draws its focus ring from the handle it passes in, so
+    /// keyboard traversal has to land on exactly that handle. It did not after
+    /// the gpui-base split: the base switch created its own one element-id
+    /// level deeper and the ring never lit.
+    #[gpui::test]
+    fn tab_focuses_the_caller_owned_handle(cx: &mut TestAppContext) {
+        let focus_handle = cx.update(|cx| cx.focus_handle());
+        let (_, cx) = cx.add_window_view({
+            let focus_handle = focus_handle.clone();
+            move |_, _| ProvidedFocusHarness { focus_handle }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        cx.update(|window, cx| window.focus_next(cx));
+
+        cx.update(|window, _| assert!(focus_handle.is_focused(window)));
     }
 }
