@@ -1658,7 +1658,8 @@ mod tests {
         if enabled && closable {
             assert_eq!(
                 button.as_ref().map(|bounds| bounds.size.width),
-                Some(px(20.)),
+                // Fork: controls grow by the platform boost on Windows.
+                Some(px(20.) + crate::sizing::platform_control_h_boost()),
                 "the close button keeps the standard XS hover target"
             );
         }

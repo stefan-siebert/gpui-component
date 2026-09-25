@@ -190,9 +190,12 @@ mod tests {
             IconSource::Data(_)
         ));
 
-        let menu = PopupMenuItem::new("Search").icon(Search);
+        // Fork: menu slots take a `MenuIcon` (vector or raster), so the
+        // custom icon goes in as an `Icon`.
+        let menu = PopupMenuItem::new("Search").icon(crate::Icon::from(Search));
         let PopupMenuItem::Item {
-            icon: Some(icon), ..
+            icon: Some(crate::menu::MenuIcon::Vector(icon)),
+            ..
         } = menu
         else {
             panic!("custom data icons must be accepted by menu slots");

@@ -117,6 +117,9 @@ fn click_nav(y: f32, cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+// Fork: clicks land on fixed pixel rows, and on Windows every row is 4px
+// taller (`sizing::platform_control_h_boost`, WinUI parity).
+#[cfg_attr(target_os = "windows", ignore = "pixel rows assume the unboosted height")]
 fn search_preserves_the_page_and_clicks_use_original_indices(cx: &mut TestAppContext) {
     let (host, cx) = setup(cx);
     // The old numeric index is still in range, but would point to Editor.
@@ -150,6 +153,9 @@ fn search_preserves_the_page_and_clicks_use_original_indices(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+// Fork: clicks land on fixed pixel rows, and on Windows every row is 4px
+// taller (`sizing::platform_control_h_boost`, WinUI parity).
+#[cfg_attr(target_os = "windows", ignore = "pixel rows assume the unboosted height")]
 fn search_preserves_group_and_item_identity(cx: &mut TestAppContext) {
     let (host, cx) = setup(cx);
     // Make the target group require scrolling, with an unnamed group before it.
