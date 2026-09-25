@@ -25,14 +25,15 @@ natural Chinese rather than word-for-word translation.
 
 ## Project Overview
 
-GPUI Component is a UI component library for building desktop applications using [GPUI](https://gpui.rs). It provides 60+ cross-platform desktop UI components, inspired by macOS/Windows controls and combined with shadcn/ui design.
+GPUI Kit is a Rust desktop application framework built on GPUI, published at <https://gpui-kit.com>. It ships as three crates: `gpui-base` (unstyled behavior and infrastructure), `gpui-shell` (JavaScript extensions for a Rust host), and `gpui-component` (GPUI Component, the styled component library with 60+ cross-platform desktop UI components, inspired by macOS/Windows controls and combined with shadcn/ui design). Applications depend on the umbrella crate `gpui-kit` (`crates/kit`), which pins the matching `gpui-pre-*` snapshot of GPUI and puts GPUI at its root (`use gpui_kit::*;`) with `gpui_kit::platform`, `gpui_kit::base`, `gpui_kit::component` and `gpui_kit::assets` reachable by name, so they never list GPUI itself. `gpui-shell` is not part of `gpui-kit` and is not published yet (its `llrt_*` dependencies are git-only); use it as a git dependency.
 
 This is a Rust workspace project with the following main crates:
 
-- `crates/ui` - Core UI component library (published as `gpui-component`)
+- `crates/kit` - Umbrella crate applications depend on (published as `gpui-kit`)
+- `crates/component` - Core UI component library (published as `gpui-component`)
 - `crates/story` - Gallery application for showcasing and testing components
 - `crates/story-web` - Web version of the story gallery (using WebAssembly)
-- `crates/macros` - Procedural macros (`IntoPlot` derive)
+- `crates/component-macros` - Procedural macros (`IntoPlot` derive)
 - `crates/assets` - Static assets
 - `crates/webview` - WebView component support
 - `examples/` - Various example applications
@@ -105,9 +106,10 @@ implementing this architecture:
 
 - Do not modify `gpui-base` unless the user explicitly requests a Base-layer
   change. By default, implement component behavior and visual styling in
-  `crates/ui` or the application layer.
+  `crates/component` or the application layer.
 
-- Keep `gpui-component` as the ecosystem and product brand.
+- Keep GPUI Kit as the ecosystem and product brand; `gpui-component` is its
+  styled component layer, alongside `gpui-base` and `gpui-shell`.
 - Name the foundation crate `gpui-base`.
 - Follow the ownership boundary: the framework owns behavior and infrastructure;
   the application owns component source and visual style.
@@ -119,41 +121,48 @@ implementing this architecture:
 - Keep source distribution or registry tooling above the `gpui-base` seam; no
   registry or CLI crate is currently part of the workspace.
 - Preserve 100% backward compatibility for existing consumers, including current
-  imports such as `use gpui_component::button::Button;`.
+  imports such as `use gpui_kit::component::button::Button;`.
 
 ### Component Initialization
 
-**Critical requirement**: You must call `gpui_component::init(cx)` at your application's entry point before using any GPUI Component features.
+Call `gpui_kit::init(cx)` before opening windows that use styled components.
+It includes Base initialization and registers Component's window extension.
 
 ```rust
 fn main() {
-    let app = Application::new();
-    app.run(move |cx| {
-        // This must be called first
-        gpui_component::init(cx);
-
-        cx.spawn(async move |cx| {
-            cx.open_window(WindowOptions::default(), |window, cx| {
-                let view = cx.new(|_| MyView);
-                // The first level view in a window must be a Root
-                cx.new(|cx| Root::new(view, window, cx))
-            })
-            .expect("Failed to open window");
-        }).detach();
+    gpui_kit::application().run(|cx| {
+        gpui_kit::init(cx);
+        gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+            cx.new(|_| MyView)
+        })
+        .expect("Failed to open window");
     });
 }
 ```
 
+Base-only fixtures use GPUI directly and must not depend on Kit or Component.
+Applications and Kit tests use `gpui_kit::open_window` as their window entry point.
+
 ### Root View System
 
-`Root` is the top-level view for a window and manages:
+`gpui_base::Root` is the top-level view for every window created by
+`gpui_kit::open_window`. The helper belongs only to Kit; Base supplies the Root
+implementation. `component::Root` re-exports the Base type. Cargo features do not
+select a different root type.
 
-- Sheet (side panels)
-- Dialog (dialogs)
-- Notification (notifications)
-- Keyboard navigation (Tab/Shift-Tab)
+Base owns content and overlay hosting, keyboard navigation (Tab/Shift-Tab),
+and selection copying. Explicit Component initialization registers per-window
+state and presentation for dialogs, sheets, notifications, tooltips, menus,
+touch selection, themes and window chrome. Initialize before creating windows.
 
-The first view of every window must be a `Root`.
+The helper returns the window handle and application content entity. Its builder
+must return content, not another Root. Overlay layers mount automatically; do not
+call the removed `Root::render_*_layer` methods. In async contexts call the helper
+inside `cx.update`. Tests should use the same helper and retain its returned
+content entity when they need to inspect or update application state. Avoid
+constructing `Root` directly in application and test startup code.
+
+Quit/close actions, keyboard shortcuts and confirmation flows belong to the application.
 
 ### Theme System
 
@@ -169,15 +178,15 @@ The first view of every window must be a `Root`.
 
 ### Dock System
 
-Layout behavior lives in `crates/base/src/dock`; `crates/ui/src/dock` is a
+Layout behavior lives in `crates/base/src/dock`; `crates/component/src/dock` is a
 presentation skin (`DockSkin`) over it. See `docs/ARCHITECTURE.md`.
 
 - **`LayoutTree`**: Pure-data layout tree, the single source of truth.
-  - `NodeKind::Split` / `Tabs` / `Tiles`: containers, addressed by `NodeId`
+  - `NodeKind::Split` / `Tabs`: containers, addressed by `NodeId`
   - Panels are addressed by `PanelId`; the tree holds no entity handles
 - **`DockArea`**: Owns the center and dock trees, reconciles them into a
   cache of container entities keyed by `NodeId`
-- **`TabGroup`** / **`TilesState`**: The `Tabs`/`Tiles` container entities
+- **`TabGroup`**: The `Tabs` container entity
 - **`Panel`**: Split at the seam — `gpui_base::dock::Panel` for behavior,
   `gpui_component::dock::Panel` for presentation; a panel implements both
 - **`PanelRegistry`**: Resolves a persisted `panel_name` back to a panel type
@@ -210,7 +219,7 @@ Text input system based on Rope data structure:
 4. **Style system**: Provides CSS-like styling API via `Styled` trait and `ElementExt` extensions
 5. **Base controls are no-style**: Base controls and parts do not install layout,
    positioning, colors, sizing, gaps, radius, borders, shadows, variants, or animation.
-   Complete presentation belongs to `crates/ui` or the application. The deliberate
+   Complete presentation belongs to `crates/component` or the application. The deliberate
    exception is the foundational Base Input frame, which provides only a semantic
    one-pixel input border and semantic radius baseline; UI/application layers own
    its background, sizing, padding, typography, adornments, and richer focus style.
@@ -242,15 +251,18 @@ Text input system based on Rope data structure:
 - When creating a PR, inspect previous PR titles in the repository and match
   that style. Do not blindly use conventional prefixes like `fix:` or `feat:`
   unless the existing PR title style uses them.
-- When a PR changes the public API of `crates/ui`, add a `## Breaking Changes`
-  section with `diff` blocks showing the old and new usage. See PR #2691 and
-  `.claude/skills/gpui-component-dev/references/pr-description.md`.
+- When a PR adds, changes or removes public API in any crate, list every item
+  under a `## Public API` section of the description, grouped by crate, with its
+  signature and one line on its purpose (JavaScript methods and TypeScript
+  declarations included). Changes to existing items also go under
+  `## Breaking Changes` with `diff` blocks showing the old and new usage. See
+  PR #2691 and the "Describe public API changes" section of `CONTRIBUTING.md`.
 - Avoid `Kind` as a type-name suffix. It says an enum classifies something
   without saying what it classifies, and carries no meaning a reader could not
-  already infer from `enum`. Name the type after what its variants *are*
+  already infer from `enum`. Name the type after what its variants _are_
   instead. Keep `Kind` only when no honest name covers the variant set —
   `NodeKind`'s variants straddle two levels (`Split` is an interior node,
-  `Tabs` and `Tiles` are leaves), and every domain word for the leaf level
+  `Tabs` is a leaf), and every domain word for the leaf level
   (`Pane`, most of all) would misdescribe `Split`; a vaguer name is better
   than a precise wrong one. Prefer confining such a type to `pub(crate)`.
   This governs new code; existing `Kind` names are not a rewrite target on
@@ -262,7 +274,7 @@ Text input system based on Rope data structure:
 The `Icon` element does not include SVG files by default. You need to:
 
 - Use [Lucide](https://lucide.dev) or other icon libraries
-- Name SVG files according to the `IconName` enum definition (located in `crates/ui/src/icon.rs`)
+- Name SVG files according to the `IconName` enum definition (located in `crates/component/src/icon.rs`)
 
 ## Dependencies
 
@@ -278,7 +290,7 @@ The `Icon` element does not include SVG files by default. You need to:
 
 Uses `rust-i18n` crate.
 
-- Localization files are located in `crates/ui/locales/`.
+- Localization files are located in `crates/component/locales/`.
 - Only add `en`, `zh-CN`, `zh-HK` by default.
 
 ## MCP Inspector (`mcp` feature)
@@ -312,17 +324,18 @@ Test it with the story app: `cargo run -p gpui-component-story --features mcp`.
 - When modifying any documentation file, always sync changes to both `en` and `zh-CN` versions.
 - `docs/` holds internal architecture specifications (RFC, migration status, reviews).
   These are single-language and are not published to the site; see `docs/README.md`.
-- `skills/gpui-component/references/{coding,design}-guides.md` are verbatim copies
-  of the English `website/docs/` originals, vendored so the skill works after
+- `skills/gpui-kit/references/coding-guides.md` and
+  `skills/gpui-kit-design-guides/references/design-guides.md` are verbatim copies
+  of the English `website/docs/` originals, vendored so the skills work after
   `npx skills add` in a project that does not have this repo. After editing either
   guide, copy it across:
 
   ```bash
-  cp website/docs/design-guides.md skills/gpui-component/references/design-guides.md
-  cp website/docs/coding-guides.md skills/gpui-component/references/coding-guides.md
+  cp website/docs/design-guides.md skills/gpui-kit-design-guides/references/design-guides.md
+  cp website/docs/coding-guides.md skills/gpui-kit/references/coding-guides.md
   ```
 
-  CI fails if the copies drift. Never edit the copy directly — edit `website/docs/`.
+  Never edit the copy directly — edit `website/docs/`.
 
 ## Platform Support
 
@@ -336,8 +349,8 @@ CI runs full test suite on each platform.
 
 This project has custom Claude Code skills to assist with common development tasks:
 
-- **gpui** (`skills/`) - GPUI framework knowledge: actions/keybindings, async, context, custom elements, entity state, events, focus, global state, layout/styling, testing
-- **gpui-component** (`skills/`) - How to use gpui-component: setup, stateless/stateful patterns, common component APIs, theming
+- **gpui-kit** (`skills/`) - Building applications on the `gpui-kit` crate: setup, component catalog, stateless/stateful patterns, theming, GPUI mechanics (actions, async, contexts, custom elements, entities, events, focus, global state, layout, `ElementId`, testing), and the normative Coding Guides
+- **gpui-kit-design-guides** (`skills/`) - The normative Design Guides; load before any UI, layout, interaction, or interface-copy work
 - **gpui-component-dev** (`.claude/skills/`) - Contributing to gpui-component: creating new components, writing stories, writing documentation, writing PR descriptions
 
 When working on tasks related to these areas, Claude Code will automatically use the appropriate skill to provide specialized guidance and patterns.

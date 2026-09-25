@@ -1,9 +1,6 @@
 // You can draw any chart you want by using the `Plot`.
 
-use gpui::{
-    AnyElement, App, Bounds, ElementId, IntoElement, Pixels, Point, TextAlign, Window, point, px,
-};
-use gpui_component::{
+use gpui_kit::component::{
     ActiveTheme,
     plot::{
         AXIS_GAP, AxisText, Grid, IntoPlot, Plot, PlotAxis,
@@ -12,6 +9,7 @@ use gpui_component::{
         tooltip::{CrossLine, Tooltip, TooltipState},
     },
 };
+use gpui_kit::*;
 
 use super::DailyDevice;
 
@@ -183,6 +181,8 @@ impl Plot for StackedBarChart {
         .padding_outer(0.2)
         .band_width();
 
+        // The overlay fades in and out with the hover, and the band glides
+        // between columns, on its own.
         let mut tooltip = Tooltip::new(cursor, bounds.size)
             .gap(px(8.))
             .cross_line(
@@ -193,6 +193,7 @@ impl Plot for StackedBarChart {
             .title(d.date.clone());
 
         // One row per stacked series (its segment value at this band).
+        let mut total = 0.;
         for series in self.series.iter() {
             let color = ordinal.map(&series.key).unwrap_or(cx.theme().chart_4);
             let value = series
@@ -200,9 +201,14 @@ impl Plot for StackedBarChart {
                 .get(state.index)
                 .map(|p| p.y1 - p.y0)
                 .unwrap_or(0.);
+            total += value;
             tooltip = tooltip.row(color, series.key.clone(), format!("{}", value));
         }
 
-        Some(tooltip.into_any_element())
+        Some(
+            tooltip
+                .plain_row("total", format!("{}", total))
+                .into_any_element(),
+        )
     }
 }

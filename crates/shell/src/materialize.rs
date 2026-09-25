@@ -10,13 +10,13 @@
 //! but only to dispatch events: no path through this module calls into the
 //! script while an element is being built.
 //!
-//! # The one exception: `VirtualList`
+//! # The one exception: the lazy lists
 //!
-//! A virtualized list is the single component whose description is not the
+//! A lazy list is the single kind of component whose description is not the
 //! whole of what it draws. Its rows are produced by a script callback that
 //! GPUI runs from *inside* layout and prepaint — twice per frame, once to
-//! measure and once to place — so a frame that contains a virtual list does
-//! enter the VM, once per list, no matter what changed.
+//! measure and once to place — so a frame that contains one does enter the VM,
+//! no matter what changed.
 //!
 //! That is not a leak in the design; it is the trade the design was for. The
 //! alternative is describing every row up front, which is exactly the cost
@@ -24,6 +24,16 @@
 //! can be seen. What the exception buys is that the VM is entered for the
 //! *visible window* rather than for the collection, so the script cost of a
 //! ten-thousand-row list is the script cost of a twenty-row one.
+//!
+//! How often it is entered depends on which list, because that is set by the
+//! GPUI API each one wraps. [`Component::VirtualList`] and `uniform_list` take
+//! a renderer over a range, so one frame is one call however many rows are on
+//! screen. `list` — the one that measures each item rather than placing them
+//! all by one — takes a renderer over a single index, so one frame is *one
+//! call per visible row*, plus the rows in its overdraw band. Both are bounded
+//! by the viewport rather than by the collection, which is the property that
+//! matters; but a `list` of twenty visible rows costs twenty crossings where a
+//! virtual list costs one, and that is the price of not stating heights.
 //!
 //! Three things confine it, and they are worth naming because each is what
 //! stops the exception from spreading:
@@ -46,9 +56,67 @@
 
 use std::{
     cell::Cell,
+    cell::RefCell,
     rc::{Rc, Weak},
     time::Duration,
 };
+
+// Failures raised by registered components while a subtree is being built.
+//
+// `materialize_node` returns an element rather than a `Result`, because a
+// component that fails still has to leave something on screen for the rest of
+// the frame. A caller that materializes a subtree *on behalf of an adapter* —
+// a deferred slot factory, a temporary build — needs the failure instead, so it
+// opens a frame here and reads back the first error recorded under it. Nothing
+// outside this file may push or pop; `with_error_frame` is the only way in.
+thread_local! {
+    static FACTORY_MATERIALIZE_ERRORS: RefCell<Vec<Option<anyhow::Error>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Runs `build`, turning the first registered-component failure inside it into
+/// an `Err`.
+fn with_error_frame(build: impl FnOnce() -> AnyElement) -> anyhow::Result<AnyElement> {
+    FACTORY_MATERIALIZE_ERRORS.with(|errors| errors.borrow_mut().push(None));
+    // Pops the frame if `build` unwinds, so a panic cannot leave the stack one
+    // frame deep for every later build on this thread.
+    struct Frame(bool);
+    impl Drop for Frame {
+        fn drop(&mut self) {
+            if !self.0 {
+                FACTORY_MATERIALIZE_ERRORS.with(|errors| {
+                    errors.borrow_mut().pop();
+                });
+            }
+        }
+    }
+    let mut frame = Frame(false);
+    let element = build();
+    let error = FACTORY_MATERIALIZE_ERRORS
+        .with(|errors| errors.borrow_mut().pop().expect("this frame was pushed"));
+    frame.0 = true;
+    error.map_or(Ok(element), Err)
+}
+
+fn materialize_factory_subtree(
+    runtime: &Rc<ShellRuntime>,
+    snapshot: &RenderSnapshot,
+    root: SpecId,
+    inherited: gpui::Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) -> anyhow::Result<AnyElement> {
+    with_error_frame(|| {
+        materialize_node(
+            runtime,
+            Some(snapshot),
+            snapshot.arena(),
+            root,
+            inherited,
+            window,
+            cx,
+        )
+    })
+}
 
 use smallvec::SmallVec;
 
@@ -68,8 +136,10 @@ use gpui_base::{
 };
 
 mod components;
+mod text_view;
 
 use crate::{
+    capability::is_openable_url,
     engine::ShellRuntime,
     scroll::Scrollable,
     snapshot::RenderSnapshot,
@@ -83,7 +153,7 @@ use crate::{
 /// Eight because a quote row is six cells and a wrapper, which is the widest
 /// ordinary shape; past that the spill is one allocation for a node that was
 /// always going to be expensive.
-type Children = SmallVec<[AnyElement; 8]>;
+use crate::component_registry::Children;
 
 /// The named slots a node's ops filled, in the order the script filled them.
 ///
@@ -92,10 +162,10 @@ type Children = SmallVec<[AnyElement; 8]>;
 /// trigger and a content, a number input fills three. Two inline covers every
 /// component bound today and every one on the way; a third is one allocation on
 /// a node that already carries whole subtrees.
-type Slots = SmallVec<[(&'static str, AnyElement); 2]>;
+use crate::component_registry::Slots;
 
 /// The same list before the slots are materialized.
-type SlotSpecs = SmallVec<[(&'static str, SpecId); 2]>;
+use crate::component_registry::SlotSpecs;
 
 /// The children of a node whose component takes a *typed* child.
 ///
@@ -115,6 +185,7 @@ type SlotSpecs = SmallVec<[(&'static str, SpecId); 2]>;
 #[derive(Clone, Copy)]
 struct ChildSpecs<'a> {
     runtime: &'a Rc<ShellRuntime>,
+    snapshot: Option<&'a RenderSnapshot>,
     arena: &'a SpecArena,
     ids: &'a [SpecId],
     /// The text color the parent passes down, already resolved.
@@ -141,7 +212,15 @@ impl<'a> ChildSpecs<'a> {
 
     /// The ordinary path, for every child the parent does not own.
     fn element(&self, id: SpecId, window: &mut Window, cx: &mut App) -> AnyElement {
-        materialize_node(self.runtime, self.arena, id, self.inherited, window, cx)
+        materialize_node(
+            self.runtime,
+            self.snapshot,
+            self.arena,
+            id,
+            self.inherited,
+            window,
+            cx,
+        )
     }
 
     /// Everything [`materialize_node`] resolves before it decides what to
@@ -174,7 +253,17 @@ impl<'a> ChildSpecs<'a> {
         let children: Children = node
             .children()
             .iter()
-            .map(|child| materialize_node(self.runtime, self.arena, *child, inherited, window, cx))
+            .map(|child| {
+                materialize_node(
+                    self.runtime,
+                    self.snapshot,
+                    self.arena,
+                    *child,
+                    inherited,
+                    window,
+                    cx,
+                )
+            })
             .collect();
         Some(NodeParts {
             refinement,
@@ -246,6 +335,8 @@ struct Behavior {
     href: Option<SharedString>,
     on_click: Option<CallbackId>,
     on_change: Option<CallbackId>,
+    token: Option<CallbackId>,
+    on_token_click: Option<CallbackId>,
     on_mouse_move: Option<CallbackId>,
     on_hover: Option<CallbackId>,
     /// Reports a key press that reached this element.
@@ -349,14 +440,17 @@ struct Behavior {
     /// deliberate limit rather than a convenience: see
     /// [`components::virtual_list`].
     on_item_click: Option<CallbackId>,
+    /// Reports a secondary press on a virtual list row, with the row's key and
+    /// the press itself. Registered on the list for the same reason
+    /// `on_item_click` is.
+    on_item_secondary_click: Option<CallbackId>,
     /// Which item a `VirtualList` measures to infer its cross-axis size.
     /// `None` keeps base's own default, which is the first.
     item_to_measure_index: Option<usize>,
     /// The dock commands a chrome element carries — what base is asked to do
     /// when it is clicked or dragged.
     ///
-    /// A list, because one element often carries two: a tile's drag bar both
-    /// raises the tile and moves it, and a tab both selects and drags.
+    /// A list, because one element can carry two: a tab both selects and drags.
     dock_commands: SmallVec<[crate::dock::DockAction; 2]>,
     /// Which script handler draws each piece of a `dock_area`'s chrome.
     ///
@@ -424,6 +518,7 @@ struct Behavior {
     /// component's own default, and the two differ: a popover anchors top-left,
     /// a hover card top-center.
     anchor: Option<gpui::Anchor>,
+    frame_budget: Option<Duration>,
     /// The pointer button that opens a `Popover`.
     mouse_button: Option<MouseButton>,
     /// The label a hover shows over this element. A string rather than an
@@ -572,13 +667,14 @@ pub fn materialize(
     cx: &mut App,
 ) -> AnyElement {
     let ambient = window.text_style().color;
-    // Counted and timed because this is the half that follows frames: the story
-    // and the benchmark both read the two counters side by side, and the gap
-    // between them is the architecture.
+    // Counted and timed because this is the native half of rebuilding a dirty
+    // script view. Clean window frames reuse ShellRoot's cached subtree and do
+    // not enter here at all.
     let metrics = runtime.metrics();
     metrics.time_materialize(|| {
         materialize_node(
             runtime,
+            Some(snapshot),
             snapshot.arena(),
             snapshot.root(),
             ambient,
@@ -586,6 +682,18 @@ pub fn materialize(
             cx,
         )
     })
+}
+
+/// Builds the same eager element tree as a view render, preserving registered
+/// component failures for a source check instead of only showing a fallback.
+/// Deferred slots, nested views, and layout callbacks are not driven here.
+pub(crate) fn try_materialize(
+    runtime: &Rc<ShellRuntime>,
+    snapshot: &RenderSnapshot,
+    window: &mut Window,
+    cx: &mut App,
+) -> anyhow::Result<AnyElement> {
+    with_error_frame(|| materialize(runtime, snapshot, window, cx))
 }
 
 /// Materializes one described subtree from an arena that is not a snapshot's.
@@ -606,7 +714,17 @@ pub(crate) fn materialize_subtree(
     cx: &mut App,
 ) -> AnyElement {
     let ambient = window.text_style().color;
-    materialize_node(runtime, arena, root, ambient, window, cx)
+    materialize_node(runtime, None, arena, root, ambient, window, cx)
+}
+
+pub(crate) fn try_materialize_subtree(
+    runtime: &Rc<ShellRuntime>,
+    arena: &SpecArena,
+    root: SpecId,
+    window: &mut Window,
+    cx: &mut App,
+) -> anyhow::Result<AnyElement> {
+    with_error_frame(|| materialize_subtree(runtime, arena, root, window, cx))
 }
 
 /// Materializes one node, carrying the text color down the description.
@@ -619,6 +737,7 @@ pub(crate) fn materialize_subtree(
 /// come out light without the script saying so twice.
 fn materialize_node(
     runtime: &Rc<ShellRuntime>,
+    snapshot: Option<&RenderSnapshot>,
     arena: &SpecArena,
     id: SpecId,
     inherited: gpui::Hsla,
@@ -645,19 +764,23 @@ fn materialize_node(
     // A component that takes typed children is handed the descriptions instead:
     // flattening them here would throw away the very thing it needs. See
     // [`ChildSpecs`].
-    let children: Children = if takes_typed_children(&component) {
+    let children: Children = if takes_typed_children(&component)
+        || matches!(component, Component::Registered(_))
+    {
         Children::new()
     } else {
         node.children()
             .iter()
-            .map(|child| materialize_node(runtime, arena, *child, inherited, window, cx))
+            .map(|child| materialize_node(runtime, snapshot, arena, *child, inherited, window, cx))
             .collect()
     };
 
     // A slot's element is built here, beside the children, so it inherits the
     // same text color: where the component chooses to put it is the component's
     // business, but what it looks like should not depend on that choice.
-    let slots: Slots = if materializes_slots(&component, &behavior) {
+    let slots: Slots = if matches!(component, Component::Registered(_)) {
+        SmallVec::new()
+    } else if materializes_slots(&component, &behavior) {
         slot_specs
             .iter()
             .filter(|(name, _)| {
@@ -668,7 +791,7 @@ fn materialize_node(
             .map(|(name, slot)| {
                 (
                     *name,
-                    materialize_node(runtime, arena, *slot, inherited, window, cx),
+                    materialize_node(runtime, snapshot, arena, *slot, inherited, window, cx),
                 )
             })
             .collect()
@@ -679,7 +802,8 @@ fn materialize_node(
     // it knows which names it read.
     if !matches!(
         component,
-        Component::Collapsible
+        Component::Registered(_)
+            | Component::Collapsible
             | Component::Popover(_)
             | Component::HoverCard(_)
             | Component::Popup(_)
@@ -698,10 +822,30 @@ fn materialize_node(
     components::tooltip::warn_unhonoured_tooltip(&component, &behavior);
     warn_unhonoured_input(&component, &behavior);
 
-    materialize_component(
-        runtime, arena, node, id, component, inherited, refinement, behavior, states, children,
-        slots, slot_specs, window, cx,
-    )
+    match component {
+        Component::Registered(component) => materialize_registered_component(
+            runtime,
+            snapshot,
+            arena,
+            node,
+            element_id(id, behavior.key.clone()),
+            component,
+            inherited,
+            Box::new(RegisteredMaterializeParts {
+                refinement,
+                behavior,
+                children,
+                slots,
+                slot_specs,
+            }),
+            window,
+            cx,
+        ),
+        component => materialize_component(
+            runtime, snapshot, arena, node, id, component, inherited, refinement, behavior, states,
+            children, slots, slot_specs, window, cx,
+        ),
+    }
 }
 
 /// Dispatches an already-materialized node to its concrete component.
@@ -711,9 +855,136 @@ fn materialize_node(
 /// is multiplied by the depth of the script's element tree. Components can
 /// grow independently without making ordinary nested layouts exhaust Rust's
 /// default test-thread stack.
+struct RegisteredMaterializeParts {
+    refinement: StyleRefinement,
+    behavior: Behavior,
+    children: Children,
+    slots: Slots,
+    slot_specs: SlotSpecs,
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn materialize_registered_component(
+    runtime: &Rc<ShellRuntime>,
+    snapshot: Option<&RenderSnapshot>,
+    arena: &SpecArena,
+    node: &SpecNode,
+    identity: gpui::ElementId,
+    component: crate::spec::RegisteredComponentSpec,
+    inherited: gpui::Hsla,
+    parts: Box<RegisteredMaterializeParts>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let RegisteredMaterializeParts {
+        refinement,
+        behavior,
+        children,
+        slots,
+        slot_specs,
+    } = *parts;
+    let Some(descriptor) = runtime.component_registry().descriptor(component.id()) else {
+        tracing::error!(
+            "registered component `{}` has an unknown registry id {}",
+            component.name(),
+            component.id().as_u32()
+        );
+        return div()
+            .child(format!("Unknown component: {}", component.name()))
+            .into_any_element();
+    };
+    let mut resolve_element = |element, window: Option<&mut Window>, cx: Option<&mut App>| {
+        let window =
+            window.ok_or_else(|| anyhow::anyhow!("render Window authority is unavailable"))?;
+        let cx = cx.ok_or_else(|| anyhow::anyhow!("render App authority is unavailable"))?;
+        Ok(materialize_node(
+            runtime, snapshot, arena, element, inherited, window, cx,
+        ))
+    };
+    let child_specs = node
+        .children()
+        .iter()
+        .map(|child| {
+            let name = arena
+                .node(*child)
+                .and_then(SpecNode::component)
+                .and_then(|component| match component {
+                    Component::Registered(component) => Some(component.name()),
+                    _ => None,
+                });
+            (*child, name)
+        })
+        .collect();
+    // A factory leases the snapshot and allocates an `Rc` per slot, and most
+    // adapters read their slots eagerly. So the request is handed the recipe
+    // rather than the product, and builds one only for a slot actually asked
+    // for by name.
+    let slot_factory_specs: crate::component_registry::SlotSpecs = match snapshot {
+        Some(_) => slot_specs.iter().copied().collect(),
+        None => SmallVec::new(),
+    };
+    let make_slot_factory = |slot: SpecId| {
+        let snapshot = snapshot.cloned();
+        let runtime = Rc::downgrade(runtime);
+        crate::ComponentElementFactory::new(move |window, cx| {
+            let runtime = runtime.upgrade().ok_or_else(|| {
+                anyhow::anyhow!("component element factory runtime has been released")
+            })?;
+            let snapshot = snapshot
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("component element factory has no snapshot"))?;
+            anyhow::ensure!(
+                snapshot.belongs_to(&runtime),
+                "component element factory belongs to a different runtime"
+            );
+            materialize_factory_subtree(&runtime, snapshot, slot, inherited, window, cx)
+        })
+    };
+    let mut request =
+        crate::MaterializeRequest::new(crate::component_registry::MaterializeRequestInit {
+            component_name: component.name(),
+            element_id: identity,
+            payload: component.payload(),
+            operations: node.ops(),
+            runtime,
+            resolve_element: &mut resolve_element,
+            style: refinement,
+            children,
+            child_specs,
+            slots,
+            slot_factory_specs,
+            make_slot_factory: &make_slot_factory,
+            disabled: behavior.disabled,
+            selected: behavior.selected,
+            on_click: behavior.on_click,
+            application_owner: snapshot.and_then(RenderSnapshot::application_owner),
+        });
+    request.attach_render_authority(window, cx);
+    match descriptor.materializer().materialize(request) {
+        Ok(element) => element,
+        Err(error) => {
+            tracing::error!("failed to materialize `{}`: {error:#}", component.name());
+            FACTORY_MATERIALIZE_ERRORS.with(|frames| {
+                if let Some(held) = frames.borrow_mut().last_mut()
+                    && held.is_none()
+                {
+                    *held = Some(
+                        error.context(format!("failed to materialize `{}`", component.name())),
+                    );
+                }
+            });
+            div()
+                .child(format!("Failed to render {}", component.name()))
+                .into_any_element()
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn materialize_component(
     runtime: &Rc<ShellRuntime>,
+    snapshot: Option<&RenderSnapshot>,
     arena: &SpecArena,
     node: &SpecNode,
     id: SpecId,
@@ -729,6 +1000,9 @@ fn materialize_component(
     cx: &mut App,
 ) -> AnyElement {
     match component {
+        Component::Registered(_) => {
+            unreachable!("registered components dispatch before the built-in component match")
+        }
         Component::ChildView(child) => child.view().clone().into_any_element(),
         Component::Div => flex_element(
             runtime,
@@ -786,10 +1060,10 @@ fn materialize_component(
                 cx,
             )
         }
-        Component::TextView { id, text, format } => {
-            let mut view = match format {
-                crate::spec::TextViewFormat::Html => TextView::html(id, text),
-                crate::spec::TextViewFormat::Markdown => TextView::markdown(id, text),
+        Component::TextView(spec) => {
+            let mut view = match spec.format {
+                crate::spec::TextViewFormat::Html => TextView::html(spec.id, spec.text),
+                crate::spec::TextViewFormat::Markdown => TextView::markdown(spec.id, spec.text),
             }
             .style(TextViewStyle::from_theme(&Theme::global(cx)));
             if let Some(selectable) = behavior.selectable {
@@ -806,9 +1080,23 @@ fn materialize_component(
                 view = view.on_link_click(move |url, _event, window, cx| {
                     route.emit(crate::HostValue::from(url.to_string()), window, cx);
                 });
+            } else {
+                view = view.on_link_click(|url, event, _, cx| {
+                    // Preserve Base's activation behavior, but apply Shell's URL rules.
+                    let activate = match event {
+                        gpui::ClickEvent::Mouse(click) => {
+                            matches!(click.up.button, MouseButton::Left | MouseButton::Middle)
+                        }
+                        gpui::ClickEvent::Keyboard(_) => true,
+                        gpui::ClickEvent::Touch(click) => !click.long_press,
+                    };
+                    if activate && is_openable_url(url) {
+                        cx.open_url(url);
+                    }
+                });
             }
             Styled::style(&mut view).refine(&refinement);
-            view.into_any_element()
+            text_view::with_policy(view, spec.policy).into_any_element()
         }
         Component::Text(value) => {
             // A text run, not a `div` holding one. GPUI implements
@@ -1051,6 +1339,7 @@ fn materialize_component(
         Component::Resizable(id, axis) => components::resizable::panel_group(
             ChildSpecs {
                 runtime,
+                snapshot,
                 arena,
                 ids: node.children(),
                 inherited,
@@ -1118,8 +1407,8 @@ fn materialize_component(
             components::accordion::accordion(&id, refinement, behavior, children)
         }
         Component::AccordionItem => components::accordion::accordion_item(
-            runtime, arena, inherited, refinement, behavior, states, slot_specs, children, window,
-            cx,
+            runtime, snapshot, arena, inherited, refinement, behavior, states, slot_specs,
+            children, window, cx,
         ),
         Component::AccordionHeader => {
             components::accordion::orphan("AccordionHeader", "an AccordionItem's `header` slot")
@@ -1135,8 +1424,8 @@ fn materialize_component(
             components::pagination::pagination(&id, refinement, behavior, states, children)
         }
         Component::Avatar => components::avatar::avatar(
-            runtime, arena, inherited, refinement, behavior, states, slot_specs, children, window,
-            cx,
+            runtime, snapshot, arena, inherited, refinement, behavior, states, slot_specs,
+            children, window, cx,
         ),
         Component::AvatarImage(_) => components::avatar::orphan("AvatarImage"),
         Component::AvatarFallback => components::avatar::orphan("AvatarFallback"),
@@ -1172,6 +1461,9 @@ fn materialize_component(
         }
         Component::DockContent => components::dock::dock_content(refinement, behavior, children),
         Component::VirtualList(spec) => components::virtual_list::virtual_list(
+            runtime, &spec, refinement, behavior, states, children, window, cx,
+        ),
+        Component::List(spec) => components::list::list(
             runtime, &spec, refinement, behavior, states, children, window, cx,
         ),
         Component::Input(handle) => {
@@ -1213,7 +1505,23 @@ fn materialize_component(
             frame.extend(children);
             let frame = with_hover(frame, &states);
             let frame = with_active_and_focus(frame, &states);
-            frame.child(Input::new(&state)).into_any_element()
+            let callbacks = crate::InlineTokenCallbacks::new(
+                &state,
+                behavior
+                    .token
+                    .map(|id| crate::ComponentElementCallback::from_runtime(runtime, id)),
+                behavior
+                    .on_token_click
+                    .map(|id| crate::ComponentCallback::from_runtime(runtime, id)),
+            );
+            let input = callbacks.apply(
+                Input::new(&state),
+                |input, render| input.token(move |token, window, cx| render(token, window, cx)),
+                |input, listen| {
+                    input.on_token_click(move |event, window, cx| listen(event, window, cx))
+                },
+            );
+            frame.child(input).into_any_element()
         }
         Component::OtpInput(handle) => components::otp_input::otp_input(
             runtime, handle, refinement, behavior, states, children, window, cx,
@@ -1222,8 +1530,8 @@ fn materialize_component(
             components::textarea::textarea(runtime, handle, refinement, behavior, states, children)
         }
         Component::NumberInput(handle) => components::number_input::number_input(
-            runtime, arena, handle, inherited, refinement, behavior, states, slot_specs, children,
-            window, cx,
+            runtime, snapshot, arena, handle, inherited, refinement, behavior, states, slot_specs,
+            children, window, cx,
         ),
     }
 }
@@ -1867,6 +2175,7 @@ fn should_dispatch_hover(
 /// children still have to be built the ordinary way.
 pub(in crate::materialize) fn materialize_children(
     runtime: &Rc<ShellRuntime>,
+    snapshot: Option<&RenderSnapshot>,
     arena: &SpecArena,
     id: SpecId,
     inherited: gpui::Hsla,
@@ -1878,7 +2187,7 @@ pub(in crate::materialize) fn materialize_children(
     };
     node.children()
         .iter()
-        .map(|child| materialize_node(runtime, arena, *child, inherited, window, cx))
+        .map(|child| materialize_node(runtime, snapshot, arena, *child, inherited, window, cx))
         .collect()
 }
 
@@ -2039,6 +2348,7 @@ fn motion_element_id(
         // key its scroll position is filed under, so motion has to follow the
         // same name rather than a tree position.
         Component::VirtualList(spec) => gpui::ElementId::Name(spec.id().to_owned().into()),
+        Component::List(spec) => gpui::ElementId::Name(spec.id().to_owned().into()),
         // The group's id is also where base files the panel sizes, so motion
         // has to key off the same name rather than a tree position.
         Component::Resizable(id, _) => gpui::ElementId::Name(id.clone().into()),
@@ -2206,22 +2516,24 @@ pub(in crate::materialize) fn resolve_ops(
                 "on_scroll_wheel" => behavior.on_scroll_wheel = Some(*id),
                 "on_resize" => behavior.on_resize = Some(*id),
                 "on_change" => behavior.on_change = Some(*id),
+                "token" => behavior.token = Some(*id),
+                "on_token_click" => behavior.on_token_click = Some(*id),
                 "on_step" => behavior.on_step = Some(*id),
                 "on_open_change" => behavior.on_open_change = Some(*id),
                 "on_confirm" => behavior.on_confirm = Some(*id),
                 "on_dismiss" => behavior.on_dismiss = Some(*id),
                 "on_item_click" => behavior.on_item_click = Some(*id),
+                "on_item_secondary_click" => behavior.on_item_secondary_click = Some(*id),
                 "tab_bar" => behavior.dock_chrome.tab_bar = Some(*id),
                 "empty_group" => behavior.dock_chrome.empty_group = Some(*id),
                 "drop_indicator" => behavior.dock_chrome.drop_indicator = Some(*id),
                 "dock" => behavior.dock_chrome.dock = Some(*id),
-                "tile_drag_bar" => behavior.dock_chrome.tile_drag_bar = Some(*id),
-                "tile_resize_handles" => behavior.dock_chrome.tile_resize_handles = Some(*id),
                 other => tracing::error!("unhandled callback `{other}` reached materialize"),
             },
             SpecOp::ActionCallback(id, callback) => {
                 behavior.on_action.push((id.clone(), *callback))
             }
+            SpecOp::RegisteredMethod(_) => {}
             // Filling the same slot twice replaces it, the way a second
             // `open(...)` replaces the first: the last call in the chain is
             // what the script meant.
@@ -2459,7 +2771,7 @@ fn checked_milliseconds(ms: f64) -> Option<Duration> {
 /// Written out rather than derived: GPUI has no name table for `Anchor`, and
 /// the script API is the snake_case spelling of the variant. One list serves
 /// the parser below, the check the prelude makes at the call site, and the
-/// union `gpui.d.ts` declares — so the three cannot drift.
+/// union `gpui-kit.d.ts` declares — so the three cannot drift.
 pub(crate) const ANCHOR_NAMES: [&str; 8] = [
     "top_left",
     "top_right",
@@ -2472,7 +2784,7 @@ pub(crate) const ANCHOR_NAMES: [&str; 8] = [
 ];
 
 /// The anchor a script named, or `None` if no variant spells it.
-fn anchor_from_name(name: &str) -> Option<gpui::Anchor> {
+pub(crate) fn anchor_from_name(name: &str) -> Option<gpui::Anchor> {
     match name {
         "top_left" => Some(gpui::Anchor::TopLeft),
         "top_right" => Some(gpui::Anchor::TopRight),
@@ -2542,8 +2854,7 @@ fn warn_unsupported(component: &str, methods: &[(&str, bool)]) {
 /// Every one of them takes the dock handle first, because a command is resolved
 /// against the contexts of *that* area — the script passes the container object
 /// it was handed, and the prelude unpacks the handle out of it. What follows
-/// names the container inside the area: a group's node, a dock's placement, or
-/// a tile's panel.
+/// names the container inside the area: a group's node or a dock's placement.
 fn is_dock_command(name: &str) -> bool {
     matches!(
         name,
@@ -2554,11 +2865,6 @@ fn is_dock_command(name: &str) -> bool {
             | "drop_tab"
             | "toggle_dock"
             | "resize_dock"
-            | "move_tile"
-            | "resize_tile"
-            | "raise_tile"
-            | "toggle_tile_zoom"
-            | "close_tile"
     )
 }
 
@@ -2581,7 +2887,6 @@ fn dock_action(name: &str, args: &[Bridged]) -> Option<crate::dock::DockAction> 
 
     let dock = handle(0)?;
     let node = || handle(1);
-    let panel = || handle(1);
 
     let command = match name {
         "select_tab" => DockCommand::SelectTab {
@@ -2609,14 +2914,6 @@ fn dock_action(name: &str, args: &[Bridged]) -> Option<crate::dock::DockAction> 
         "resize_dock" => DockCommand::ResizeDock {
             placement: dock_placement(text(1)?)?,
         },
-        "move_tile" => DockCommand::MoveTile { panel: panel()? },
-        "resize_tile" => DockCommand::ResizeTile {
-            panel: panel()?,
-            side: resize_side(text(2)?)?,
-        },
-        "raise_tile" => DockCommand::RaiseTile { panel: panel()? },
-        "toggle_tile_zoom" => DockCommand::ToggleTileZoom { panel: panel()? },
-        "close_tile" => DockCommand::CloseTile { panel: panel()? },
         _ => return None,
     };
 
@@ -2634,25 +2931,6 @@ pub(crate) fn dock_placement(name: &str) -> Option<gpui_base::dock::DockPlacemen
         _ => {
             tracing::error!(
                 "`{name}` is not a dock placement; expected \"center\", \"left\", \"right\" or \"bottom\""
-            );
-            None
-        }
-    }
-}
-
-/// Which edge or corner of a tile a resize handle pulls.
-fn resize_side(name: &str) -> Option<gpui_base::dock::ResizeSide> {
-    use gpui_base::dock::ResizeSide;
-    match name {
-        "left" => Some(ResizeSide::Left),
-        "right" => Some(ResizeSide::Right),
-        "top" => Some(ResizeSide::Top),
-        "bottom" => Some(ResizeSide::Bottom),
-        "bottom_right" => Some(ResizeSide::BottomRight),
-        _ => {
-            tracing::error!(
-                "`{name}` is not a tile resize side; expected \"left\", \"right\", \"top\", \
-                 \"bottom\" or \"bottom_right\""
             );
             None
         }
@@ -2865,6 +3143,7 @@ fn apply_behavior(behavior: &mut Behavior, name: &str, args: &[Bridged]) {
                 .and_then(|value| value.as_str().ok())
                 .and_then(|value| anchor_from_name(value));
         }
+        "frame_budget" => behavior.frame_budget = milliseconds(args),
         "mouse_button" => {
             behavior.mouse_button =
                 args.first()
@@ -3032,7 +3311,7 @@ mod motion_identity_tests {
     }
 
     /// One written list of anchors serves the parser, the check the prelude
-    /// makes at the call site and the union in `gpui.d.ts`. A declared name
+    /// makes at the call site and the union in `gpui-kit.d.ts`. A declared name
     /// that does not parse is a name a script could type and the runtime would
     /// silently drop.
     #[test]

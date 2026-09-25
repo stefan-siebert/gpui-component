@@ -38,6 +38,11 @@ impl InputModeKind for EditorMode {
     fn reset_annotations(state: &mut InputBaseState<Self>) {
         state.extras.hover_popover = None;
         state.extras.decorations.clear();
+        state.extras.range_decorations.clear();
+    }
+
+    fn editing_syntax_context(state: &InputBaseState<Self>, offset: usize) -> super::SyntaxContext {
+        state.syntax_context_at(offset)
     }
 
     fn adjust_annotations(
@@ -46,6 +51,10 @@ impl InputModeKind for EditorMode {
         new_len: usize,
     ) {
         state.extras.decorations.adjust_for_edit(range, new_len);
+        state
+            .extras
+            .range_decorations
+            .adjust_for_edit(range, new_len);
     }
 
     fn refresh_language_features(
@@ -181,6 +190,11 @@ impl EditorState {
     pub fn lsp_mut(&mut self) -> &mut super::Lsp {
         &mut self.extras.lsp
     }
+
+    /// Syntax context at `offset`, or `Code` when the language has no provider.
+    pub(crate) fn syntax_context_at(&self, offset: usize) -> super::SyntaxContext {
+        self.mode.syntax_context_at(&self.text, offset)
+    }
 }
 
 /// An unstyled source-code editor.
@@ -207,6 +221,10 @@ impl RenderOnce for Editor {
 impl crate::input::InputExtras for super::EditorExtras {
     fn decoration_layers(&self) -> Vec<&[super::TextDecoration]> {
         self.decorations.iter().collect()
+    }
+
+    fn range_decorations(&self, ranges: &[std::ops::Range<usize>]) -> Vec<&super::RangeDecoration> {
+        self.range_decorations.intersecting(ranges)
     }
 
     fn semantic_token_styles(

@@ -15,24 +15,30 @@ order: 23
 原生示例和页面上方的 WASM 预览共用同一份实现：
 
 ```bash
-cargo run -p gpui-base --example components -- resizable
+cargo run -p gpui-base-examples -- resizable
 ```
 
 ## 导入
 
 ```rust
-use gpui_base::{ResizablePanel, ResizablePanelGroup, ResizableState, h_resizable, resizable_panel};
+use gpui_kit::base::{ResizablePanel, ResizablePanelGroup, ResizableState, h_resizable, resizable_panel};
 ```
 
 ## 结构与 API
 
-示例组合上述公开类型。GPUI 的标准样式和事件 trait 负责表现，Base 类型负责交互结构。权威实现位于 [`components/resizable.rs`](https://github.com/longbridge/gpui-component/blob/main/crates/base/examples/showcase/components/resizable.rs)，原生与浏览器预览编译的是同一文件。
+示例组合上述公开类型。GPUI 的标准样式和事件 trait 负责表现，Base 类型负责交互结构。权威实现位于 [`components/resizable.rs`](https://github.com/longbridge/gpui-kit/blob/main/crates/base/examples/showcase/components/resizable.rs)，原生与浏览器预览编译的是同一文件。
 
 ## 状态与事件
 
 ResizableState 持久保存面板尺寸；拖动手柄时更新约束内的比例。
 
 受控状态应保存在父渲染类型或 GPUI entity 中；在回调中更新并调用 `cx.notify()`，不要在每次渲染时重建持久 entity。
+
+## 手柄外观
+
+手柄的命中带、光标和拖拽由 Base 负责，画在里面的东西归使用方。`ResizeHandleRenderer` 拿到的 `ResizeHandleContext` 带有轴向和一个 `ResizeHandleState`——`Idle`、`Hovered`、`Pressed` 或 `Dragging`。后两个状态由 Base 自己跟踪：拖拽开始后指针几乎立刻离开那条 9px 的命中带，GPUI 的 hover 在整段拖拽里大多是 false。
+
+renderer 返回 `None` 时保留 Base 自带的 1px 细线，因此只想改其中几个手柄时，不必把其余的一并重画。
 
 ## 完整 Rust 示例
 
@@ -45,4 +51,3 @@ ResizableState 持久保存面板尺寸；拖动手柄时更新约束内的比�
 ## 注意事项
 
 在支持的位置使用稳定元素 ID，并在消费端设计系统中验证焦点、悬停、按下、选中、禁用、减少动态效果和高对比度状态。
-

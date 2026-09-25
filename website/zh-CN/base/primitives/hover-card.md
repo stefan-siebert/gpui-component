@@ -10,23 +10,25 @@ order: 13
 
 和所有 GPUI Base 原语一样，Hover Card 只提供行为和语义结构，不规定产品视觉语言。请使用 GPUI 样式并组合导出的部件，使其符合你的设计系统。
 
+iOS 和 Android 上，点击触发元素切换卡片开关，点击外部关闭；忽略悬停及其打开、关闭延迟。
+
 ## 示例
 
 原生示例和页面上方的 WASM 预览共用同一份实现：
 
 ```bash
-cargo run -p gpui-base --example components -- hover-card
+cargo run -p gpui-base-examples -- hover-card
 ```
 
 ## 导入
 
 ```rust
-use gpui_base::{HoverCard};
+use gpui_kit::base::{HoverCard};
 ```
 
 ## 结构与 API
 
-示例组合上述公开类型。GPUI 的标准样式和事件 trait 负责表现，Base 类型负责交互结构。权威实现位于 [`components/hover-card.rs`](https://github.com/longbridge/gpui-component/blob/main/crates/base/examples/showcase/components/hover-card.rs)，原生与浏览器预览编译的是同一文件。
+示例组合上述公开类型。GPUI 的标准样式和事件 trait 负责表现，Base 类型负责交互结构。权威实现位于 [`components/hover-card.rs`](https://github.com/longbridge/gpui-kit/blob/main/crates/base/examples/showcase/components/hover-card.rs)，原生与浏览器预览编译的是同一文件。
 
 ## 状态与事件
 

@@ -11,13 +11,13 @@
 //!
 //! Run: `cargo run -p markdown_table`
 
-use gpui::*;
-use gpui_component::{
+use gpui_kit::assets::Assets;
+use gpui_kit::component::{
     button::Button,
     text::{TextView, TextViewStyle},
     *,
 };
-use gpui_component_assets::Assets;
+use gpui_kit::*;
 
 const SOURCE: &str = include_str!("report.md");
 
@@ -118,11 +118,11 @@ impl Render for Example {
 }
 
 fn main() {
-    let app = gpui_platform::application().with_assets(Assets);
+    let app = gpui_kit::application().with_assets(Assets);
 
     app.run(move |cx| {
         // This must be called before using any GPUI Component features.
-        gpui_component::init(cx);
+        gpui_kit::init(cx);
 
         // `WIN_W=<px>` overrides the window width, to check how the table
         // adapts at different frame widths.
@@ -135,16 +135,11 @@ fn main() {
             ..Default::default()
         };
 
-        cx.spawn(async move |cx| {
-            cx.open_window(window_options, |window, cx| {
-                let view = cx.new(|_| Example {
-                    mode: TableMode::initial(),
-                });
-                // The first level view on the window should be a Root.
-                cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
+        gpui_kit::open_window(window_options, cx, |_, cx| {
+            cx.new(|_| Example {
+                mode: TableMode::initial(),
             })
-            .expect("Failed to open window");
         })
-        .detach();
+        .expect("Failed to open window");
     });
 }

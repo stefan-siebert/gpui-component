@@ -1,10 +1,8 @@
-use gpui::{
-    Action, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, ParentElement, Render, Styled, Window, prelude::FluentBuilder as _, px,
-};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
 use serde::Deserialize;
 
-use gpui_component::{
+use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable, Size,
     button::{Button, ButtonGroup, ButtonVariants},
     h_flex,
@@ -31,6 +29,7 @@ pub struct TabsStory {
     dynamic_active_tab_ix: usize,
     dynamic_tabs: Vec<usize>,
     dynamic_next_tab_id: usize,
+    dynamic_scroll_handle: ScrollHandle,
     size: Size,
     menu: bool,
     max_width_ix: usize,
@@ -62,6 +61,7 @@ impl TabsStory {
             dynamic_active_tab_ix: 0,
             dynamic_tabs: vec![0, 1, 2],
             dynamic_next_tab_id: 3,
+            dynamic_scroll_handle: ScrollHandle::new(),
             size: Size::default(),
             menu: false,
             max_width_ix: 0,
@@ -83,6 +83,8 @@ impl TabsStory {
         self.dynamic_next_tab_id += 1;
         self.dynamic_tabs.push(id);
         self.dynamic_active_tab_ix = self.dynamic_tabs.len() - 1;
+        self.dynamic_scroll_handle
+            .scroll_to_item(self.dynamic_active_tab_ix);
         cx.notify();
     }
 
@@ -100,7 +102,7 @@ impl TabsStory {
 }
 
 impl Focusable for TabsStory {
-    fn focus_handle(&self, _: &gpui::App) -> gpui::FocusHandle {
+    fn focus_handle(&self, _: &gpui_kit::App) -> gpui_kit::FocusHandle {
         self.focus_handle.clone()
     }
 }
@@ -317,6 +319,7 @@ impl Render for TabsStory {
                     )
                     .child(
                         TabBar::new("segmented-dynamic")
+                            .track_scroll(&self.dynamic_scroll_handle)
                             .w_full()
                             .segmented()
                             .with_size(self.size)

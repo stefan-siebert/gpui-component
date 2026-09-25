@@ -1,9 +1,9 @@
-use gpui::{
+use gpui_kit::{
     App, AppContext as _, Context, Entity, HighlightStyle, IntoElement, ParentElement, Pixels,
     Render, SharedString, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 
-use gpui_component::{
+use gpui_kit::component::{
     ActiveTheme, button::Button, h_flex, input::*, menu::PopupMenuItem, tab::TabBar, v_flex,
 };
 
@@ -15,6 +15,7 @@ pub struct EditorStory {
     editor_state: Entity<EditorState>,
     decorations_state: Entity<EditorState>,
     _decorations: TextDecorationCollection,
+    _range_decorations: RangeDecorationCollection,
     active_tab: usize,
     readonly: bool,
     font_family: Option<SharedString>,
@@ -71,7 +72,7 @@ impl EditorStory {
             });
         }
 
-        let decoration_text = "Decoration styles\nColor highlights important text.\nItalic adds emphasis.\nUnderline marks a review range.";
+        let decoration_text = "Decoration styles\nColor highlights important text.\nItalic adds emphasis.\nUnderline marks review text.\n\nFill: marks a tracked range.\n\nFrame: outlines a tracked range.";
         let decorations_state = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("text")
@@ -82,10 +83,14 @@ impl EditorStory {
         let color_range = "Color";
         let italic_range = "Italic";
         let underline_range = "Underline";
+        let fill_range = "marks a tracked range.";
+        let frame_range = "outlines a tracked range.";
         let marker_start = decoration_text.find(marker).unwrap_or_default();
         let color_start = decoration_text.find(color_range).unwrap_or_default();
         let italic_start = decoration_text.find(italic_range).unwrap_or_default();
         let underline_start = decoration_text.find(underline_range).unwrap_or_default();
+        let fill_start = decoration_text.find(fill_range).unwrap_or_default();
+        let frame_start = decoration_text.find(frame_range).unwrap_or_default();
         let decorations = decorations_state.update(cx, |state, cx| {
             state.create_decorations_collection(
                 vec![
@@ -93,7 +98,7 @@ impl EditorStory {
                         marker_start..marker_start + marker.len(),
                         HighlightStyle {
                             background_color: Some(cx.theme().warning.opacity(0.2)),
-                            font_weight: Some(gpui::FontWeight::BOLD),
+                            font_weight: Some(gpui_kit::FontWeight::BOLD),
                             color: Some(cx.theme().danger),
                             ..Default::default()
                         },
@@ -102,8 +107,8 @@ impl EditorStory {
                         color_start..color_start + color_range.len(),
                         HighlightStyle {
                             color: Some(cx.theme().success),
-                            font_weight: Some(gpui::FontWeight::BOLD),
-                            font_style: Some(gpui::FontStyle::Italic),
+                            font_weight: Some(gpui_kit::FontWeight::BOLD),
+                            font_style: Some(gpui_kit::FontStyle::Italic),
                             ..Default::default()
                         },
                     ),
@@ -111,16 +116,16 @@ impl EditorStory {
                         italic_start..italic_start + italic_range.len(),
                         HighlightStyle {
                             color: Some(cx.theme().info),
-                            font_style: Some(gpui::FontStyle::Italic),
+                            font_style: Some(gpui_kit::FontStyle::Italic),
                             ..Default::default()
                         },
                     ),
                     TextDecoration::new(
                         underline_start..underline_start + underline_range.len(),
                         HighlightStyle {
-                            underline: Some(gpui::UnderlineStyle {
+                            underline: Some(gpui_kit::UnderlineStyle {
                                 color: Some(cx.theme().warning),
-                                thickness: gpui::px(2.),
+                                thickness: gpui_kit::px(2.),
                                 wavy: true,
                             }),
                             ..Default::default()
@@ -131,10 +136,24 @@ impl EditorStory {
             )
         });
 
+        // Geometry is a separate owner from text styling. Both follow edits,
+        // including newlines inserted before these ranges.
+        let range_decorations = decorations_state.update(cx, |state, cx| {
+            state.create_range_decorations_collection(
+                vec![
+                    RangeDecoration::new(fill_start..fill_start + fill_range.len())
+                        .with_style(RangeDecorationStyle::Fill),
+                    RangeDecoration::new(frame_start..frame_start + frame_range.len()),
+                ],
+                cx,
+            )
+        });
+
         Self {
             editor_state,
             decorations_state,
             _decorations: decorations,
+            _range_decorations: range_decorations,
             active_tab: 0,
             readonly: false,
             font_family: None,
@@ -159,7 +178,7 @@ impl EditorStory {
         story_toolbar_group().dropdown_child(
             Button::new("editor-options").label("Options"),
             move |menu, window, _| {
-                let menu = menu.item(PopupMenuItem::new("Read only").checked(readonly).on_click(
+                let menu = menu.item(PopupMenuItem::new("Readonly").checked(readonly).on_click(
                     window.listener_for(&story, |this, _, _, cx| {
                         this.readonly = !this.readonly;
                         cx.notify();
@@ -246,8 +265,8 @@ impl Render for EditorStory {
 mod syntect_highlighter {
     use std::{collections::HashMap, ops::Range, sync::LazyLock};
 
-    use gpui::{Context, HighlightStyle, SharedString, Window};
-    use gpui_component::input::*;
+    use gpui_kit::component::input::*;
+    use gpui_kit::{Context, HighlightStyle, SharedString, Window};
     use syntect::{
         parsing::{ParseState, Scope, ScopeStack, SyntaxSet},
         util::LinesWithEndings,

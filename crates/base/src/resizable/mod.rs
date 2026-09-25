@@ -382,7 +382,14 @@ impl ResizableState {
     /// other on every steady-state prepaint drifts by Taffy's rounding and
     /// flickers at flex boundaries (a panel's `min_size` threshold). A frame
     /// where the container did not move must not touch the sizes at all.
-    pub(crate) fn set_container_bounds(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
+    ///
+    /// Returns whether the sizes were re-derived, i.e. whether the frame being
+    /// drawn is stale and a settling frame has to follow.
+    pub(crate) fn set_container_bounds(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let previous = self.container_size();
         self.bounds = bounds;
         let current = self.container_size();
@@ -392,15 +399,16 @@ impl ResizableState {
         // scaled to the window, which is what upstream's dock test
         // `a_dumped_split_writes_the_sizes_it_is_actually_drawn_at` pins.
         if (current - previous).abs() < px(1.) {
-            return;
+            return false;
         }
         // A drag in flight computes the sizes itself, from the bounds Taffy
         // just produced — leave them alone.
         if self.resizing_panel_ix.is_some() {
-            return;
+            return false;
         }
 
         self.adjust_to_container_size(cx);
+        true
     }
 
     /// Adjust panel sizes according to the container size.
@@ -550,15 +558,119 @@ mod tests {
 /// container-proportion tests above, which drive `ResizableState` directly.
 #[cfg(test)]
 mod upstream_tests {
-    use std::{cell::Cell, rc::Rc};
-
-    use gpui::{
-        AppContext as _, Context, InteractiveElement as _, IntoElement, Modifiers, MouseButton,
-        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window, div,
-        point, px, size,
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
     };
 
-    use super::{ResizableState, h_resizable, resizable_panel};
+    use gpui::{
+        App, AppContext as _, Context, InteractiveElement as _, IntoElement, Modifiers,
+        MouseButton, ParentElement as _, Pixels, Render, Styled as _, TestAppContext,
+        VisualTestContext, Window, div, point, prelude::FluentBuilder as _, px, size,
+    };
+
+    use super::{
+        ResizableState, ResizeHandleContext, ResizeHandleState, h_resizable, resizable_panel,
+    };
+
+    struct MixedSizingHarness {
+        width: Pixels,
+    }
+
+    impl Render for MixedSizingHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(self.width).h(px(100.)).child(
+                h_resizable("mixed-sizing")
+                    .child(
+                        resizable_panel()
+                            .size(px(240.))
+                            .child(div().size_full().debug_selector(|| "fixed-sidebar".into())),
+                    )
+                    .child(
+                        resizable_panel().child(
+                            div()
+                                .size_full()
+                                .debug_selector(|| "flexible-content".into()),
+                        ),
+                    ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn mixed_sizing_is_stable_between_resize_and_followup_frame(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| MixedSizingHarness { width: px(800.) });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.draw(cx).clear(cx);
+        });
+        let before = cx.debug_bounds("fixed-sidebar").unwrap().size.width;
+
+        view.update(cx, |view, cx| {
+            view.width = px(1200.);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let settled_frame = cx.debug_bounds("fixed-sidebar").unwrap().size.width;
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let followup_frame = cx.debug_bounds("fixed-sidebar").unwrap().size.width;
+
+        // Resizable panels preserve their proportional sizing across a
+        // container resize; the important invariant is that applying the
+        // state on the follow-up frame does not move the divider again.
+        assert_ne!(settled_frame, before);
+        assert_eq!(followup_frame, settled_frame);
+    }
+
+    struct CallerStateHarness {
+        width: Pixels,
+        state: gpui::Entity<ResizableState>,
+    }
+
+    impl Render for CallerStateHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(self.width).h(px(100.)).child(
+                h_resizable("caller-state")
+                    .with_state(&self.state)
+                    .child(
+                        resizable_panel()
+                            .size(px(240.))
+                            .child(div().size_full().debug_selector(|| "cs-sidebar".into())),
+                    )
+                    .child(resizable_panel().child(div().size_full())),
+            )
+        }
+    }
+
+    /// A group whose state the caller owns (`with_state`, as the dock does)
+    /// has no `use_keyed_state` observer behind it, so the settling frame has
+    /// to be scheduled by the deferred notify rather than by that observer.
+    #[gpui::test]
+    fn caller_owned_state_settles_on_the_same_frame(cx: &mut TestAppContext) {
+        let state = cx.update(|cx| cx.new(|_| ResizableState::default()));
+        let (view, cx) = cx.add_window_view({
+            let state = state.clone();
+            move |_, _| CallerStateHarness {
+                width: px(800.),
+                state,
+            }
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.draw(cx).clear(cx);
+        });
+
+        view.update(cx, |view, cx| {
+            view.width = px(1200.);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let settled = cx.debug_bounds("cs-sidebar").unwrap().size.width;
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let followup = cx.debug_bounds("cs-sidebar").unwrap().size.width;
+
+        assert_eq!(followup, settled, "settling frame must not be pending");
+    }
 
     struct ResizableHarness {
         state: gpui::Entity<ResizableState>,
@@ -648,5 +760,189 @@ mod upstream_tests {
         state.read_with(cx, |state, _| {
             assert_eq!(state.sizes(), &vec![px(220.), px(180.)]);
         });
+    }
+
+    #[gpui::test]
+    fn dragging_the_handle_resizes_and_emits_once(cx: &mut TestAppContext) {
+        let (cx, state, resizes) = harness(cx);
+        let boundary = cx.debug_bounds("second-panel").unwrap().left();
+
+        cx.simulate_mouse_down(
+            point(boundary - px(2.), px(50.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(boundary + px(10.), px(50.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(220.), px(50.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(220.), px(50.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.sizes(), &vec![px(220.), px(180.)]);
+        });
+        assert_eq!(resizes.get(), 1);
+    }
+
+    /// Reports every state its divider is rendered in, so a drag can be watched
+    /// from outside the handle.
+    ///
+    /// `covered` lays an occluding overlay over the whole group after it, the
+    /// way a sheet's backdrop or a toast would sit over a dock.
+    struct HandleStateHarness {
+        seen: Rc<RefCell<Vec<ResizeHandleState>>>,
+        covered: bool,
+    }
+
+    impl Render for HandleStateHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let seen = self.seen.clone();
+            div()
+                .relative()
+                .w(px(400.))
+                .h(px(100.))
+                .child(
+                    h_resizable("handle-state")
+                        .with_handle_appearance(Rc::new(
+                            move |handle: &ResizeHandleContext, _: &mut Window, _: &mut App| {
+                                let mut seen = seen.borrow_mut();
+                                if seen.last() != Some(&handle.state()) {
+                                    seen.push(handle.state());
+                                }
+                                // Nothing painted: this renderer is here to watch.
+                                None
+                            },
+                        ))
+                        .child(resizable_panel().size(px(150.)).child(div().size_full()))
+                        .child(
+                            resizable_panel()
+                                .size(px(250.))
+                                .child(div().size_full().debug_selector(|| "hs-second".into())),
+                        ),
+                )
+                .when(self.covered, |this| {
+                    this.child(div().absolute().inset_0().occlude())
+                })
+        }
+    }
+
+    /// A handle under something else does not answer the pointer.
+    ///
+    /// The listeners used to test the pointer against the handle's bounds,
+    /// which read true through anything painted over it: a divider under a
+    /// sheet's backdrop lit up as the pointer crossed where it lay, and a
+    /// press there counted as a press on the handle. They ask the hitbox now,
+    /// and an occluding element in front of it answers for it.
+    #[gpui::test]
+    fn a_covered_handle_stays_idle(cx: &mut TestAppContext) {
+        let seen: Rc<RefCell<Vec<ResizeHandleState>>> = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view({
+            let seen = seen.clone();
+            move |_, _| HandleStateHarness {
+                seen,
+                covered: true,
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let boundary = cx.debug_bounds("hs-second").unwrap().left();
+        let on_handle = point(boundary - px(2.), px(50.));
+        let draw = |cx: &mut VisualTestContext| cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        cx.simulate_mouse_move(on_handle, None, Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_down(on_handle, MouseButton::Left, Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_up(on_handle, MouseButton::Left, Modifiers::default());
+        draw(cx);
+
+        assert_eq!(*seen.borrow(), vec![ResizeHandleState::Idle]);
+    }
+
+    #[gpui::test]
+    fn a_handle_reports_the_press_and_the_drag_to_its_renderer(cx: &mut TestAppContext) {
+        let seen: Rc<RefCell<Vec<ResizeHandleState>>> = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view({
+            let seen = seen.clone();
+            move |_, _| HandleStateHarness {
+                seen,
+                covered: false,
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let boundary = cx.debug_bounds("hs-second").unwrap().left();
+        let on_handle = point(boundary - px(2.), px(50.));
+        let draw = |cx: &mut VisualTestContext| cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        cx.simulate_mouse_move(on_handle, None, Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_down(on_handle, MouseButton::Left, Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_move(
+            point(px(260.), px(50.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        draw(cx);
+        cx.simulate_mouse_up(
+            point(px(390.), px(90.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        draw(cx);
+
+        // Every one of these frames used to render `Idle`: the listeners wrote
+        // their progress into a copy of the handle's state, so no renderer ever
+        // saw a press, and `is_active` never once read true.
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                ResizeHandleState::Idle,
+                ResizeHandleState::Hovered,
+                ResizeHandleState::Pressed,
+                ResizeHandleState::Dragging,
+                ResizeHandleState::Idle,
+            ]
+        );
+    }
+
+    struct SizedGroupHarness;
+
+    impl Render for SizedGroupHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(400.))
+                .h(px(100.))
+                .child(
+                    h_resizable("sized-resizable").size(px(40.)).child(
+                        resizable_panel()
+                            .child(div().size_full().debug_selector(|| "sized-panel".into())),
+                    ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn a_group_size_binds_the_cross_axis(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| SizedGroupHarness);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let panel = cx.debug_bounds("sized-panel").unwrap();
+        assert_eq!(panel.size.width, px(400.));
+        assert_eq!(panel.size.height, px(40.));
     }
 }

@@ -22,13 +22,15 @@ def project_text() -> str:
         ROOT / "crates/story/src",
         ROOT / "crates/story-web/src",
         ROOT / "crates/base/examples/showcase",
+        ROOT / "crates/base/examples/motion",
     ]
     text = ""
     for root in roots:
         for path in sorted(root.rglob("*.rs")):
             text += path.read_text(encoding="utf-8")
     # UI punctuation plus a compact set used by examples and empty/error states.
-    return "".join(sorted(set(text + "–—…‘’“”•→←↑↓✓✕⚠★☆❤☺️")))
+    # Emoji are not subset: the web platform draws them through the browser.
+    return "".join(sorted(set(text + "–—…‘’“”•→←↑↓✓✕⚠★☆❤")))
 
 
 def subset(source: Path, output: Path, text_file: Path) -> None:
@@ -61,8 +63,8 @@ def main() -> None:
             text_file,
         )
         subset(
-            FONTS / "NotoEmoji-Regular.source.ttf",
-            FONTS / "NotoEmoji-Regular.ttf",
+            FONTS / "IBMPlexSans-Regular.source.ttf",
+            FONTS / "IBMPlexSans-Regular.ttf",
             text_file,
         )
 

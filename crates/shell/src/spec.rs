@@ -198,6 +198,36 @@ pub(crate) enum TextViewFormat {
     Markdown,
 }
 
+/// A document keeps the authority of the script that described it. Image
+/// loads happen in later native rendering phases, after the script scope ends.
+#[derive(Clone)]
+pub(crate) struct TextViewSpec {
+    pub(crate) id: SharedString,
+    pub(crate) text: SharedString,
+    pub(crate) format: TextViewFormat,
+    pub(crate) policy: Rc<crate::policy::Policy>,
+}
+
+impl std::fmt::Debug for TextViewSpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TextViewSpec")
+            .field("id", &self.id)
+            .field("text", &self.text)
+            .field("format", &self.format)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for TextViewSpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.text == other.text
+            && self.format == other.format
+            && Rc::ptr_eq(&self.policy, &other.policy)
+    }
+}
+
 /// Which constructor produced a node.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Component {
@@ -205,16 +235,14 @@ pub(crate) enum Component {
     HFlex,
     VFlex,
     Module(ModuleComponentSpec),
-    TextView {
-        id: SharedString,
-        text: SharedString,
-        format: TextViewFormat,
-    },
+    TextView(TextViewSpec),
     /// A retained nested script view. The frozen description keeps the entity
     /// itself alive, so releasing the numeric handle cannot invalidate a frame
     /// that was already published.
     ChildView(ChildViewSpec),
     Text(String),
+    #[allow(dead_code)] // Constructed by descriptor-driven QuickJS installation in the next layer.
+    Registered(RegisteredComponentSpec),
     Button(String),
     Link(String),
     Checkbox(String),
@@ -412,6 +440,41 @@ pub(crate) enum Component {
     /// so this node carries only the list itself. See [`VirtualListSpec`] and
     /// the exception recorded in [`crate::materialize`].
     VirtualList(Rc<VirtualListSpec>),
+    /// GPUI's own lazy lists, driven the same way as [`Component::VirtualList`]:
+    /// the items come from a callback run during layout. `list` measures every
+    /// item it draws, so rows need not state a height; `uniform_list` measures
+    /// one and places the rest by it. See [`ListSpec`].
+    List(Rc<ListSpec>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegisteredComponentSpec {
+    id: crate::ComponentId,
+    name: &'static str,
+    payload: crate::ComponentPayload,
+}
+
+impl RegisteredComponentSpec {
+    #[allow(dead_code)] // Constructed by descriptor-driven QuickJS installation in the next layer.
+    pub fn new(
+        id: crate::ComponentId,
+        name: &'static str,
+        payload: crate::ComponentPayload,
+    ) -> Self {
+        Self { id, name, payload }
+    }
+
+    pub fn id(&self) -> crate::ComponentId {
+        self.id
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub fn payload(&self) -> &crate::ComponentPayload {
+        &self.payload
+    }
 }
 
 /// The retained entity mounted by one `child_view(handle)` description.
@@ -519,6 +582,71 @@ impl VirtualListSpec {
     }
 }
 
+/// Which of GPUI's lazy lists a [`ListSpec`] describes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListKind {
+    /// `gpui::list`: every drawn item is measured, so heights may differ.
+    Measured,
+    /// `gpui::uniform_list`: one item is measured and every row takes its height.
+    Uniform,
+}
+
+/// The parameters of a `list` or `uniform_list` call, held for the frame.
+///
+/// The same shape as a [`VirtualListSpec`] without the size table: what
+/// distinguishes these lists is that GPUI measures the items itself, so the
+/// script says how many there are and nothing about how tall.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListSpec {
+    id: String,
+    kind: ListKind,
+    item_count: usize,
+    get_key: CallbackId,
+    render_items: CallbackId,
+}
+
+impl ListSpec {
+    pub fn new(
+        id: String,
+        kind: ListKind,
+        item_count: usize,
+        get_key: CallbackId,
+        render_items: CallbackId,
+    ) -> Self {
+        Self {
+            id,
+            kind,
+            item_count,
+            get_key,
+            render_items,
+        }
+    }
+
+    /// The identity the script gave, also the name a `Scrollbar` pairs with.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn kind(&self) -> ListKind {
+        self.kind
+    }
+
+    /// How many items the collection has, visible or not.
+    pub fn item_count(&self) -> usize {
+        self.item_count
+    }
+
+    /// Resolves the stable domain key for one current item index.
+    pub fn get_key(&self) -> CallbackId {
+        self.get_key
+    }
+
+    /// The handler that describes one window of items.
+    pub fn render_items(&self) -> CallbackId {
+        self.render_items
+    }
+}
+
 impl Component {
     /// What this node contributes to a [`StructureFingerprint`]: which
     /// constructor produced it, and nothing it carries.
@@ -533,7 +661,10 @@ impl Component {
     /// fingerprint is only ever compared against another taken in the same
     /// process, from the same view, one render apart.
     fn shape(&self) -> u64 {
-        hashed(&std::mem::discriminant(self))
+        match self {
+            Component::Registered(component) => mix(59, u64::from(component.id().as_u32())),
+            _ => hashed(&std::mem::discriminant(self)),
+        }
     }
 
     pub fn name(&self) -> &'static str {
@@ -542,9 +673,10 @@ impl Component {
             Component::HFlex => "h_flex",
             Component::VFlex => "v_flex",
             Component::Module(_) => "module_component",
-            Component::TextView { .. } => "TextView",
+            Component::TextView(_) => "TextView",
             Component::ChildView(_) => "child_view",
             Component::Text(_) => "text",
+            Component::Registered(component) => component.name(),
             Component::Button(_) => "Button",
             Component::Link(_) => "Link",
             Component::Checkbox(_) => "Checkbox",
@@ -608,6 +740,10 @@ impl Component {
                 gpui::Axis::Vertical => "v_virtual_list",
                 gpui::Axis::Horizontal => "h_virtual_list",
             },
+            Component::List(spec) => match spec.kind() {
+                ListKind::Measured => "list",
+                ListKind::Uniform => "uniform_list",
+            },
         }
     }
 }
@@ -621,6 +757,9 @@ pub enum SpecOp {
     ParamStyle(&'static str, SmallVec<[Bridged; 2]>),
     /// A component behavior method.
     Method(&'static str, SmallVec<[Bridged; 2]>),
+    /// A method recorded by a registered descriptor. Its erased payload is
+    /// interpreted only by the adapter that registered the component.
+    RegisteredMethod(crate::RecordedComponentMethod),
     /// An event handler pointing into the callback arena.
     Callback(&'static str, CallbackId),
     /// A handler for one named action.
@@ -668,6 +807,7 @@ impl SpecOp {
             SpecOp::NullaryStyle(index) => mix(1, u64::from(*index)),
             SpecOp::ParamStyle(name, _) => mix(2, static_name(name)),
             SpecOp::Method(name, _) => mix(3, static_name(name)),
+            SpecOp::RegisteredMethod(method) => mix(3, static_name(method.name())),
             SpecOp::Callback(name, _) => mix(4, static_name(name)),
             // The name is the script's own, discovered at run time, so there is
             // no pointer to lean on. Action handlers are rare enough per
@@ -997,12 +1137,18 @@ impl SpecArena {
     /// Marks a node as consumed by an op rather than by a parent, so it cannot
     /// also be added to the tree.
     pub fn claim(&mut self, id: SpecId) -> Result<(), SpecError> {
+        self.ensure_claimable(id)?;
+        self.structure = mix(self.structure, mix(8, u64::from(id)));
+        self.claimed[id as usize] = true;
+        Ok(())
+    }
+
+    /// Whether [`Self::claim`] would succeed, without performing it.
+    pub(crate) fn ensure_claimable(&self, id: SpecId) -> Result<(), SpecError> {
         self.check_live(id)?;
         if self.claimed[id as usize] {
             return Err(SpecError::Claimed);
         }
-        self.structure = mix(self.structure, mix(8, u64::from(id)));
-        self.claimed[id as usize] = true;
         Ok(())
     }
 
@@ -1056,6 +1202,7 @@ impl SpecArena {
                     SpecOp::NullaryStyle(_)
                     | SpecOp::ParamStyle(..)
                     | SpecOp::Method(..)
+                    | SpecOp::RegisteredMethod(..)
                     | SpecOp::Callback(..)
                     | SpecOp::ActionCallback(..) => {}
                 }
@@ -1132,7 +1279,7 @@ impl SpecArena {
         !self.mounted_views.is_empty()
     }
 
-    fn check_live(&self, id: SpecId) -> Result<(), SpecError> {
+    pub(crate) fn check_live(&self, id: SpecId) -> Result<(), SpecError> {
         let index = id as usize;
         if index >= self.nodes.len() || self.nodes[index].component.is_none() {
             return Err(SpecError::Expired);
@@ -1171,14 +1318,14 @@ impl SpecArena {
                 " {}.{} {:?} props={:?}",
                 spec.module, spec.component, spec.id, spec.props
             )),
-            Component::TextView { id, text, format } => out.push_str(&format!(
+            Component::TextView(spec) => out.push_str(&format!(
                 " {} {:?} {:?}",
-                match format {
+                match spec.format {
                     TextViewFormat::Html => "html",
                     TextViewFormat::Markdown => "markdown",
                 },
-                id,
-                text,
+                spec.id,
+                spec.text,
             )),
             Component::Text(value)
             | Component::Button(value)
@@ -1229,6 +1376,9 @@ impl SpecArena {
             Component::VirtualList(spec) => {
                 out.push_str(&format!(" {:?} \u{d7}{}", spec.id(), spec.sizes().len()))
             }
+            Component::List(spec) => {
+                out.push_str(&format!(" {:?} \u{d7}{}", spec.id(), spec.item_count()))
+            }
             Component::ChildView(spec) => out.push_str(&format!(" #{}", spec.handle())),
             Component::Slider(handle)
             | Component::SliderTrack(handle)
@@ -1277,6 +1427,9 @@ impl SpecArena {
                     }
                 }
                 SpecOp::Method(name, args) => out.push_str(&format!(" :{name}{args:?}")),
+                SpecOp::RegisteredMethod(method) => {
+                    out.push_str(&format!(" :{}(registered)", method.name()))
+                }
                 SpecOp::Callback(name, _) => out.push_str(&format!(" :{name}(fn)")),
                 SpecOp::ActionCallback(id, _) => out.push_str(&format!(" :on_action({id}, fn)")),
                 SpecOp::StateStyle(name, node) => {

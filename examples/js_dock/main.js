@@ -7,9 +7,9 @@
 //
 //   cargo run -p gpui-shell -- examples/js_dock
 
-import { View, div } from "gpui";
+import { View, div } from "gpui-kit";
 import { DockArea, dock_area, dock_content, v_flex } from "gpui-base";
-/** @import { AsyncContext, Context } from "gpui" */
+/** @import { AsyncContext, Context } from "gpui-kit" */
 import {
   BAR,
   dockBar,
@@ -139,7 +139,7 @@ export default class Workspace extends View {
       this.dock.add_panel(cx.new(Outline), { name: "outline", placement: "right", size: 220 });
     }
 
-    // Fires on every edit, including each step of a drag — so the write is on a
+    // Fires on every edit, so the write is on a
     // timer rather than on the event.
     this.dock.on("layout_changed", (cx) => {
       cx.notify();
