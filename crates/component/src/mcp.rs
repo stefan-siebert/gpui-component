@@ -335,6 +335,34 @@ fn handle_ipc_connection(
 /// last *painted* frame. Waiting for that frame here is the difference between
 /// an agent seeing its click take effect and asking again — and asking again
 /// costs it a whole model turn, thousands of times what the frame costs.
+/// Whether a tool has spoken to this app yet; see [`request_element_ids`].
+static ELEMENT_IDS_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// On the first request, ask GPUI for inspector element ids in every window.
+///
+/// Since zed #64309 GPUI builds them only while a window's own inspector is
+/// open, and every tool that reads the element tree (`ui_snapshot`,
+/// `get_element`, `click_element`, `wait_for` on text or an id) found nothing
+/// — in every window of every app (2026-09-29). Asked for lazily, so an app
+/// nobody inspects keeps upstream's saving; one frame per window is awaited,
+/// so the very first answer already sees the ids.
+async fn request_element_ids(cx: &AsyncApp) {
+    if ELEMENT_IDS_REQUESTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let window_ids = cx.update(|cx| {
+        cx.request_inspector_ids();
+        cx.windows()
+            .into_iter()
+            .map(|handle| format!("{:?}", handle.window_id()))
+            .collect::<Vec<_>>()
+    });
+    for window_id in window_ids {
+        settle(Some(&window_id), cx).await;
+    }
+}
+
 async fn respond(request: IpcRequest, cx: &AsyncApp) -> IpcResponse {
     // Refuse before dispatching: this app and the server that called it are
     // built from one crate but by different mechanisms, so they can drift
@@ -348,6 +376,8 @@ async fn respond(request: IpcRequest, cx: &AsyncApp) -> IpcResponse {
     ) {
         return IpcResponse::new(request.id, Err(complaint));
     }
+
+    request_element_ids(cx).await;
 
     let result = if request.method == methods::BATCH {
         run_batch(&request.params, cx).await
