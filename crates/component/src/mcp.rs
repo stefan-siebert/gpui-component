@@ -1123,6 +1123,23 @@ fn resolve_element_center(
     Err(not_found_error(query, candidates))
 }
 
+/// Press and release `keystroke` in `window`, as a keyboard does.
+///
+/// `Window::dispatch_keystroke` sends the key-down only. GPUI activates a
+/// focused clickable element (every `Button`) on the key-*up* of Enter or
+/// Space, so a key-down alone could reach no button at all: pressing Enter
+/// on one through `send_key` silently did nothing (2026-09-29, Elane's
+/// Settings reset button). Returns what `dispatch_keystroke` returned — the
+/// release is not an action and does not change whether the key was handled.
+fn press_key(window: &mut gpui::Window, keystroke: Keystroke, cx: &mut App) -> bool {
+    let dispatched = window.dispatch_keystroke(keystroke.clone(), cx);
+    window.dispatch_event(
+        gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }),
+        cx,
+    );
+    dispatched
+}
+
 fn handle_send_key(params: &serde_json::Value, cx: &mut App) -> Result<serde_json::Value, String> {
     let event: KeyEvent = serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
 
@@ -1150,7 +1167,7 @@ fn handle_send_key(params: &serde_json::Value, cx: &mut App) -> Result<serde_jso
     let handle = resolve_window(event.window_id.as_deref(), cx)?;
 
     let dispatched = handle
-        .update(cx, |_, window, cx| window.dispatch_keystroke(keystroke, cx))
+        .update(cx, |_, window, cx| press_key(window, keystroke, cx))
         .map_err(|e| e.to_string())?;
 
     mcp_log(format!("Key '{}' dispatched={}", keystroke_str, dispatched));
@@ -1182,7 +1199,7 @@ fn handle_type_text(params: &serde_json::Value, cx: &mut App) -> Result<serde_js
         };
 
         let ok = handle
-            .update(cx, |_, window, cx| window.dispatch_keystroke(keystroke, cx))
+            .update(cx, |_, window, cx| press_key(window, keystroke, cx))
             .map_err(|e| e.to_string())?;
 
         if ok {
@@ -4052,5 +4069,56 @@ mod tests {
             absent: true,
             ..Default::default()
         }));
+    }
+
+    /// `send_key` and `type_text` press *and release*: a focused `Button`
+    /// only activates on the release of Enter or Space, so a key-down alone
+    /// could never press one.
+    #[gpui::test]
+    fn send_key_and_type_text_activate_a_focused_button(cx: &mut gpui::TestAppContext) {
+        use std::{cell::Cell, rc::Rc};
+
+        use gpui::{
+            Context, InteractiveElement as _, IntoElement, ParentElement, Render, Styled, Window,
+            div,
+        };
+
+        use crate::button::Button;
+
+        struct Harness(Rc<Cell<usize>>);
+
+        impl Render for Harness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let clicks = self.0.clone();
+                div().tab_group().size(px(100.)).child(
+                    Button::new("pressed")
+                        .size_full()
+                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+                )
+            }
+        }
+
+        cx.update(crate::init);
+        let clicks = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let clicks = clicks.clone();
+            move |_, _| Harness(clicks)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.update(|window, cx| {
+            assert!(window.focused(cx).is_some());
+            window.draw(cx).clear(cx);
+        });
+
+        cx.cx
+            .update(|cx| handle_send_key(&json!({ "key": "enter" }), cx))
+            .expect("send_key");
+        assert_eq!(clicks.get(), 1, "send_key enter");
+
+        cx.cx
+            .update(|cx| handle_type_text(&json!({ "text": " " }), cx))
+            .expect("type_text");
+        assert_eq!(clicks.get(), 2, "type_text space");
     }
 }
