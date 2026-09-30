@@ -8,7 +8,7 @@ use crate::{
 };
 use gpui::{
     App, Edges, Entity, Focusable, InteractiveElement, IntoElement, KeyBinding, ParentElement,
-    RenderOnce, Styled, Window, div, prelude::FluentBuilder,
+    Pixels, RenderOnce, Styled, Window, div, prelude::FluentBuilder,
 };
 use gpui_base::TestSupportExt as _;
 
@@ -37,6 +37,16 @@ pub(super) struct TableOptions {
     pub(super) bordered: bool,
     /// The cell size of the table.
     pub(super) size: Size,
+    /// The height of the header rows; `None` follows [`Self::size`].
+    pub(super) header_size: Option<Size>,
+}
+
+impl TableOptions {
+    /// Height of one header row: [`Self::header_size`] when set, otherwise
+    /// the body row height.
+    pub(super) fn header_row_height(&self) -> Pixels {
+        self.header_size.unwrap_or(self.size).table_row_height()
+    }
 }
 
 impl Default for TableOptions {
@@ -46,6 +56,7 @@ impl Default for TableOptions {
             stripe: false,
             bordered: true,
             size: Size::default(),
+            header_size: None,
         }
     }
 }
@@ -114,6 +125,14 @@ where
     /// Set to use border style of the table, default to true.
     pub fn bordered(mut self, bordered: bool) -> Self {
         self.options.bordered = bordered;
+        self
+    }
+
+    /// Size the header rows independently of the body rows. By default the
+    /// header takes the table's size; a table with tall rows (thumbnails,
+    /// two-line cells) would otherwise get an equally tall header.
+    pub fn header_size(mut self, size: impl Into<Size>) -> Self {
+        self.options.header_size = Some(size.into());
         self
     }
 

@@ -2089,7 +2089,7 @@ where
             // draws per-row borders inside its v_flex, so we only apply here
             // when there are no group headers.
             .when(!has_group_headers, |this| {
-                this.h(self.options.size.table_row_height())
+                this.h(self.options.header_row_height())
                     .border_b_1()
                     .border_color(cx.theme().border)
             })
@@ -2185,7 +2185,7 @@ where
                                     let is_leaf_row = row_ix + 1 == layout_len;
                                     h_flex()
                                         .min_w_full()
-                                        .h(self.options.size.table_row_height())
+                                        .h(self.options.header_row_height())
                                         .border_b_1()
                                         .border_color(cx.theme().border)
                                         .map(|this| {
@@ -2303,7 +2303,7 @@ where
                 .children(layout.iter().enumerate().map(|(_row_ix, row_cells)| {
                     h_flex()
                         .min_w_full()
-                        .h(self.options.size.table_row_height())
+                        .h(self.options.header_row_height())
                         .border_b_1()
                         .border_color(cx.theme().border)
                         .children(row_cells.iter().filter_map(|cell| {
@@ -2714,7 +2714,7 @@ where
         Some(
             div()
                 .absolute()
-                .top(self.options.size.table_row_height() * self.header_layout.len().max(1) as f32)
+                .top(self.options.header_row_height() * self.header_layout.len().max(1) as f32)
                 .right_0()
                 .bottom_0()
                 .w(Scrollbar::width())
