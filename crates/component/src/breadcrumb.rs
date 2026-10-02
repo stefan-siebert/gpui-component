@@ -6,7 +6,7 @@ use gpui::{
     Window, div, prelude::FluentBuilder as _,
 };
 
-use crate::{ActiveTheme, Icon, IconName, StyledExt, h_flex};
+use crate::{ActiveTheme, Icon, IconName, StyledExt, h_flex, tooltip::Tooltip};
 
 /// A breadcrumb navigation element.
 #[derive(IntoElement)]
@@ -148,9 +148,14 @@ impl From<SharedString> for BreadcrumbItem {
 impl RenderOnce for BreadcrumbItem {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let label = self.display_label();
+        // A shortened label says what it left out.
+        let full_label = (label != self.label).then(|| self.label.clone());
         div()
             .id(self.id)
             .flex_shrink_0()
+            .when_some(full_label, |this, full_label| {
+                this.tooltip(move |window, cx| Tooltip::new(full_label.clone()).build(window, cx))
+            })
             .role(if self.on_click.is_some() && !self.disabled {
                 Role::Link
             } else {
@@ -358,6 +363,7 @@ pub struct CollapsibleBreadcrumb {
     items: Vec<BreadcrumbItem>,
     style: StyleRefinement,
     on_ellipsis_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+    ellipsis_tooltip: Option<SharedString>,
 }
 
 /// How many trailing items to show (`None`: all of them), and whether the
@@ -373,7 +379,15 @@ impl CollapsibleBreadcrumb {
             items: Vec::new(),
             style: StyleRefinement::default(),
             on_ellipsis_click: None,
+            ellipsis_tooltip: None,
         }
+    }
+
+    /// Set the tooltip of the ellipsis item shown when items are collapsed —
+    /// the place to say what the hidden segments are, e.g. the whole path.
+    pub fn ellipsis_tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
+        self.ellipsis_tooltip = Some(tooltip.into());
+        self
     }
 
     /// Add a [`BreadcrumbItem`].
@@ -516,13 +530,17 @@ impl CollapsibleBreadcrumb {
 
     fn make_ellipsis(
         on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+        tooltip: Option<SharedString>,
         cx: &mut App,
     ) -> gpui::AnyElement {
         let el = div()
             .id("breadcrumb-ellipsis")
             .flex_shrink_0()
             .child("\u{2026}")
-            .text_color(cx.theme().muted_foreground);
+            .text_color(cx.theme().muted_foreground)
+            .when_some(tooltip, |this, tooltip| {
+                this.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            });
 
         if let Some(on_click) = on_click {
             el.cursor_pointer()
@@ -648,7 +666,11 @@ impl gpui::Element for CollapsibleBreadcrumb {
                     } else if ix >= tail_start {
                         // Tail items — insert ellipsis before the first one
                         if !ellipsis_inserted && tail_start > 1 {
-                            children.push(Self::make_ellipsis(self.on_ellipsis_click.clone(), cx));
+                            children.push(Self::make_ellipsis(
+                                self.on_ellipsis_click.clone(),
+                                self.ellipsis_tooltip.clone(),
+                                cx,
+                            ));
                             children.push(BreadcrumbSeparator.into_any_element());
                             ellipsis_inserted = true;
                         }
