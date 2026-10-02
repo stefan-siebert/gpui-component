@@ -352,17 +352,24 @@ impl CollapsibleBreadcrumbState {
 /// ```
 pub struct CollapsibleBreadcrumb {
     id: ElementId,
+    /// `items.len()` as of `request_layout`, which takes the items.
+    items_count: usize,
     state: CollapsibleBreadcrumbState,
     items: Vec<BreadcrumbItem>,
     style: StyleRefinement,
     on_ellipsis_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
 }
 
+/// How many trailing items to show (`None`: all of them), and whether the
+/// labels are shortened.
+type CollapseDecision = (Option<usize>, bool);
+
 impl CollapsibleBreadcrumb {
     pub fn new(id: impl Into<ElementId>, state: &CollapsibleBreadcrumbState) -> Self {
         Self {
             id: id.into(),
             state: state.clone(),
+            items_count: 0,
             items: Vec::new(),
             style: StyleRefinement::default(),
             on_ellipsis_click: None,
@@ -446,6 +453,67 @@ impl CollapsibleBreadcrumb {
         Some(tail.max(1))
     }
 
+    /// Lay the uncollapsed children out detached from the tree and record
+    /// their widths, as the prepaint callback of an uncollapsed frame would.
+    ///
+    /// The copies carry label and style but no handlers; they are measured
+    /// and dropped, never painted.
+    fn measure_uncollapsed(&self, window: &mut Window, cx: &mut App) {
+        let items_count = self.items.len();
+        if items_count == 0 {
+            return;
+        }
+        let measure = |element: gpui::AnyElement, window: &mut Window, cx: &mut App| {
+            let mut element = div()
+                .id("breadcrumb-measure")
+                .text_sm()
+                .child(element)
+                .into_any_element();
+            f32::from(
+                element
+                    .layout_as_root(gpui::size(gpui::AvailableSpace::MaxContent, gpui::AvailableSpace::MaxContent), window, cx)
+                    .width,
+            )
+        };
+
+        let separator_width = measure(BreadcrumbSeparator.into_any_element(), window, cx);
+        let mut widths = Vec::with_capacity(items_count * 2);
+        for (ix, item) in self.items.iter().enumerate() {
+            let is_last = ix == items_count - 1;
+            let copy = BreadcrumbItem {
+                id: ElementId::Integer(ix as u64),
+                style: item.style.clone(),
+                label: item.label.clone(),
+                on_click: None,
+                on_hover: None,
+                disabled: item.disabled,
+                is_last,
+                max_label_chars: item.max_label_chars,
+            };
+            widths.push(measure(copy.into_any_element(), window, cx));
+            if !is_last {
+                widths.push(separator_width);
+            }
+        }
+
+        // `gap_1p5`, as the inner container sets it.
+        let gap = f32::from(window.rem_size()) * 0.375;
+        let total = widths.iter().sum::<f32>() + widths.len().saturating_sub(1) as f32 * gap;
+
+        let mut inner = self.state.inner.borrow_mut();
+        inner.child_widths = widths;
+        inner.gap = gap;
+        inner.total_content_width = total;
+    }
+
+    /// The layout a frame built from `inner` would use.
+    fn decide(inner: &CollapseInner, items_count: usize) -> CollapseDecision {
+        (
+            Self::compute_visible_tail(inner, items_count),
+            inner.is_overflowing(),
+        )
+    }
+
     fn make_ellipsis(
         on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
         cx: &mut App,
@@ -482,7 +550,8 @@ impl IntoElement for CollapsibleBreadcrumb {
 }
 
 impl gpui::Element for CollapsibleBreadcrumb {
-    type RequestLayoutState = gpui::AnyElement;
+    /// The inner element, and the collapse decision it was built from.
+    type RequestLayoutState = (gpui::AnyElement, CollapseDecision);
     type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
@@ -501,6 +570,7 @@ impl gpui::Element for CollapsibleBreadcrumb {
         cx: &mut App,
     ) -> (gpui::LayoutId, Self::RequestLayoutState) {
         let items_count = self.items.len();
+        self.items_count = items_count;
         let state = self.state.clone();
 
         // Determine collapsing from previous frame's measurements. Measurements
@@ -516,13 +586,15 @@ impl gpui::Element for CollapsibleBreadcrumb {
             .borrow_mut()
             .invalidate_unless(items_count, label_chars);
 
-        let (visible_tail, overflowing) = {
-            let inner = state.inner.borrow();
-            (
-                Self::compute_visible_tail(&inner, items_count),
-                inner.is_overflowing(),
-            )
-        };
+        // Content nobody has measured yet is measured here, off to the side,
+        // so that this very frame can already collapse. Leaving it to the
+        // prepaint callback costs a frame that paints the full path first.
+        if state.inner.borrow().child_widths.is_empty() {
+            self.measure_uncollapsed(window, cx);
+        }
+
+        let decision = Self::decide(&state.inner.borrow(), items_count);
+        let (visible_tail, overflowing) = decision;
         let is_collapsed = visible_tail.is_some();
 
         // Build children. The default label limit is a response to overflow,
@@ -634,7 +706,7 @@ impl gpui::Element for CollapsibleBreadcrumb {
             .into_any();
 
         let layout_id = inner.request_layout(window, cx);
-        (layout_id, inner)
+        (layout_id, (inner, decision))
     }
 
     fn prepaint(
@@ -642,7 +714,7 @@ impl gpui::Element for CollapsibleBreadcrumb {
         _id: Option<&gpui::GlobalElementId>,
         _inspector_id: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
-        inner: &mut Self::RequestLayoutState,
+        (inner, decision): &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -653,6 +725,17 @@ impl gpui::Element for CollapsibleBreadcrumb {
         }
 
         inner.prepaint(window, cx);
+
+        // This frame was built from the previous frame's measurements. If
+        // what it just measured asks for a different layout, nothing else
+        // guarantees a frame to apply it in: after navigating into a
+        // directory the full path stayed painted over its neighbours until
+        // an unrelated repaint (the pointer reaching the table) came along.
+        // Settles after one extra frame — a collapsed frame leaves the
+        // measurements alone, so the decision it is compared with repeats.
+        if Self::decide(&self.state.inner.borrow(), self.items_count) != *decision {
+            window.request_animation_frame();
+        }
     }
 
     fn paint(
@@ -660,7 +743,7 @@ impl gpui::Element for CollapsibleBreadcrumb {
         _id: Option<&gpui::GlobalElementId>,
         _inspector_id: Option<&gpui::InspectorElementId>,
         _bounds: Bounds<Pixels>,
-        inner: &mut Self::RequestLayoutState,
+        (inner, _): &mut Self::RequestLayoutState,
         _prepaint: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
