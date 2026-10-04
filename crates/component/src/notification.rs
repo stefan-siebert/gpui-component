@@ -26,6 +26,7 @@ const NOTIFICATION_EXIT_DURATION: Duration = Duration::from_millis(200);
 const NOTIFICATION_TRANSITION_OFFSET: Pixels = px(96.);
 const DEFAULT_NOTIFICATION_WIDTH: Pixels = px(382.);
 const NOTIFICATION_ADVANCE_INTERVAL: Duration = Duration::from_millis(50);
+const DEFAULT_AUTOHIDE_AFTER: Duration = Duration::from_secs(5);
 struct DismissRequest;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -119,10 +120,12 @@ pub struct Notification {
     placement: Option<Anchor>,
     delivery: Option<NotificationDelivery>,
     autohide: bool,
+    autohide_after: Duration,
     action_builder: Option<Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>) -> Button>>,
     content_builder: Option<Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>) -> AnyElement>>,
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
     on_close: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_expire: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     transition_status: ToastTransitionStatus,
 }
 
@@ -179,10 +182,12 @@ impl Notification {
             placement: None,
             delivery: None,
             autohide: true,
+            autohide_after: DEFAULT_AUTOHIDE_AFTER,
             action_builder: None,
             content_builder: None,
             on_click: None,
             on_close: None,
+            on_expire: None,
             transition_status: ToastTransitionStatus::Starting,
         }
     }
@@ -317,6 +322,13 @@ impl Notification {
         self
     }
 
+    /// Set how long the notification stays before it hides itself, default is
+    /// 5 seconds. Has no effect when [`Notification::autohide`] is false.
+    pub fn autohide_after(mut self, duration: Duration) -> Self {
+        self.autohide_after = duration;
+        self
+    }
+
     /// Set the click callback of the notification.
     pub fn on_click(
         mut self,
@@ -332,6 +344,18 @@ impl Notification {
     /// (close button, middle-click, autohide, click handler, or programmatic close).
     pub fn on_close(mut self, on_close: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_close = Some(Rc::new(on_close));
+        self
+    }
+
+    /// Set the expiry callback of the notification.
+    ///
+    /// Triggered when the autohide timer runs out, as the notification starts
+    /// to leave — and only then: not when it is closed by the close button, a
+    /// click, or programmatically. This is how to tell "went away by itself"
+    /// from "the user dismissed it"; [`Notification::on_close`] still follows
+    /// once the exit transition has finished.
+    pub fn on_expire(mut self, on_expire: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_expire = Some(Rc::new(on_expire));
         self
     }
 
@@ -814,7 +838,9 @@ impl NotificationList {
         }
 
         let id = notification.id.clone();
-        let autohide = notification.autohide;
+        let timeout = notification
+            .autohide
+            .then_some(notification.autohide_after);
         let window_id = window.window_handle().window_id();
 
         let notification = cx.new(|_| notification);
@@ -838,9 +864,7 @@ impl NotificationList {
         self.notifications.push(
             id,
             notification,
-            ToastOptions {
-                timeout: autohide.then_some(Duration::from_secs(5)),
-            },
+            ToastOptions { timeout },
             cx.background_executor().now(),
         );
         self.start_advancing(window, cx);
@@ -881,9 +905,17 @@ impl NotificationList {
                 note.update(cx, |note, cx| note.complete_enter(cx));
             }
         }
+        // `ending` holds only what the timer ended; a dismissal never passes
+        // through here.
         for id in changes.ending {
-            if let Some(note) = self.notifications.get(&id) {
-                note.update(cx, |note, cx| note.begin_close(cx));
+            if let Some(note) = self.notifications.get(&id).cloned() {
+                let on_expire = note.update(cx, |note, cx| {
+                    note.begin_close(cx);
+                    note.on_expire.clone()
+                });
+                if let Some(on_expire) = on_expire {
+                    on_expire(window, cx);
+                }
             }
         }
         for (id, note) in changes.removed {
@@ -1301,6 +1333,57 @@ mod tests {
         flush_dismiss(cx);
         assert!(ids(&list, cx).is_empty());
         assert!(!list.read_with(cx, |list, _| list.is_advancing));
+    }
+
+    /// `on_expire` is what tells a notification that timed out from one the
+    /// user closed: it fires for the first and never for the second.
+    #[gpui::test]
+    fn on_expire_fires_for_the_timer_and_not_for_a_dismissal(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let (root, cx) = cx.add_window_view(|window, cx| TestRoot {
+            list: cx.new(|cx| NotificationList::new(window, cx)),
+            other_focus: cx.focus_handle(),
+        });
+        cx.update(|window, _| window.activate_window());
+        let list = root.read_with(cx, |root, _| root.list.clone());
+
+        let expired = Rc::new(std::cell::Cell::new(0));
+        let push = |list: &mut NotificationList, window: &mut Window, cx: &mut Context<_>| {
+            let expired = expired.clone();
+            list.push(
+                Notification::info("slow")
+                    .id::<FooKind>()
+                    .autohide_after(Duration::from_secs(12))
+                    .on_expire(move |_, _| expired.set(expired.get() + 1)),
+                window,
+                cx,
+            );
+        };
+
+        // Dismissed before the timer: no expiry.
+        list.update_in(cx, |list, window, cx| {
+            push(list, window, cx);
+            list.close(TypeId::of::<FooKind>(), window, cx);
+        });
+        flush_dismiss(cx);
+        cx.background_executor.advance_clock(Duration::from_secs(13));
+        cx.run_until_parked();
+        assert_eq!(expired.get(), 0);
+
+        // Left alone: still there after the default five seconds, gone and
+        // reported after its own twelve.
+        list.update_in(cx, |list, window, cx| push(list, window, cx));
+        cx.background_executor
+            .advance_clock(NOTIFICATION_TRANSITION_DURATION + Duration::from_secs(6));
+        cx.run_until_parked();
+        assert_eq!(ids(&list, cx).len(), 1);
+        assert_eq!(expired.get(), 0);
+
+        cx.background_executor.advance_clock(Duration::from_secs(7));
+        cx.run_until_parked();
+        assert_eq!(expired.get(), 1);
+        flush_dismiss(cx);
+        assert!(ids(&list, cx).is_empty());
     }
 
     #[gpui::test]
