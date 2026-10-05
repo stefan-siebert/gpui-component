@@ -33,6 +33,14 @@
 //! multiple instances of the same app — coexist without collision, while
 //! still allowing the `gpui-mcp-server` to discover and filter by app.
 //!
+//! A sandboxed macOS app is the exception. Its temp directory lies inside
+//! its container, which macOS closes to every other app — the server gets
+//! "Operation not permitted" there whatever it is told to scan. Such an app
+//! tries `~/Library/Caches/gpui-mcp/` (the real home) first, where the
+//! server looks as well, and falls back to its temp directory. The first
+//! works only if the development bundle carries two temporary-exception
+//! entitlements, see [`SANDBOX_SOCKET_DIR`].
+//!
 //! ## How a request is answered
 //!
 //! A listener thread accepts a connection, reads one newline-delimited JSON
@@ -203,16 +211,81 @@ fn sanitize_app_name(name: &str) -> String {
     }
 }
 
+/// Where a sandboxed macOS app puts its socket, relative to the user's real
+/// home. `gpui-mcp-server` scans it next to the temp directory.
+///
+/// The app may create the directory and bind in it only if its bundle is
+/// signed with both of these (measured 2026-10-05 on macOS 27 — the file
+/// exception alone creates the directory and then fails the `bind` with
+/// EPERM, and `network.server` does not help):
+///
+/// ```xml
+/// <key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
+/// <array><string>/Library/Caches/gpui-mcp/</string></array>
+/// <key>com.apple.security.temporary-exception.sbpl</key>
+/// <array><string>(allow network-bind network-inbound (local unix-socket (subpath (string-append (param "_HOME") "/Library/Caches/gpui-mcp"))))</string></array>
+/// ```
+///
+/// Development bundles only: the App Store accepts neither, and the socket
+/// must never ship anyway.
+pub const SANDBOX_SOCKET_DIR: &str = "Library/Caches/gpui-mcp";
+
+/// The directory of [`SANDBOX_SOCKET_DIR`], created, if this process runs in
+/// the macOS app sandbox and may write there.
+fn sandbox_socket_dir() -> Option<std::path::PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    std::env::var_os("APP_SANDBOX_CONTAINER_ID")?;
+    // In the sandbox `HOME` is `<real home>/Library/Containers/<id>/Data`.
+    let home = std::env::var("HOME").ok()?;
+    let (real_home, _) = home.split_once("/Library/Containers/")?;
+    let dir = std::path::Path::new(real_home).join(SANDBOX_SOCKET_DIR);
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(&dir).ok()?;
+    Some(dir)
+}
+
+fn socket_name_for(app_name: &str) -> String {
+    format!(
+        "gpui-mcp-{}-{}.sock",
+        sanitize_app_name(app_name),
+        std::process::id()
+    )
+}
+
 /// Returns the socket path for the given app and current process.
 ///
 /// Format: `{tmp_dir}/gpui-mcp-{app_name}-{pid}.sock`.
 fn socket_path_for(app_name: &str) -> String {
-    let sanitized = sanitize_app_name(app_name);
-    let pid = std::process::id();
-    let dir = std::env::temp_dir();
-    dir.join(format!("gpui-mcp-{}-{}.sock", sanitized, pid))
+    std::env::temp_dir()
+        .join(socket_name_for(app_name))
         .to_string_lossy()
         .into_owned()
+}
+
+/// Binds the socket: where the server can reach a sandboxed app if that is
+/// possible, otherwise in the temp directory.
+fn bind_socket(app_name: &str) -> std::io::Result<(UnixListener, String)> {
+    if let Some(dir) = sandbox_socket_dir() {
+        let path = dir.join(socket_name_for(app_name));
+        let _ = std::fs::remove_file(&path);
+        match UnixListener::bind(&path) {
+            Ok(listener) => return Ok((listener, path.to_string_lossy().into_owned())),
+            Err(error) => eprintln!(
+                "[MCP] cannot bind {} ({error}); falling back to the temp directory, \
+                 which a server outside this sandbox cannot reach",
+                path.display()
+            ),
+        }
+    }
+    let path = socket_path_for(app_name);
+    // Remove old socket
+    let _ = std::fs::remove_file(&path);
+    Ok((UnixListener::bind(&path)?, path))
 }
 
 /// Initialize the MCP IPC server for this GPUI app.
@@ -226,7 +299,13 @@ fn socket_path_for(app_name: &str) -> String {
 /// answered on the GPUI main thread, which the listener wakes; an idle app
 /// does no work for the MCP server at all.
 pub fn init_mcp(cx: &mut App, app_name: &str) {
-    let socket_path = socket_path_for(app_name);
+    let (listener, socket_path) = match bind_socket(app_name) {
+        Ok(bound) => bound,
+        Err(e) => {
+            eprintln!("[MCP] IPC Server error: {}", e);
+            return;
+        }
+    };
 
     // Async and unbounded: the listener thread hands a request over and the
     // main thread's task is woken by it. The old arrangement polled a
@@ -235,12 +314,7 @@ pub fn init_mcp(cx: &mut App, app_name: &str) {
     let (req_tx, req_rx) = async_channel::unbounded::<RequestMsg>();
 
     // Start IPC server on background thread
-    let path = socket_path.clone();
-    std::thread::spawn(move || {
-        if let Err(e) = run_ipc_listener(&path, req_tx) {
-            eprintln!("[MCP] IPC Server error: {}", e);
-        }
-    });
+    std::thread::spawn(move || run_ipc_listener(listener, req_tx));
 
     mcp_log(format!("MCP IPC Server started on {}", socket_path));
     eprintln!("[MCP] IPC Server listening on {}", socket_path);
@@ -259,15 +333,7 @@ pub fn init_mcp(cx: &mut App, app_name: &str) {
 }
 
 /// Unix Socket listener loop (runs on background thread)
-fn run_ipc_listener(
-    socket_path: &str,
-    req_tx: async_channel::Sender<RequestMsg>,
-) -> anyhow::Result<()> {
-    // Remove old socket
-    let _ = std::fs::remove_file(socket_path);
-
-    let listener = UnixListener::bind(socket_path)?;
-
+fn run_ipc_listener(listener: UnixListener, req_tx: async_channel::Sender<RequestMsg>) {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -283,8 +349,6 @@ fn run_ipc_listener(
             }
         }
     }
-
-    Ok(())
 }
 
 /// Handle a single IPC connection (runs on connection thread)
