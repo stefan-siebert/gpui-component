@@ -3050,11 +3050,16 @@ fn handle_take_screenshot(
     // — the first image came back showing the last frame, and the last came
     // back with no image at all.
     let sequence = SCREENSHOT_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let temp_path = std::env::temp_dir().join(format!(
-        "gpui-screenshot-{}-{}.png",
-        std::process::id(),
-        sequence
-    ));
+    // Next to the socket for a sandboxed app: the server reads this file,
+    // and it can no more read the container's temp directory than connect
+    // to a socket in it.
+    let temp_path = sandbox_socket_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!(
+            "gpui-screenshot-{}-{}.png",
+            std::process::id(),
+            sequence
+        ));
     final_image
         .save(&temp_path)
         .map_err(|e| format!("Failed to save screenshot: {}", e))?;
