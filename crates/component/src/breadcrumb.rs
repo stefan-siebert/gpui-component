@@ -412,8 +412,9 @@ impl CollapsibleBreadcrumb {
     }
 
     /// Determine how many trailing items to show based on measured child widths
-    /// and available container width. Returns `None` if all items fit.
-    fn compute_visible_tail(inner: &CollapseInner, items_count: usize) -> Option<usize> {
+    /// and available container width, and the width the collapsed row takes
+    /// with them. Returns `None` if all items fit.
+    fn compute_visible_tail(inner: &CollapseInner, items_count: usize) -> Option<(usize, f32)> {
         if inner.container_width <= 0.0 || inner.child_widths.is_empty() || items_count <= 2 {
             return None;
         }
@@ -437,9 +438,10 @@ impl CollapsibleBreadcrumb {
 
         let prefix = first_item_w + 3.0 * gap + 2.0 * sep_w + ellipsis_width;
         let budget = inner.container_width - prefix;
+        let last_item_w = inner.child_widths.last().copied().unwrap_or(0.0);
 
         if budget <= 0.0 {
-            return Some(1);
+            return Some((1, prefix + gap + last_item_w));
         }
 
         // Count trailing items that fit (from last to first).
@@ -464,7 +466,12 @@ impl CollapsibleBreadcrumb {
             tail += 1;
         }
 
-        Some(tail.max(1))
+        // The last item stays even when it alone does not fit — the current
+        // directory is never hidden behind the ellipsis.
+        if tail == 0 {
+            return Some((1, prefix + gap + last_item_w));
+        }
+        Some((tail, prefix + used))
     }
 
     /// Lay the uncollapsed children out detached from the tree and record
@@ -521,11 +528,16 @@ impl CollapsibleBreadcrumb {
     }
 
     /// The layout a frame built from `inner` would use.
+    /// Labels are shortened only when the layout that is actually shown
+    /// overflows: the full row where nothing can be hidden (two items), the
+    /// collapsed row otherwise. Measuring overflow on the full row alone
+    /// cut the current directory's name to 24 characters in a bar that had
+    /// room for three times as much once the middle was hidden.
     fn decide(inner: &CollapseInner, items_count: usize) -> CollapseDecision {
-        (
-            Self::compute_visible_tail(inner, items_count),
-            inner.is_overflowing(),
-        )
+        match Self::compute_visible_tail(inner, items_count) {
+            None => (None, inner.is_overflowing()),
+            Some((tail, collapsed_width)) => (Some(tail), collapsed_width > inner.container_width),
+        }
     }
 
     fn make_ellipsis(
@@ -818,6 +830,56 @@ mod tests {
         let label = "stefan.siebert.de@gmail.com";
         assert_eq!(label.chars().count(), 27);
         assert!(!measured(420.0, 900.0).is_overflowing());
+    }
+
+    /// Widths as the measurement records them: items interleaved with
+    /// separators, `[item0, sep, item1, sep, …, itemN]`.
+    fn measured_items(items: &[f32], container_width: f32) -> CollapseInner {
+        let sep = 10.0;
+        let gap = 6.0;
+        let mut child_widths = Vec::new();
+        for (ix, w) in items.iter().enumerate() {
+            if ix > 0 {
+                child_widths.push(sep);
+            }
+            child_widths.push(*w);
+        }
+        let total = child_widths.iter().sum::<f32>() + (child_widths.len() - 1) as f32 * gap;
+        CollapseInner {
+            child_widths,
+            gap,
+            total_content_width: total,
+            container_width,
+            measured_items_count: items.len(),
+            measured_label_chars: 10,
+        }
+    }
+
+    #[test]
+    fn a_collapsed_row_with_room_keeps_its_labels_whole() {
+        // Six segments, two of them long: the full row overflows a 560 px
+        // bar, the collapsed row — `/ › … › last` — takes 60 + 290 and
+        // leaves 200 px spare. The regression this guards: that spare room
+        // and a label cut to 24 characters in it.
+        let inner = measured_items(&[8.0, 60.0, 30.0, 70.0, 280.0, 290.0], 560.0);
+        assert!(inner.is_overflowing());
+        let (tail, shortened) = CollapsibleBreadcrumb::decide(&inner, 6);
+        assert_eq!(tail, Some(1));
+        assert!(!shortened, "the collapsed row fits, nothing to shorten");
+    }
+
+    #[test]
+    fn a_collapsed_row_that_still_overflows_shortens_its_labels() {
+        let inner = measured_items(&[8.0, 60.0, 30.0, 70.0, 280.0, 700.0], 560.0);
+        let (tail, shortened) = CollapsibleBreadcrumb::decide(&inner, 6);
+        assert_eq!(tail, Some(1), "the current directory is never hidden");
+        assert!(shortened);
+    }
+
+    #[test]
+    fn two_items_cannot_collapse_and_shorten_on_overflow() {
+        let inner = measured_items(&[8.0, 700.0], 560.0);
+        assert_eq!(CollapsibleBreadcrumb::decide(&inner, 2), (None, true));
     }
 
     #[test]
