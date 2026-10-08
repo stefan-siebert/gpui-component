@@ -101,7 +101,7 @@ pub(crate) use gpui_base::measurement_enabled as measure_enable;
 pub(crate) use gpui_base::resize_handle;
 pub use gpui_base::{
     AxisExt, Edges, FocusTrapElement, InteractiveElementExt, LengthExt, Measure, OngoingScrollExt,
-    Placement, Side, measure, measure_if,
+    Placement, SelectableText, Side, TextSelection, TextSelectionHandle, measure, measure_if,
 };
 pub use gpui_component_macros::icon_named;
 pub use icon::*;
