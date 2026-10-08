@@ -297,6 +297,41 @@ mod tests {
         });
     }
 
+    /// A press the platform takes over — a window move from the title bar —
+    /// is never released as far as the window can tell. The moves after it
+    /// carry no button, and must not go on extending the selection.
+    #[gpui::test]
+    fn a_release_the_window_never_saw_ends_the_gesture(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| SelectableTextTestView);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_mouse_down(
+            gpui::point(px(1.), px(12.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            gpui::point(px(40.), px(12.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        let selected = cx.update(|window, cx| {
+            let _ = window.draw(cx);
+            TextSelection::selected_text(window, cx)
+        });
+        assert!(!selected.is_empty() && selected != "alpha beta");
+
+        // No mouse-up. The mouse comes back with no button held.
+        cx.simulate_mouse_move(gpui::point(px(220.), px(12.)), None, Modifiers::default());
+        cx.simulate_mouse_move(gpui::point(px(230.), px(12.)), None, Modifiers::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+            assert_eq!(TextSelection::selected_text(window, cx), selected);
+        });
+    }
+
     #[test]
     fn wrapped_selection_paints_full_width_middle_lines() {
         let bounds = Bounds::new(point(px(10.), px(20.)), size(px(100.), px(100.)));

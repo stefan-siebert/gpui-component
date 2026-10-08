@@ -2784,6 +2784,16 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
                 if state.touch.drag.is_some() {
                     return;
                 }
+                // A move with no button held, while a gesture is still open:
+                // the release never reached this window. The platform took
+                // the press over — a window move begun on the title bar, a
+                // drag that ended outside — and without this the selection
+                // would follow the bare mouse from here on.
+                if state.is_selecting && event.pressed_button.is_none() {
+                    state.mouse_down_prepared = false;
+                    state.end(cx);
+                    return;
+                }
                 state.update_in_window(event.position, window, cx)
             });
             WindowSelectionState::resolve_content_keys(&state, cx);
