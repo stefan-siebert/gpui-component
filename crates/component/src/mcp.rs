@@ -477,6 +477,9 @@ async fn dispatch(
     if method == methods::SET_VIEWPORT {
         return run_set_viewport(params, cx).await;
     }
+    if method == methods::DRAG {
+        return run_drag(params, with_state, cx).await;
+    }
 
     let window_id = params
         .get("window_id")
@@ -510,6 +513,8 @@ fn is_input_method(method: &str) -> bool {
     matches!(
         method,
         methods::CLICK_ELEMENT
+            | methods::DRAG
+            | methods::SCROLL
             | methods::SEND_KEY
             | methods::TYPE_TEXT
             | methods::EXECUTE_ACTION
@@ -526,6 +531,7 @@ fn dispatch_sync(
     match method {
         methods::GET_WINDOWS => handle_get_windows(cx),
         methods::CLICK_ELEMENT => handle_click_element(params, cx),
+        methods::SCROLL => handle_scroll(params, cx),
         methods::SEND_KEY => handle_send_key(params, cx),
         methods::GET_APP_STATE => handle_get_app_state(cx),
         methods::GET_LOGS => handle_get_logs(),
@@ -539,10 +545,12 @@ fn dispatch_sync(
         methods::GET_FOCUS_INFO => handle_get_focus_info(params, cx),
         methods::TYPE_TEXT => handle_type_text(params, cx),
         methods::RESET_APP => handle_reset_app(params, cx),
-        // All three are answered by `dispatch`, which never sends them here.
-        methods::WAIT_FOR | methods::BATCH | methods::A11Y_TREE | methods::SET_VIEWPORT => {
-            Err(format!("{method} is answered asynchronously"))
-        }
+        // All of these are answered by `dispatch`, which never sends them here.
+        methods::WAIT_FOR
+        | methods::BATCH
+        | methods::A11Y_TREE
+        | methods::SET_VIEWPORT
+        | methods::DRAG => Err(format!("{method} is answered asynchronously")),
         _ => Err(format!("Unknown method: {}", method)),
     }
 }
@@ -1182,6 +1190,16 @@ fn resolve_element_center(
     window_id: Option<&str>,
     cx: &mut App,
 ) -> Result<(gpui::Point<Pixels>, String), String> {
+    let (bounds, id) = resolve_element_bounds(query, window_id, cx)?;
+    Ok((bounds.center(), id))
+}
+
+/// Resolve an element's painted bounds by ID, in window coordinates.
+fn resolve_element_bounds(
+    query: &str,
+    window_id: Option<&str>,
+    cx: &mut App,
+) -> Result<(gpui::Bounds<Pixels>, String), String> {
     let query = expand_ref(query)?;
     let query = query.as_str();
     let windows: Vec<gpui::AnyWindowHandle> = if let Some(wid) = window_id {
@@ -1200,21 +1218,282 @@ fn resolve_element_center(
                 let full_id = format!("{}/{}[{}]", window_id_str, info.global_id, info.instance_id);
 
                 if id_matches(&full_id, &info.global_id, query) {
-                    let center_x = info.bounds.origin.x + info.bounds.size.width / 2.0;
-                    let center_y = info.bounds.origin.y + info.bounds.size.height / 2.0;
-                    return Some((point(center_x, center_y), full_id));
+                    return Some((info.bounds, full_id));
                 }
             }
             None
         });
 
-        if let Ok(Some((pos, id))) = result {
-            return Ok((pos, id));
+        if let Ok(Some((bounds, id))) = result {
+            return Ok((bounds, id));
         }
     }
 
     let candidates = collect_match_candidates(query, window_id, cx, 5);
     Err(not_found_error(query, candidates))
+}
+
+fn gpui_button(button: MouseButton) -> GpuiMouseButton {
+    match button {
+        MouseButton::Left => GpuiMouseButton::Left,
+        MouseButton::Right => GpuiMouseButton::Right,
+        MouseButton::Middle => GpuiMouseButton::Middle,
+    }
+}
+
+fn gpui_modifiers(modifiers: Modifiers) -> gpui::Modifiers {
+    gpui::Modifiers {
+        control: modifiers.ctrl,
+        alt: modifiers.alt,
+        shift: modifiers.shift,
+        platform: modifiers.meta,
+        function: false,
+    }
+}
+
+/// Hand one synthetic mouse event to the target window, exactly as the
+/// platform layer would.
+fn dispatch_mouse(
+    window_id: Option<&str>,
+    event: gpui::PlatformInput,
+    cx: &mut App,
+) -> Result<(), String> {
+    let handle = resolve_window(window_id, cx)?;
+    handle
+        .update(cx, |_, window, cx| {
+            window.dispatch_event(event, cx);
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// What is marked in the window right now, through gpui-base's window-scoped
+/// text selection. `None` when nothing is, or the window has no such state.
+fn selected_text(window_id: Option<&str>, cx: &mut App) -> Option<String> {
+    let handle = resolve_window(window_id, cx).ok()?;
+    handle
+        .update(cx, |_, window, cx| {
+            gpui_base::TextSelection::selected_text(window, cx)
+        })
+        .ok()
+        .filter(|text| !text.is_empty())
+}
+
+/// Where a drag starts and ends, and the element the start resolved to.
+fn drag_endpoints(
+    event: &DragEvent,
+    cx: &mut App,
+) -> Result<(gpui::Point<Pixels>, gpui::Point<Pixels>, Option<String>), String> {
+    let window_id = event.window_id.as_deref();
+    let (from, resolved) = match event.element_id.as_deref() {
+        Some(element_id) => {
+            let (bounds, id) = resolve_element_bounds(element_id, window_id, cx)?;
+            let center = bounds.center();
+            let from = point(
+                event
+                    .offset_x
+                    .map_or(center.x, |offset| bounds.origin.x + px(offset)),
+                event
+                    .offset_y
+                    .map_or(center.y, |offset| bounds.origin.y + px(offset)),
+            );
+            (from, Some(id))
+        }
+        None => (point(px(event.x), px(event.y)), None),
+    };
+
+    let to = if let Some(element_id) = event.to_element_id.as_deref() {
+        resolve_element_center(element_id, window_id, cx)?.0
+    } else if event.to_x.is_some() || event.to_y.is_some() {
+        point(event.to_x.map_or(from.x, px), event.to_y.map_or(from.y, px))
+    } else {
+        point(
+            from.x + px(event.dx.unwrap_or(0.)),
+            from.y + px(event.dy.unwrap_or(0.)),
+        )
+    };
+    Ok((from, to, resolved))
+}
+
+/// Press, move in steps, release — each step on a frame of its own.
+///
+/// The frames are the point. An app reacts to a press by rendering something
+/// that then takes the moves: a drag layer, a selection, a resize handle's
+/// capture. Events sent in one go would all meet the frame that was on screen
+/// before the press, and the moves would land on elements that only exist one
+/// frame later.
+async fn run_drag(
+    params: &serde_json::Value,
+    with_state: bool,
+    cx: &AsyncApp,
+) -> Result<serde_json::Value, String> {
+    const DEFAULT_STEPS: u32 = 8;
+    const MAX_STEPS: u32 = 64;
+
+    let event: DragEvent = serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
+    let window_id = event.window_id.clone();
+    let window_id = window_id.as_deref();
+
+    let (from, to, resolved) = cx.update(|cx| drag_endpoints(&event, cx))?;
+    let button = gpui_button(event.button);
+    let modifiers = gpui_modifiers(event.modifiers);
+    let click_count = event.click_count.unwrap_or(1).max(1);
+    let moves = from != to;
+    let steps = if moves {
+        event.steps.unwrap_or(DEFAULT_STEPS).clamp(1, MAX_STEPS)
+    } else {
+        0
+    };
+
+    // Arrive first, so hover state and the hit test are those of a mouse
+    // that is already there when the button goes down.
+    cx.update(|cx| {
+        dispatch_mouse(
+            window_id,
+            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                position: from,
+                pressed_button: None,
+                modifiers,
+            }),
+            cx,
+        )
+    })?;
+    settle(window_id, cx).await;
+
+    cx.update(|cx| {
+        dispatch_mouse(
+            window_id,
+            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                button,
+                position: from,
+                modifiers,
+                click_count,
+                first_mouse: false,
+            }),
+            cx,
+        )
+    })?;
+    settle(window_id, cx).await;
+
+    for step in 1..=steps {
+        let fraction = step as f32 / steps as f32;
+        let position = point(
+            from.x + (to.x - from.x) * fraction,
+            from.y + (to.y - from.y) * fraction,
+        );
+        cx.update(|cx| {
+            dispatch_mouse(
+                window_id,
+                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                    position,
+                    pressed_button: Some(button),
+                    modifiers,
+                }),
+                cx,
+            )
+        })?;
+        settle(window_id, cx).await;
+    }
+
+    // What is marked while the button is still down, and again after the
+    // release: a selection that the release throws away is a bug worth
+    // seeing, and one look afterwards cannot tell it from "never selected".
+    let selected_before_release = cx.update(|cx| selected_text(window_id, cx));
+
+    cx.update(|cx| {
+        dispatch_mouse(
+            window_id,
+            gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                button,
+                position: to,
+                modifiers,
+                click_count,
+            }),
+            cx,
+        )
+    })?;
+    let settled = settle(window_id, cx).await;
+
+    let selected = cx.update(|cx| selected_text(window_id, cx));
+    let (from_x, from_y) = (f32::from(from.x), f32::from(from.y));
+    let (to_x, to_y) = (f32::from(to.x), f32::from(to.y));
+    mcp_log(format!(
+        "Drag ({from_x}, {from_y}) -> ({to_x}, {to_y}) steps={steps} button={:?} clicks={click_count}",
+        event.button
+    ));
+
+    let mut result = json!({
+        "success": true,
+        "from": { "x": from_x, "y": from_y },
+        "to": { "x": to_x, "y": to_y },
+        "steps": steps,
+    });
+    if let Some(obj) = result.as_object_mut() {
+        if let Some(id) = resolved {
+            obj.insert("resolved_element".into(), json!(id));
+        }
+        if let Some(text) = selected_before_release {
+            obj.insert("selected_text_before_release".into(), json!(text));
+        }
+        if let Some(text) = selected {
+            obj.insert("selected_text".into(), json!(text));
+        }
+    }
+
+    if !with_state {
+        return Ok(result);
+    }
+    Ok(cx.update(|cx| attach_post_state(result, window_id, settled, cx)))
+}
+
+/// One wheel event. The mouse is moved there first: gpui scrolls what is
+/// under the mouse, and the hit test is the mouse position's.
+fn handle_scroll(params: &serde_json::Value, cx: &mut App) -> Result<serde_json::Value, String> {
+    let event: ScrollEvent = serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
+    let window_id = event.window_id.as_deref();
+
+    let (position, resolved) = match event.element_id.as_deref() {
+        Some(element_id) => {
+            let (position, id) = resolve_element_center(element_id, window_id, cx)?;
+            (position, Some(id))
+        }
+        None => (point(px(event.x), px(event.y)), None),
+    };
+    let modifiers = gpui_modifiers(event.modifiers);
+
+    dispatch_mouse(
+        window_id,
+        gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+            position,
+            pressed_button: None,
+            modifiers,
+        }),
+        cx,
+    )?;
+    dispatch_mouse(
+        window_id,
+        gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+            position,
+            // gpui's delta is how far the content moves: wheel down, content up.
+            delta: gpui::ScrollDelta::Pixels(point(px(-event.dx), px(-event.dy))),
+            modifiers,
+            touch_phase: gpui::TouchPhase::Moved,
+        }),
+        cx,
+    )?;
+
+    let (x, y) = (f32::from(position.x), f32::from(position.y));
+    mcp_log(format!(
+        "Scroll at ({x}, {y}) by ({}, {})",
+        event.dx, event.dy
+    ));
+
+    let mut result = json!({ "success": true, "x": x, "y": y });
+    if let Some(id) = resolved {
+        result
+            .as_object_mut()
+            .map(|o| o.insert("resolved_element".into(), json!(id)));
+    }
+    Ok(result)
 }
 
 /// Press and release `keystroke` in `window`, as a keyboard does.
@@ -3328,6 +3607,14 @@ fn handle_get_focus_info(
         })
         .map_err(|e| e.to_string())?;
 
+    let mut info = info;
+    if let (Some(text), Some(obj)) = (
+        selected_text(opts.window_id.as_deref(), cx),
+        info.as_object_mut(),
+    ) {
+        obj.insert("text_selection".into(), json!(text));
+    }
+
     Ok(info)
 }
 
@@ -4117,6 +4404,8 @@ mod tests {
     fn only_the_inputs_count_as_input() {
         for method in [
             methods::CLICK_ELEMENT,
+            methods::DRAG,
+            methods::SCROLL,
             methods::SEND_KEY,
             methods::TYPE_TEXT,
             methods::EXECUTE_ACTION,
