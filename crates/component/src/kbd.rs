@@ -13,6 +13,7 @@ pub struct Kbd {
     stroke: Keystroke,
     appearance: bool,
     outline: bool,
+    arrow_glyphs: bool,
 }
 
 impl From<Keystroke> for Kbd {
@@ -22,6 +23,7 @@ impl From<Keystroke> for Kbd {
             stroke,
             appearance: true,
             outline: false,
+            arrow_glyphs: false,
         }
     }
 }
@@ -34,7 +36,16 @@ impl Kbd {
             stroke,
             appearance: true,
             outline: false,
+            arrow_glyphs: false,
         }
+    }
+
+    /// Draw the arrow keys as `←` `→` `↑` `↓` on every platform, not only on
+    /// macOS. For hints where the direction is the point — a key named
+    /// "Left" says less there than the arrow does.
+    pub fn arrow_glyphs(mut self) -> Self {
+        self.arrow_glyphs = true;
+        self
     }
 
     /// Set the appearance of the keybinding, default is `true`.
@@ -98,6 +109,10 @@ impl Kbd {
     /// macOS: https://support.apple.com/en-us/HT201236
     /// Windows: https://support.microsoft.com/en-us/windows/keyboard-shortcuts-in-windows-dcc61a57-8ff0-cffe-9796-cb9706c75eec
     pub fn format(key: &Keystroke) -> String {
+        Self::format_keystroke(key, false)
+    }
+
+    fn format_keystroke(key: &Keystroke, arrow_glyphs: bool) -> String {
         #[cfg(target_os = "macos")]
         const SEPARATOR: &str = "";
         #[cfg(not(target_os = "macos"))]
@@ -142,7 +157,15 @@ impl Kbd {
 
         let mut keys = String::new();
         let key_str = key.key.as_str();
+        let arrow = match key_str {
+            "left" => Some('←'),
+            "right" => Some('→'),
+            "up" => Some('↑'),
+            "down" => Some('↓'),
+            _ => None,
+        };
         match key_str {
+            _ if arrow_glyphs && arrow.is_some() => keys.extend(arrow),
             #[cfg(target_os = "macos")]
             "ctrl" => keys.push('⌃'),
             #[cfg(not(target_os = "macos"))]
@@ -227,7 +250,7 @@ impl Styled for Kbd {
 impl RenderOnce for Kbd {
     fn render(self, _: &mut gpui::Window, cx: &mut gpui::App) -> impl gpui::IntoElement {
         if !self.appearance {
-            return Self::format(&self.stroke).into_any_element();
+            return Self::format_keystroke(&self.stroke, self.arrow_glyphs).into_any_element();
         }
 
         div()
@@ -251,13 +274,31 @@ impl RenderOnce for Kbd {
             .whitespace_normal()
             .flex_shrink_0()
             .refine_style(&self.style)
-            .child(Self::format(&self.stroke))
+            .child(Self::format_keystroke(&self.stroke, self.arrow_glyphs))
             .into_any_element()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn arrow_glyphs_draw_arrows_everywhere() {
+        use super::Kbd;
+        use gpui::Keystroke;
+
+        let glyphs = |text: &str| -> String {
+            let stroke = Keystroke::parse(text).expect("valid keystroke");
+            Kbd::format_keystroke(&stroke, true)
+        };
+        assert_eq!(glyphs("left"), "←");
+        assert_eq!(glyphs("right"), "→");
+        assert_eq!(glyphs("up"), "↑");
+        assert_eq!(glyphs("down"), "↓");
+        // Other keys are formatted as before.
+        let enter = Keystroke::parse("enter").expect("valid keystroke");
+        assert_eq!(glyphs("enter"), Kbd::format(&enter));
+    }
+
     #[test]
     fn test_format() {
         use super::Kbd;
