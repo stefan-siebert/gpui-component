@@ -106,7 +106,7 @@ server binary and registering it with an agent is described in the
 | `get_windows`, `get_app_state` | windows, and your state provider's snapshot |
 | `get_focus_info` | the focus handle and the active key contexts |
 | `list_actions`, `execute_action` | your app's GPUI actions, and dispatching one |
-| `send_key`, `type_text`, `click_element` | real input through the focus chain |
+| `send_key`, `type_text`, `click_element` | real input through the focus chain; `send_key` with `repeat` holds the key (auto-repeats with `is_held`) and lists the app-state changes per step |
 | `wait_for` | wait, in-app and per frame, until a condition holds |
 | `batch` | several of the above in one request |
 | `take_screenshot` | the window or one element, rendered by GPUI itself |

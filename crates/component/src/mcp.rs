@@ -480,6 +480,9 @@ async fn dispatch(
     if method == methods::DRAG {
         return run_drag(params, with_state, cx).await;
     }
+    if method == methods::SEND_KEY && params.get("repeat").is_some_and(|repeat| !repeat.is_null()) {
+        return run_held_key(params, with_state, cx).await;
+    }
 
     let window_id = params
         .get("window_id")
@@ -1513,18 +1516,163 @@ fn press_key(window: &mut gpui::Window, keystroke: Keystroke, cx: &mut App) -> b
     dispatched
 }
 
-fn handle_send_key(params: &serde_json::Value, cx: &mut App) -> Result<serde_json::Value, String> {
+/// How many state changes a held key's answer lists before it says it
+/// stopped.
+const MAX_STATE_CHANGES: usize = 100;
+
+/// `send_key` with `repeat`: hold the key the way a keyboard does. The press,
+/// then — after `delay_ms` — `count` auto-repeats `interval_ms` apart, each a
+/// key-down with `is_held` set (`Window::dispatch_keystroke_repeat`), then
+/// the key-up, then the usual wait for the frame.
+///
+/// The answer lists every change in `get_app_state` along the way, per step
+/// (`state_changes`: step, JSON pointer, new value). The state at the end
+/// cannot show a toggle that flickered under the held key — armed, off,
+/// armed — but its path through the steps can.
+async fn run_held_key(
+    params: &serde_json::Value,
+    with_state: bool,
+    cx: &AsyncApp,
+) -> Result<serde_json::Value, String> {
     let event: KeyEvent = serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
-    // A held key needs `KeyDownEvent::is_held` on every repeat, which
-    // `press_key` does not produce yet. Refused rather than pressed once: a
-    // single press answering a request to hold would pass the very test the
-    // agent is running to catch a repeat bug.
-    if event.repeat.is_some() {
-        return Err("This app side cannot hold a key yet (send_key `repeat`). \
-                    Send the key once, or send it several times."
-            .into());
+    let Some(repeat) = event.repeat else {
+        return Err("send_key without `repeat` is not a held key.".into());
+    };
+    if repeat.count > MAX_KEY_REPEATS {
+        return Err(format!(
+            "repeat.count is at most {MAX_KEY_REPEATS}, got {}",
+            repeat.count
+        ));
+    }
+    let keystroke_str = keystroke_string(&event);
+    let keystroke = Keystroke::parse(&keystroke_str).map_err(|e| format!("{:?}", e))?;
+    let delay = Duration::from_millis(repeat.delay_ms.unwrap_or(DEFAULT_REPEAT_DELAY_MS));
+    let interval = Duration::from_millis(
+        repeat
+            .interval_ms
+            .unwrap_or(DEFAULT_REPEAT_INTERVAL_MS)
+            .max(1),
+    );
+    let window_id = event.window_id.as_deref();
+
+    let key_down = |is_repeat: bool| -> Result<bool, String> {
+        cx.update(|cx| {
+            let handle = resolve_window(window_id, cx)?;
+            handle
+                .update(cx, |_, window, cx| {
+                    if is_repeat {
+                        window.dispatch_keystroke_repeat(keystroke.clone(), cx)
+                    } else {
+                        window.dispatch_keystroke(keystroke.clone(), cx)
+                    }
+                })
+                .map_err(|e| e.to_string())
+        })
+    };
+    let state = || cx.update(|cx| handle_get_app_state(cx).unwrap_or(serde_json::Value::Null));
+
+    let mut changes = StateChanges::default();
+    let mut previous = state();
+    let mut dispatched = usize::from(key_down(false)?);
+    let mut current = state();
+    changes.record(&previous, &current, 0);
+    for step in 1..=repeat.count {
+        let wait = if step == 1 { delay } else { interval };
+        cx.background_executor().timer(wait).await;
+        dispatched += usize::from(key_down(true)?);
+        previous = current;
+        current = state();
+        changes.record(&previous, &current, step as usize);
+    }
+    cx.update(|cx| {
+        let handle = resolve_window(window_id, cx)?;
+        handle
+            .update(cx, |_, window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::KeyUp(gpui::KeyUpEvent {
+                        keystroke: keystroke.clone(),
+                    }),
+                    cx,
+                );
+            })
+            .map_err(|e| e.to_string())
+    })?;
+
+    let settled = settle(window_id, cx).await;
+    changes.record(&current, &state(), repeat.count as usize + 1);
+    mcp_log(format!(
+        "Key '{}' held: {} repeats, {} of {} key-downs dispatched",
+        keystroke_str,
+        repeat.count,
+        dispatched,
+        repeat.count + 1
+    ));
+    let answer = json!({
+        "success": true,
+        "keystroke": keystroke_str,
+        "events": repeat.count + 1,
+        "dispatched": dispatched,
+        "state_changes": changes.list,
+        "state_changes_truncated": changes.truncated,
+    });
+    if !with_state {
+        return Ok(answer);
+    }
+    Ok(cx.update(|cx| attach_post_state(answer, window_id, settled, cx)))
+}
+
+/// The leaves of `get_app_state` that changed, step by step.
+#[derive(Default)]
+struct StateChanges {
+    list: Vec<serde_json::Value>,
+    truncated: bool,
+}
+
+impl StateChanges {
+    fn record(&mut self, before: &serde_json::Value, after: &serde_json::Value, step: usize) {
+        self.walk(before, after, step, &mut String::new());
     }
 
+    fn walk(
+        &mut self,
+        before: &serde_json::Value,
+        after: &serde_json::Value,
+        step: usize,
+        path: &mut String,
+    ) {
+        if self.truncated || before == after {
+            return;
+        }
+        if let (Some(before), Some(after)) = (before.as_object(), after.as_object()) {
+            let keys: std::collections::BTreeSet<&String> =
+                before.keys().chain(after.keys()).collect();
+            for key in keys {
+                let length = path.len();
+                path.push('/');
+                // JSON pointer escaping: `~` → `~0`, `/` → `~1`.
+                path.push_str(&key.replace('~', "~0").replace('/', "~1"));
+                let null = serde_json::Value::Null;
+                self.walk(
+                    before.get(key).unwrap_or(&null),
+                    after.get(key).unwrap_or(&null),
+                    step,
+                    path,
+                );
+                path.truncate(length);
+            }
+            return;
+        }
+        if self.list.len() >= MAX_STATE_CHANGES {
+            self.truncated = true;
+            return;
+        }
+        self.list
+            .push(json!({ "step": step, "path": path.clone(), "value": after }));
+    }
+}
+
+/// `send_key`'s key in gpui's keystroke notation: the modifiers, then the key.
+fn keystroke_string(event: &KeyEvent) -> String {
     let mut keystroke_str = String::new();
     if event.modifiers.ctrl {
         keystroke_str.push_str("ctrl-");
@@ -1539,7 +1687,12 @@ fn handle_send_key(params: &serde_json::Value, cx: &mut App) -> Result<serde_jso
         keystroke_str.push_str("cmd-");
     }
     keystroke_str.push_str(&event.key);
+    keystroke_str
+}
 
+fn handle_send_key(params: &serde_json::Value, cx: &mut App) -> Result<serde_json::Value, String> {
+    let event: KeyEvent = serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
+    let keystroke_str = keystroke_string(&event);
     let keystroke = Keystroke::parse(&keystroke_str).map_err(|e| format!("{:?}", e))?;
 
     // Use resolve_window() for consistent fallback behavior with the other
@@ -3649,6 +3802,36 @@ mod tests {
     #[test]
     fn sanitize_empty_falls_back() {
         assert_eq!(sanitize_app_name(""), "gpui-app");
+    }
+
+    #[test]
+    fn held_key_state_changes_show_a_flicker() {
+        let armed = |value: bool| json!({ "app": { "prefix": { "armed": value }, "rows": 3 } });
+        let mut changes = StateChanges::default();
+        changes.record(&armed(false), &armed(true), 0);
+        changes.record(&armed(true), &armed(false), 1);
+        changes.record(&armed(false), &armed(false), 2);
+        changes.record(&armed(false), &armed(true), 3);
+        let steps: Vec<(u64, bool)> = changes
+            .list
+            .iter()
+            .map(|change| {
+                assert_eq!(change["path"], "/app/prefix/armed");
+                (
+                    change["step"].as_u64().unwrap_or(u64::MAX),
+                    change["value"].as_bool().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(steps, vec![(0, true), (1, false), (3, true)]);
+        assert!(!changes.truncated);
+    }
+
+    #[test]
+    fn held_key_state_changes_escape_pointer_segments() {
+        let mut changes = StateChanges::default();
+        changes.record(&json!({ "a/b": 1 }), &json!({ "a/b": 2 }), 0);
+        assert_eq!(changes.list[0]["path"], "/a~1b");
     }
 
     #[test]

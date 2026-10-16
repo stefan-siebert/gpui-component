@@ -102,7 +102,7 @@ GPUI 主线程上处理，因此能看到一致的状态，也能派发真实输
 | `get_windows`、`get_app_state` | 窗口列表，以及状态提供者返回的快照 |
 | `get_focus_info` | 焦点句柄和当前生效的 key context |
 | `list_actions`、`execute_action` | 应用的 GPUI action 列表与派发 |
-| `send_key`、`type_text`、`click_element` | 经过焦点链的真实输入 |
+| `send_key`、`type_text`、`click_element` | 经过焦点链的真实输入；带 `repeat` 的 `send_key` 会按住按键（带 `is_held` 的自动重复），并逐步列出应用状态的变化 |
 | `wait_for` | 在应用内部按帧等待，直到条件满足 |
 | `batch` | 把上面多个调用合成一个请求 |
 | `take_screenshot` | 由 GPUI 自己渲染窗口或单个元素 |
