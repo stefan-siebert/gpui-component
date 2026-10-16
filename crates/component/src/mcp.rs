@@ -1515,6 +1515,15 @@ fn press_key(window: &mut gpui::Window, keystroke: Keystroke, cx: &mut App) -> b
 
 fn handle_send_key(params: &serde_json::Value, cx: &mut App) -> Result<serde_json::Value, String> {
     let event: KeyEvent = serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
+    // A held key needs `KeyDownEvent::is_held` on every repeat, which
+    // `press_key` does not produce yet. Refused rather than pressed once: a
+    // single press answering a request to hold would pass the very test the
+    // agent is running to catch a repeat bug.
+    if event.repeat.is_some() {
+        return Err("This app side cannot hold a key yet (send_key `repeat`). \
+                    Send the key once, or send it several times."
+            .into());
+    }
 
     let mut keystroke_str = String::new();
     if event.modifiers.ctrl {
