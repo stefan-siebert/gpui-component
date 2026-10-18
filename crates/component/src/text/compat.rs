@@ -153,6 +153,14 @@ impl TextView {
         self.inner = self.inner.on_link_click(f);
         self
     }
+    /// Overrides the source of every document image, including data URLs.
+    pub fn image_source<F>(mut self, resolver: F) -> Self
+    where
+        F: Fn(&gpui::SharedUri) -> gpui::ImageSource + Send + Sync + 'static,
+    {
+        self.inner = self.inner.image_source(resolver);
+        self
+    }
     /// Scrolls a container that ignores scroll requests to the line of
     /// `TextViewState::reveal_range`, with the line's window bounds.
     pub fn on_reveal<F>(mut self, f: F) -> Self
