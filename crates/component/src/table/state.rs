@@ -2869,6 +2869,11 @@ where
                                                 window,
                                                 cx,
                                             );
+                                            table.delegate_mut().visible_rows_rendered(
+                                                visible_range.clone(),
+                                                window,
+                                                cx,
+                                            );
 
                                             if visible_range.end > rows_count {
                                                 // Scroll without cx.notify() — we are inside the

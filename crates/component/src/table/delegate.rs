@@ -207,6 +207,24 @@ pub trait TableDelegate: Sized + 'static {
     ) {
     }
 
+    /// Called every time the table renders its rows, with the range it
+    /// renders — unlike [`Self::visible_rows_changed`] also when the range
+    /// stayed the same, and before the rows themselves. The range may reach
+    /// past the last row: the table fills the rest with empty ones.
+    ///
+    /// NOTE: Make sure this method is fast, because it runs on every frame
+    /// the table paints.
+    ///
+    /// This can be used to tell a background loader what is on screen now,
+    /// so that whatever changed since the last frame is asked for.
+    fn visible_rows_rendered(
+        &mut self,
+        visible_range: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+    }
+
     /// Called when the visible range of the columns changed.
     ///
     /// NOTE: Make sure this method is fast, because it will be called frequently.
