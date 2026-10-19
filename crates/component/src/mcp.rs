@@ -334,7 +334,7 @@ pub fn init_mcp(cx: &mut App, app_name: &str) {
 
 /// Unix Socket listener loop (runs on background thread)
 fn run_ipc_listener(listener: UnixListener, req_tx: async_channel::Sender<RequestMsg>) {
-    for stream in listener.incoming() {
+    for stream in std::iter::repeat_with(|| accept(&listener)) {
         match stream {
             Ok(stream) => {
                 let tx = req_tx.clone();
@@ -349,6 +349,28 @@ fn run_ipc_listener(listener: UnixListener, req_tx: async_channel::Sender<Reques
             }
         }
     }
+}
+
+/// The next connection. Its peer's address is of no use here, and on
+/// Windows asking for it is what fails: under Wine an unnamed peer comes
+/// back with an address family other than `AF_UNIX`, which `uds_windows`
+/// rejects, so every connection was refused (2026-10-19).
+#[cfg(unix)]
+fn accept(listener: &UnixListener) -> std::io::Result<UnixStream> {
+    listener.accept().map(|(stream, _)| stream)
+}
+
+#[cfg(windows)]
+fn accept(listener: &UnixListener) -> std::io::Result<UnixStream> {
+    use std::os::windows::io::{AsRawSocket, FromRawSocket};
+    use windows::Win32::Networking::WinSock;
+
+    let listening = WinSock::SOCKET(listener.as_raw_socket() as usize);
+    // SAFETY: a listening socket this process owns; no address is asked for.
+    let socket =
+        unsafe { WinSock::accept(listening, None, None) }.map_err(std::io::Error::other)?;
+    // SAFETY: a connected socket `accept` just handed over, owned by nobody else.
+    Ok(unsafe { UnixStream::from_raw_socket(socket.0 as u64) })
 }
 
 /// Handle a single IPC connection (runs on connection thread)
