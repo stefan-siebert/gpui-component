@@ -206,7 +206,19 @@ impl Size {
             _ => px(2.) + boost,
         }
     }
+
+    /// Returns the horizontal padding of a row in an input's dropdown list.
+    ///
+    /// The trigger insets its text by a 1px border plus [`Self::input_px`]; the
+    /// popup insets a row by [`DROPDOWN_LIST_PADDING`]. The row pads the
+    /// difference, so the chosen item's text lines up with the trigger's.
+    pub(crate) fn list_px(&self) -> Pixels {
+        self.input_px() + px(1.) - DROPDOWN_LIST_PADDING
+    }
 }
+
+/// The inset between an input's dropdown popup and its list rows.
+pub(crate) const DROPDOWN_LIST_PADDING: Pixels = px(4.);
 
 impl From<Pixels> for Size {
     fn from(size: Pixels) -> Self {
@@ -326,10 +338,7 @@ impl<T: Styled> StyleSized<T> for T {
 
     #[inline]
     fn list_px(self, size: Size) -> Self {
-        match size {
-            Size::Small => self.px_2(),
-            _ => self.px_3(),
-        }
+        self.px(size.list_px())
     }
 
     #[inline]
@@ -357,8 +366,9 @@ impl<T: Styled> StyleSized<T> for T {
     fn table_cell_size(self, size: Size) -> Self {
         let padding = size.table_cell_padding();
         match size {
-            Size::XSmall => self.text_sm(),
-            Size::Small => self.text_sm(),
+            Size::XSmall => self.text_xs(),
+            Size::Small | Size::Medium => self.text_sm(),
+            Size::Large => self.text_base(),
             _ => self,
         }
         .pl(padding.left)
@@ -370,7 +380,7 @@ impl<T: Styled> StyleSized<T> for T {
     fn button_text_size(self, size: Size) -> Self {
         match size {
             Size::XSmall => self.text_xs(),
-            Size::Small => self.text_sm(),
+            Size::Small | Size::Medium => self.text_sm(),
             _ => self.text_base(),
         }
     }

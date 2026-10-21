@@ -1,26 +1,25 @@
-use std::rc::Rc;
+use std::{hash::Hash, rc::Rc};
 
 use gpui::{
     AnyElement, App, Background, Bounds, ElementId, Hsla, IntoElement, Pixels, Point, SharedString,
     Size, Window, point, px,
 };
 use gpui_component_macros::IntoPlot;
-use num_traits::{Num, ToPrimitive};
 
 use crate::{
     ActiveTheme,
     plot::{
-        AXIS_GAP, AxisLabelPlacement, PathCaches, Plot, PlotAxis, StrokeStyle,
-        scale::{Scale, ScaleLinear, ScalePoint, Sealed},
+        AxisLabelPlacement, Curve, PathCaches, Plot, PlotAppear, PlotAxis,
+        scale::{PlotValue, Scale, ScaleLinear, ScalePoint},
         shape::Area,
         tooltip::{CrossLine, Dot, Tooltip, TooltipState},
     },
 };
 
 use super::{
-    HOVER_DOT_SIZE, HOVER_HALO_SIZE, PointAxes, TooltipContent, ValueExtent, axis_point_count,
-    build_point_x_labels, caller_id, labeled_items, pinned_plot_mask, point_range,
-    point_value_scale,
+    AXIS_GAP, ChartAppear, HOVER_DOT_SIZE, HOVER_HALO_SIZE, PointAxes, TooltipContent, ValueExtent,
+    axis_point_count, build_point_x_labels, caller_id, labeled_items, pinned_plot_mask,
+    point_range, point_value_scale, reveal_mask,
 };
 
 #[derive(IntoPlot)]
@@ -28,13 +27,13 @@ pub struct AreaChart<T, X, Y>
 where
     T: 'static,
     X: Clone + PartialEq + Into<SharedString> + 'static,
-    Y: Clone + Copy + PartialOrd + Num + ToPrimitive + Sealed + 'static,
+    Y: PlotValue,
 {
     data: Vec<T>,
     x: Option<Rc<dyn Fn(&T) -> X>>,
     y: Vec<Rc<dyn Fn(&T) -> Y>>,
     strokes: Vec<Hsla>,
-    stroke_styles: Vec<StrokeStyle>,
+    curves: Vec<Curve>,
     fills: Vec<Background>,
     names: Vec<SharedString>,
     tooltip_content: TooltipContent<T>,
@@ -46,12 +45,13 @@ where
     axes: PointAxes,
     id: ElementId,
     interactive: bool,
+    appear: ChartAppear,
 }
 
 impl<T, X, Y> AreaChart<T, X, Y>
 where
     X: Clone + PartialEq + Into<SharedString> + 'static,
-    Y: Clone + Copy + PartialOrd + Num + ToPrimitive + Sealed + 'static,
+    Y: PlotValue,
 {
     #[track_caller]
     pub fn new<I>(data: I) -> Self
@@ -60,7 +60,7 @@ where
     {
         Self {
             data: data.into_iter().collect(),
-            stroke_styles: vec![],
+            curves: vec![],
             strokes: vec![],
             fills: vec![],
             names: vec![],
@@ -75,6 +75,7 @@ where
             axes: PointAxes::default(),
             id: caller_id(),
             interactive: true,
+            appear: ChartAppear::default(),
         }
     }
 
@@ -95,10 +96,29 @@ where
     /// and a dot per series mark the hovered point, and a tooltip shows a row
     /// each. Turn it off for a chart that only decorates, or one an element above
     /// it wants the cursor for: without a hitbox it neither answers the mouse nor
-    /// takes the hover from what sits over it. A chart that is off also drops its
-    /// path cache, which is keyed on the same id.
+    /// takes the hover from what sits over it.
     pub fn interactive(mut self, interactive: bool) -> Self {
         self.interactive = interactive;
+        self
+    }
+
+    /// Draw the data in the first time this chart is painted. On by default.
+    ///
+    /// The theme sets how long it takes, and the system's reduced-motion
+    /// setting skips it. Turn it off for a chart that is painted again and
+    /// again as it scrolls in and out of view, such as one in each row of a
+    /// long list, where it would draw in every time.
+    pub fn appear(mut self, appear: bool) -> Self {
+        self.appear.set_enabled(appear);
+        self
+    }
+
+    /// Draw the data in again whenever `key` changes, such as the symbol or
+    /// period a chart shows.
+    ///
+    /// Without one the data draws in once, and later data paints in place.
+    pub fn appear_key(mut self, key: impl Hash) -> Self {
+        self.appear.set_key(key);
         self
     }
 
@@ -179,17 +199,17 @@ where
     }
 
     pub fn natural(mut self) -> Self {
-        self.stroke_styles.push(StrokeStyle::Natural);
+        self.curves.push(Curve::Natural);
         self
     }
 
     pub fn linear(mut self) -> Self {
-        self.stroke_styles.push(StrokeStyle::Linear);
+        self.curves.push(Curve::Linear);
         self
     }
 
     pub fn step_after(mut self) -> Self {
-        self.stroke_styles.push(StrokeStyle::StepAfter);
+        self.curves.push(Curve::StepAfter);
         self
     }
 
@@ -341,7 +361,7 @@ where
 
         let len = self.data.len();
         let x = ScalePoint::new(
-            self.data.iter().map(|v| x_fn(v)).collect(),
+            self.data.iter().map(|v| x_fn(v)),
             point_range(
                 self.axes.plot_left(),
                 width - self.axes.plot_left(),
@@ -365,7 +385,7 @@ where
 impl<T, X, Y> Plot for AreaChart<T, X, Y>
 where
     X: Clone + PartialEq + Into<SharedString> + 'static,
-    Y: Clone + Copy + PartialOrd + Num + ToPrimitive + Sealed + 'static,
+    Y: PlotValue,
 {
     fn prepaint(
         &mut self,
@@ -435,23 +455,23 @@ where
         let areas = self.y.iter().enumerate().map(|(i, y_fn)| {
             let x = x.clone();
             let y = y.clone();
-            let x_fn = x_fn.clone();
             let y_fn = y_fn.clone();
 
             let fill = *self.fills.get(i).unwrap_or(&default_fill);
             let stroke = *self.strokes.get(i).unwrap_or(&default_stroke);
-            let stroke_style = *self
-                .stroke_styles
+            let curve = *self
+                .curves
                 .get(i)
-                .unwrap_or(self.stroke_styles.first().unwrap_or(&Default::default()));
+                .unwrap_or(self.curves.first().unwrap_or(&Default::default()));
 
             Area::new()
-                .data(&self.data)
-                .x(move |d| x.tick(&x_fn(d)))
+                // One x domain entry per datum: project by index, not by lookup.
+                .data(self.data.iter().enumerate())
+                .x(move |(i, _)| x.tick_at(*i))
                 .y0(height)
-                .y1(move |d| y.tick(&y_fn(d)))
+                .y1(move |(_, d)| y.tick(&y_fn(d)))
                 .stroke(stroke)
-                .stroke_style(stroke_style)
+                .curve(curve)
                 .fill(fill)
         });
 
@@ -459,11 +479,11 @@ where
             .y_domain
             .is_some()
             .then(|| pinned_plot_mask(bounds, height));
+        // The areas draw in from the left under a mask, so their shapes, and
+        // the cached paths, stay the same on every frame of the appear.
+        let reveal = reveal_mask(bounds, left, self.appear.get().progress());
         window.with_content_mask(mask, |window| {
-            // Caching hangs off the chart's own id, which only an interactive chart
-            // puts on the stack; without one, siblings would share a slot and thrash
-            // it, so a chart that is off tessellates afresh each paint.
-            if self.interactive {
+            window.with_content_mask(reveal, |window| {
                 let caches = PathCaches::for_paint("areas", window, cx);
                 caches.update(cx, |caches, _| {
                     for (i, area) in areas.enumerate() {
@@ -471,11 +491,7 @@ where
                         area.paint_cached(&bounds, fill, line, window);
                     }
                 });
-            } else {
-                for area in areas {
-                    area.paint(&bounds, window);
-                }
-            }
+            });
         });
 
         self.axes
@@ -484,7 +500,19 @@ where
     }
 
     fn id(&self) -> Option<ElementId> {
-        self.interactive.then(|| self.id.clone())
+        Some(self.id.clone())
+    }
+
+    fn interactive(&self) -> bool {
+        self.interactive
+    }
+
+    fn appear(&mut self, appear: PlotAppear, _window: &mut Window, _cx: &mut App) {
+        self.appear.update(appear);
+    }
+
+    fn appear_generation(&self) -> Option<u64> {
+        self.appear.generation()
     }
 
     fn tooltip_state(
@@ -493,7 +521,6 @@ where
         bounds: Bounds<Pixels>,
         _cx: &App,
     ) -> Option<TooltipState> {
-        let x_fn = self.x.as_ref()?;
         let (x, y, _) = self.scales(bounds)?;
 
         // Ignore the x-axis label gutter so hovering the labels doesn't show a tooltip.
@@ -504,9 +531,9 @@ where
             return None;
         }
 
-        let index = x.least_index(position.x.as_f32());
+        let index = x.nearest_index(position.x.as_f32());
         let d = self.data.get(index)?;
-        let x_tick = x.tick(&x_fn(d))?;
+        let x_tick = x.tick_at(index)?;
 
         // One dot per series at the hovered x.
         let dots = self

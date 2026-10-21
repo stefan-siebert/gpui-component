@@ -405,6 +405,8 @@ impl PopupMenu {
     /// When the menu is dismissed or before an action is triggered, the focus will be returned to this handle.
     ///
     /// Then the action will be dispatched to this handle.
+    /// Submenus without their own action context use the nearest parent's
+    /// explicit context for actions and shortcut hints.
     pub fn action_context(mut self, handle: FocusHandle) -> Self {
         self.action_context = Some(handle);
         self
@@ -886,14 +888,24 @@ impl PopupMenu {
             .filter(|(_, item)| item.is_clickable())
     }
 
-    fn on_click(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_click(
+        &mut self,
+        ix: usize,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.stop_propagation();
         window.prevent_default();
         self.selected_index = Some(ix);
-        self.confirm(&Confirm { secondary: false }, window, cx);
+        self.activate(event, window, cx);
     }
 
     fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate(&ClickEvent::default(), window, cx);
+    }
+
+    fn activate(&mut self, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         match self.selected_index {
             Some(index) => {
                 let item = self.menu_items.get(index);
@@ -902,7 +914,7 @@ impl PopupMenu {
                         handler, action, ..
                     }) => {
                         if let Some(handler) = handler {
-                            handler(&ClickEvent::default(), window, cx);
+                            handler(event, window, cx);
                         } else if let Some(action) = action.as_ref() {
                             self.dispatch_confirm_action(action, window, cx);
                         }
@@ -913,7 +925,7 @@ impl PopupMenu {
                         handler, action, ..
                     }) => {
                         if let Some(handler) = handler {
-                            handler(&ClickEvent::default(), window, cx);
+                            handler(event, window, cx);
                         } else if let Some(action) = action.as_ref() {
                             self.dispatch_confirm_action(action, window, cx);
                         }
@@ -932,11 +944,18 @@ impl PopupMenu {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(context) = self.action_context.as_ref() {
+        if let Some(context) = self.resolved_action_context(cx) {
             context.focus(window, cx);
         }
 
         window.dispatch_action(action.boxed_clone(), cx);
+    }
+
+    fn resolved_action_context(&self, cx: &App) -> Option<FocusHandle> {
+        self.action_context.clone().or_else(|| {
+            let parent = self.parent_menu.as_ref()?.upgrade()?;
+            parent.read(cx).resolved_action_context(cx)
+        })
     }
 
     fn set_selected_index(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -1157,7 +1176,7 @@ impl PopupMenu {
         &self,
         action: Option<Box<dyn Action>>,
         window: &mut Window,
-        _: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<Kbd> {
         let action = action?;
 
@@ -1169,8 +1188,9 @@ impl PopupMenu {
         // every path, so it is the last resort rather than the window's
         // leftover context stack, which only holds the path of whatever
         // element happened to paint last.
+        let action_context = self.resolved_action_context(cx);
         [
-            self.action_context.as_ref(),
+            action_context.as_ref(),
             self.trigger_focus_handle.as_ref(),
             self.previous_focus_handle.as_ref(),
             Some(&self.focus_handle),
@@ -1257,14 +1277,13 @@ impl PopupMenu {
         const INNER_PADDING: Pixels = px(8.);
 
         let is_submenu = matches!(item, PopupMenuItem::Submenu { .. });
-        let group_name = format!("{}:item-{}", cx.entity().entity_id(), ix);
 
         let (item_height, radius) = match self.size {
             Size::Small => (px(20.), options.radius.half()),
             _ => (px(26.), options.radius),
         };
 
-        let this = MenuItemElement::new(ix, &group_name)
+        let this = MenuItemElement::new(ix)
             .relative()
             .text_sm()
             .py_0()
@@ -1272,10 +1291,24 @@ impl PopupMenu {
             .rounded(radius)
             .items_center()
             .selected(selected)
-            .on_hover(cx.listener(move |this, hovered, _, cx| {
+            .on_hover(cx.listener(move |this, hovered, window, cx| {
                 if *hovered {
+                    // Pointing elsewhere closes the open submenu; take back
+                    // the focus the keyboard may have moved into it.
+                    if this.selected_index != Some(ix)
+                        && this.active_submenu().is_some_and(|submenu| {
+                            submenu.focus_handle(cx).contains_focused(window, cx)
+                        })
+                    {
+                        this.focus_handle.focus(window, cx);
+                    }
                     this.selected_index = Some(ix);
-                } else if !is_submenu && this.selected_index == Some(ix) {
+                } else if !is_submenu
+                    && this.selected_index == Some(ix)
+                    // A key press ends hover under a still pointer; keep the
+                    // highlight so the next arrow key moves on from this item.
+                    && !window.last_input_was_keyboard()
+                {
                     // TODO: Better handle the submenu unselection when hover out
                     this.selected_index = None;
                 }
@@ -1308,9 +1341,9 @@ impl PopupMenu {
                 ..
             } => this
                 .when(!disabled, |this| {
-                    this.on_click(
-                        cx.listener(move |this, _, window, cx| this.on_click(ix, window, cx)),
-                    )
+                    this.on_click(cx.listener(move |this, event, window, cx| {
+                        this.on_click(ix, event, window, cx)
+                    }))
                 })
                 .disabled(*disabled)
                 .child(
@@ -1342,9 +1375,9 @@ impl PopupMenu {
                 let key = self.render_key_binding(action, window, cx);
 
                 this.when(!disabled, |this| {
-                    this.on_click(
-                        cx.listener(move |this, _, window, cx| this.on_click(ix, window, cx)),
-                    )
+                    this.on_click(cx.listener(move |this, event, window, cx| {
+                        this.on_click(ix, event, window, cx)
+                    }))
                 })
                 .disabled(*disabled)
                 .h(item_height)
@@ -1550,6 +1583,52 @@ impl Render for PopupMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn custom_menu_item_preserves_mouse_event(cx: &mut gpui::TestAppContext) {
+        use gpui::{Modifiers, MouseButton, MouseUpEvent};
+        use std::cell::RefCell;
+
+        cx.update(crate::init);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view({
+            let events = events.clone();
+            move |_, cx| {
+                PopupMenu::new(cx).item(
+                    PopupMenuItem::element(|_, _| {
+                        div()
+                            .debug_selector(|| "custom-menu-content".into())
+                            .w(px(100.))
+                            .h(px(20.))
+                            .child("Custom")
+                    })
+                    .on_click(move |event, _, _| events.borrow_mut().push(event.clone())),
+                )
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let position = cx.debug_bounds("custom-menu-content").unwrap().center();
+        let modifiers = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        cx.simulate_mouse_down(position, MouseButton::Left, modifiers);
+        cx.simulate_event(MouseUpEvent {
+            position,
+            button: MouseButton::Left,
+            modifiers,
+            click_count: 2,
+        });
+        cx.run_until_parked();
+        let events = events.borrow();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].mouse_position(), Some(position));
+        assert_eq!(events[0].modifiers(), modifiers);
+        let ClickEvent::Mouse(event) = &events[0] else {
+            panic!("expected the original mouse click");
+        };
+        assert_eq!(event.up.click_count, 2);
+    }
 
     #[gpui::test]
     fn popup_menu_item_a11y_label_uses_visible_label(cx: &mut gpui::TestAppContext) {

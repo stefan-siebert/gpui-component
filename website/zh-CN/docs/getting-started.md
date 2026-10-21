@@ -19,10 +19,58 @@ cd gpui-hello
 
 ```toml
 [dependencies]
-gpui-kit = "0.6"
+gpui-kit = "{{gpui_kit_version}}"
 ```
 
 只需这一个依赖，即可使用 GPUI、GPUI Base、带样式的 GPUI Component 和默认图标资源。应用代码通过 `use gpui_kit::*;` 使用 GPUI，通过 `gpui_kit::component` 使用组件。以后可以调整 feature 选择，详见[图标与资源](./assets.md)。
+
+### 使用 GPUI Fast
+
+GPUI Kit 默认使用固定版本的上游 GPUI 快照。启用 `gpui-fast` 后，可切换到
+GPUI Fast 的保留渲染和布局引擎：
+
+```toml
+[dependencies]
+gpui-kit = { version = "{{gpui_kit_version}}", features = ["gpui-fast"] }
+```
+
+这个 feature 会统一切换 GPUI、原生平台、WebAssembly 后端，以及所有已启用的 Kit 层。
+继续使用 `gpui_kit::*`、`gpui_kit::component` 和 `#[gpui_kit::test]` 即可，
+无需 `[patch]`、额外的引擎依赖或 crate 别名。它也支持 `default-features = false`，
+并可与 `assets`、`test-support`、`inspector`、`profiler` 配合使用。
+GPUI Fast 依赖采用 `0.1.0` 版本要求，`cargo update` 可以更新到兼容的 `0.1.x` 版本。
+
+Cargo features 是累加的：启用 Fast 后，整个依赖图通过 Kit 使用的公开类型都会来自 Fast，
+但上游包仍然是构建依赖。不要将 Kit 的 Fast 类型与直接依赖上游 GPUI 得到的类型混用。
+单独使用 Base、Component、资源、FPS、WebView 或 Shell 时，也可以启用各自的
+`gpui-fast` feature 来显式选择后端。
+
+在此仓库中，可以分别运行 `cargo run` 和 `cargo run --features gpui-fast` 对比组件展厅。
+WebAssembly 构建使用 [WebAssembly](./webassembly.md) 中说明的 nightly 工具链。
+
+### macOS 文字渲染：`font-kit`
+
+**macOS 需要启用 `gpui-pre-platform` 的 `font-kit` feature 才能渲染文字。**
+上面的 `gpui-kit` 依赖已经启用了它，按本指南创建应用时无需额外添加依赖或配置 feature。
+
+如果你维护的应用直接依赖 GPUI，需要在 `gpui_platform` 依赖上启用这个 feature。
+仅面向 macOS 的 GPUI 应用可使用以下依赖配置：
+
+```toml
+[dependencies]
+gpui = { package = "gpui-pre", version = "={{gpui_pre_version}}" }
+gpui_platform = { package = "gpui-pre-platform", version = "={{gpui_pre_version}}", features = ["font-kit"] }
+```
+
+保留应用原有的其他平台 features，并保持 GPUI 快照版本一致。这是直接使用 GPUI 时的配置；
+本页后续 Kit 示例仍只需 `gpui-kit` 一个依赖。不要把 `features = ["font-kit"]` 加到
+`gpui` 或 `gpui-kit` 上，也无需单独添加 `font-kit` crate：这个 feature 属于
+`gpui-pre-platform`，会启用 `gpui-pre-macos/font-kit`。
+
+`gpui-pre-platform` 默认不启用 `font-kit`。未启用时，macOS 后端会使用 `NoopTextSystem`：
+窗口可以打开，但不会渲染文字，`all_font_names()` 也会返回空列表。修改 manifest 后，
+重新运行 `cargo run`。在 macOS 上，可以用 `cargo tree -e features -i gpui-pre-macos`
+查看后端的 features 由哪些依赖启用，确认其中包含 `font-kit`。
 
 ## 添加视图
 

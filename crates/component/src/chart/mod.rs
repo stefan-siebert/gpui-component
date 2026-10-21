@@ -14,20 +14,23 @@ pub use pie_chart::PieChart;
 pub use radar_chart::{RadarChart, RadarLabel};
 pub use sankey_chart::{SankeyChart, SankeyLabel};
 
-use std::{hash::Hash, panic::Location, rc::Rc};
+use std::{
+    hash::{DefaultHasher, Hash, Hasher},
+    panic::Location,
+    rc::Rc,
+};
 
 use gpui::{
     AnyElement, App, Bounds, ContentMask, ElementId, Hsla, IntoElement, ParentElement as _, Pixels,
     SharedString, Size, TextAlign, Window, point, px,
 };
-use num_traits::{Num, ToPrimitive};
 
 use crate::{
     ActiveTheme,
     plot::{
-        AxisLabelPlacement, AxisText, Grid, PlotLabel,
+        AxisLabelPlacement, AxisText, Grid, PlotAppear, PlotLabel,
         label::{TEXT_GAP, TEXT_HEIGHT, TEXT_SIZE, Text, measure_text_width},
-        scale::{Scale, ScaleBand, ScaleLinear, ScalePoint, Sealed},
+        scale::{PlotValue, Scale, ScaleBand, ScaleLinear, ScalePoint},
         tooltip::Tooltip,
     },
 };
@@ -51,6 +54,76 @@ pub(crate) fn caller_id() -> ElementId {
     ElementId::CodeLocation(*Location::caller())
 }
 
+/// A chart's appear: whether its data draws in the first time it is painted,
+/// the key that replays it, and how far it has drawn in this frame.
+pub(crate) struct ChartAppear {
+    enabled: bool,
+    generation: u64,
+    current: PlotAppear,
+}
+
+impl Default for ChartAppear {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            generation: 0,
+            current: PlotAppear::complete(),
+        }
+    }
+}
+
+impl ChartAppear {
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    pub(crate) fn set_key(&mut self, key: impl Hash) {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        self.generation = hasher.finish();
+    }
+
+    /// The generation a chart hands [`Plot::appear_generation`], or `None`
+    /// when it opted out, so no appear is tracked and no frames are asked for.
+    ///
+    /// [`Plot::appear_generation`]: crate::plot::Plot::appear_generation
+    pub(crate) fn generation(&self) -> Option<u64> {
+        self.enabled.then_some(self.generation)
+    }
+
+    pub(crate) fn update(&mut self, appear: PlotAppear) {
+        self.current = appear;
+    }
+
+    pub(crate) fn get(&self) -> &PlotAppear {
+        &self.current
+    }
+}
+
+/// The mask a chart that draws in from the left paints its series under while
+/// it appears: everything left of `progress` of the way across the plot, which
+/// starts `left` into `bounds`. It bleeds by half a hover dot, so a dot on the
+/// plot's first point shows whole as soon as the reveal passes it, and there
+/// is no mask once the appear is done.
+pub(crate) fn reveal_mask(
+    bounds: Bounds<Pixels>,
+    left: f32,
+    progress: f32,
+) -> Option<ContentMask<Pixels>> {
+    if progress >= 1. {
+        return None;
+    }
+    let bleed = HOVER_DOT_SIZE / 2.;
+    let start = bounds.left() + px(left) - bleed;
+    let end = start + (bounds.right() + bleed - start) * progress.max(0.);
+    Some(ContentMask {
+        bounds: Bounds::from_corners(
+            gpui::point(bounds.left() - bleed, bounds.top() - bleed),
+            gpui::point(end, bounds.bottom() + bleed),
+        ),
+    })
+}
+
 /// The size of the dot marking the hovered data point.
 pub(crate) const HOVER_DOT_SIZE: Pixels = px(8.);
 
@@ -71,13 +144,13 @@ pub(crate) fn axis_point_count(point_count: Option<usize>, data_len: usize) -> u
 /// laid out for `point_count` of them across `width` pixels from `start`.
 ///
 /// The data takes the leading points, so each keeps its place as the data grows.
-pub(crate) fn point_range(start: f32, width: f32, data_len: usize, point_count: usize) -> Vec<f32> {
+pub(crate) fn point_range(start: f32, width: f32, data_len: usize, point_count: usize) -> [f32; 2] {
     let end = if point_count > 1 {
         width * data_len.saturating_sub(1) as f32 / (point_count - 1) as f32
     } else {
         width
     };
-    vec![start, start + end]
+    [start, start + end]
 }
 
 /// The value range a y scale spans and the pixel range it maps onto, kept in
@@ -123,7 +196,7 @@ pub(crate) fn point_value_scale<Y>(
     (top, bottom): (f32, f32),
 ) -> (ScaleLinear<Y>, ValueExtent)
 where
-    Y: Copy + PartialOrd + Num + ToPrimitive + Sealed,
+    Y: PlotValue,
 {
     let domain: Vec<Y> = match domain {
         Some((min, max)) => vec![min, max],
@@ -139,8 +212,17 @@ where
         bottom: height - bottom,
         top,
     };
-    (ScaleLinear::new(domain, vec![height - bottom, top]), extent)
+    (ScaleLinear::new(domain, [height - bottom, top]), extent)
 }
+
+/// The height the charts reserve under the plot for x-axis labels, which they
+/// draw at the default [`TEXT_SIZE`]: [`axis_gutter`](crate::plot::axis_gutter)
+/// for that size.
+pub(crate) const AXIS_GAP: f32 = TEXT_SIZE + TEXT_GAP * 4.;
+
+/// The widest a bar or candle is by default, in pixels, however few bands
+/// share the width; see `BarChart::max_band_width`.
+pub(crate) const MAX_BAND_WIDTH: f32 = 30.;
 
 /// The least space kept beside the plot for value-axis tick labels drawn
 /// outside it, in pixels; wider labels widen it (see [`value_axis_gap`]).
@@ -519,14 +601,13 @@ where
             if !labeled.get(i).copied().unwrap_or(false) {
                 return None;
             }
-            x_scale.tick(&x_fn(d)).map(|x_tick| {
+            x_scale.tick_at(i).map(|x_tick| {
                 let align = match i {
                     0 if point_count == 1 => TextAlign::Center,
                     0 => TextAlign::Left,
                     i if i == point_count - 1 => TextAlign::Right,
                     _ => TextAlign::Center,
                 };
-                // Call x_fn again to get an owned value for the label text.
                 AxisText::new(x_fn(d).into(), x_tick, color).align(align)
             })
         })
@@ -603,12 +684,30 @@ mod tests {
         assert_eq!(Plot::id(&chart()), Plot::id(&chart()));
     }
 
-    /// The escape hatch: no id means no hitbox, so nothing above the chart has
-    /// to fight it for the cursor.
+    /// The escape hatch: a chart turned off has no hitbox, so nothing above it
+    /// has to fight it for the cursor, but it keeps its id for its appear and
+    /// its caches.
     #[test]
-    fn a_chart_turned_off_has_no_id_to_key_anything_on() {
-        assert!(Plot::id(&chart().interactive(false)).is_none());
-        assert!(Plot::id(&chart().id("pie").interactive(false)).is_none());
+    fn a_chart_turned_off_keeps_its_id_but_not_its_hitbox() {
+        let off = chart().interactive(false);
+        assert!(!Plot::interactive(&off));
+        assert!(Plot::id(&off).is_some());
+        assert_eq!(
+            Plot::id(&chart().id("pie").interactive(false)),
+            Some("pie".into())
+        );
+    }
+
+    /// Without a key a chart appears once; a key names the generation that
+    /// replays it.
+    #[test]
+    fn an_appear_key_replays_the_appear() {
+        assert_eq!(Plot::appear_generation(&chart()), Some(0));
+        assert_eq!(Plot::appear_generation(&chart().appear(false)), None);
+        let a = Plot::appear_generation(&chart().appear_key("AAPL.US"));
+        let b = Plot::appear_generation(&chart().appear_key("TSLA.US"));
+        assert_ne!(a, b);
+        assert_eq!(a, Plot::appear_generation(&chart().appear_key("AAPL.US")));
     }
 
     /// Only a label on the axis's last point hugs the right edge; the last item

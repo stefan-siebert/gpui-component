@@ -1,30 +1,32 @@
 use std::{hash::Hash, rc::Rc};
 
 use gpui::{
-    AnyElement, App, Bounds, ElementId, Hsla, IntoElement, PathBuilder, Pixels, Point,
-    SharedString, Window, fill, point, px,
+    AnyElement, App, Bounds, ElementId, Hsla, IntoElement, Pixels, Point, SharedString, Window,
+    fill, point, px,
 };
 use gpui_component_macros::IntoPlot;
-use num_traits::{Num, ToPrimitive};
 use rust_i18n::t;
 
 use crate::{
     ActiveTheme,
     plot::{
-        AXIS_GAP, Grid, Plot, PlotAxis, origin_point,
-        scale::{Scale, ScaleBand, ScaleLinear, Sealed},
+        Grid, Plot, PlotAppear, PlotAxis, origin_point,
+        scale::{PlotValue, Scale, ScaleBand, ScaleLinear},
         tooltip::{CrossLine, Tooltip, TooltipState},
     },
 };
 
-use super::{TooltipContent, build_band_labels, caller_id, labeled_items};
+use super::{
+    AXIS_GAP, ChartAppear, MAX_BAND_WIDTH, TooltipContent, build_band_labels, caller_id,
+    labeled_items, reveal_mask,
+};
 
 #[derive(IntoPlot)]
 pub struct CandlestickChart<T, X, Y>
 where
     T: 'static,
     X: Eq + Hash + Into<SharedString> + 'static,
-    Y: Copy + PartialOrd + Num + ToPrimitive + Sealed + 'static,
+    Y: PlotValue,
 {
     data: Vec<T>,
     x: Option<Rc<dyn Fn(&T) -> X>>,
@@ -34,19 +36,21 @@ where
     close: Option<Rc<dyn Fn(&T) -> Y>>,
     tick_margin: usize,
     body_width_ratio: f32,
+    max_band_width: Pixels,
     x_axis: bool,
     grid: bool,
     bullish: Option<Hsla>,
     bearish: Option<Hsla>,
     id: ElementId,
     interactive: bool,
+    appear: ChartAppear,
     tooltip_content: TooltipContent<T>,
 }
 
 impl<T, X, Y> CandlestickChart<T, X, Y>
 where
     X: Eq + Hash + Into<SharedString> + 'static,
-    Y: Copy + PartialOrd + Num + ToPrimitive + Sealed + 'static,
+    Y: PlotValue,
 {
     #[track_caller]
     pub fn new<I>(data: I) -> Self
@@ -62,12 +66,14 @@ where
             close: None,
             tick_margin: 1,
             body_width_ratio: 0.8,
+            max_band_width: px(MAX_BAND_WIDTH),
             x_axis: true,
             grid: true,
             bullish: None,
             bearish: None,
             id: caller_id(),
             interactive: true,
+            appear: ChartAppear::default(),
             tooltip_content: TooltipContent::default(),
         }
     }
@@ -89,10 +95,29 @@ where
     /// band marks the hovered candle, and a tooltip shows its open, high, low and
     /// close. Turn it off for a chart that only decorates, or one an element
     /// above it wants the cursor for: without a hitbox it neither answers the
-    /// mouse nor takes the hover from what sits over it. A chart that is off also
-    /// drops its path cache, which is keyed on the same id.
+    /// mouse nor takes the hover from what sits over it.
     pub fn interactive(mut self, interactive: bool) -> Self {
         self.interactive = interactive;
+        self
+    }
+
+    /// Draw the data in the first time this chart is painted. On by default.
+    ///
+    /// The theme sets how long it takes, and the system's reduced-motion
+    /// setting skips it. Turn it off for a chart that is painted again and
+    /// again as it scrolls in and out of view, such as one in each row of a
+    /// long list, where it would draw in every time.
+    pub fn appear(mut self, appear: bool) -> Self {
+        self.appear.set_enabled(appear);
+        self
+    }
+
+    /// Draw the data in again whenever `key` changes, such as the symbol or
+    /// period a chart shows.
+    ///
+    /// Without one the data draws in once, and later data paints in place.
+    pub fn appear_key(mut self, key: impl Hash) -> Self {
+        self.appear.set_key(key);
         self
     }
 
@@ -179,6 +204,15 @@ where
         self
     }
 
+    /// Keep every candle's band at most `width` wide, so a few candles across
+    /// a wide chart stay narrow.
+    ///
+    /// Default is 30px.
+    pub fn max_band_width(mut self, width: impl Into<Pixels>) -> Self {
+        self.max_band_width = width.into();
+        self
+    }
+
     /// Show or hide the x-axis line and labels.
     ///
     /// Default is true.
@@ -223,9 +257,10 @@ where
         let x_fn = self.x.as_ref()?;
         Some(
             ScaleBand::new(
-                self.data.iter().map(|v| x_fn(v)).collect(),
-                vec![0., bounds.size.width.as_f32()],
+                self.data.iter().map(|v| x_fn(v)),
+                [0., bounds.size.width.as_f32()],
             )
+            .max_band_width(self.max_band_width.as_f32())
             .padding_inner(0.4)
             .padding_outer(0.2),
         )
@@ -240,7 +275,7 @@ where
 impl<T, X, Y> Plot for CandlestickChart<T, X, Y>
 where
     X: Eq + Hash + Into<SharedString> + 'static,
-    Y: Copy + PartialOrd + Num + ToPrimitive + Sealed + 'static,
+    Y: PlotValue,
 {
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let (Some(x_fn), Some(open_fn), Some(high_fn), Some(low_fn), Some(close_fn)) = (
@@ -267,7 +302,7 @@ where
             .iter()
             .flat_map(|d| vec![high_fn(d), low_fn(d), open_fn(d), close_fn(d)])
             .collect();
-        let y = ScaleLinear::new(all_values, vec![height, 10.]);
+        let y = ScaleLinear::new(all_values, [height, 10.]);
 
         // Draw X axis
         let mut axis = PlotAxis::new().stroke(cx.theme().border);
@@ -287,7 +322,7 @@ where
         // Draw grid
         if self.grid {
             Grid::new()
-                .y((0..=3).map(|i| height * i as f32 / 4.0).collect())
+                .y((0..=3).map(|i| height * i as f32 / 4.0))
                 .stroke(cx.theme().border)
                 .dash_array(&[px(4.), px(2.)])
                 .paint(&bounds, window);
@@ -302,69 +337,84 @@ where
         let low_fn = low_fn.clone();
         let close_fn = close_fn.clone();
 
-        for d in &self.data {
-            let x_tick = x.tick(&x_fn(d));
-            let Some(x_tick) = x_tick else {
-                continue;
-            };
+        // The candles draw in from the left under a mask.
+        let reveal = reveal_mask(bounds, 0., self.appear.get().progress());
+        window.with_content_mask(reveal, |window| {
+            for d in &self.data {
+                let x_tick = x.tick(&x_fn(d));
+                let Some(x_tick) = x_tick else {
+                    continue;
+                };
 
-            // Get OHLC values for the current data point
-            let open = open_fn(d);
-            let high = high_fn(d);
-            let low = low_fn(d);
-            let close = close_fn(d);
+                // Get OHLC values for the current data point
+                let open = open_fn(d);
+                let high = high_fn(d);
+                let low = low_fn(d);
+                let close = close_fn(d);
 
-            // Convert values to pixel coordinates
-            let open_y = y.tick(&open);
-            let high_y = y.tick(&high);
-            let low_y = y.tick(&low);
-            let close_y = y.tick(&close);
+                // Convert values to pixel coordinates
+                let open_y = y.tick(&open);
+                let high_y = y.tick(&high);
+                let low_y = y.tick(&low);
+                let close_y = y.tick(&close);
 
-            let (Some(open_y), Some(high_y), Some(low_y), Some(close_y)) =
-                (open_y, high_y, low_y, close_y)
-            else {
-                continue;
-            };
+                let (Some(open_y), Some(high_y), Some(low_y), Some(close_y)) =
+                    (open_y, high_y, low_y, close_y)
+                else {
+                    continue;
+                };
 
-            // Determine if bullish (close > open) or bearish (close < open)
-            let is_bullish = close > open;
-            let color = if is_bullish { bullish } else { bearish };
+                // Determine if bullish (close > open) or bearish (close < open)
+                let is_bullish = close > open;
+                let color = if is_bullish { bullish } else { bearish };
 
-            // Calculate candlestick body dimensions
-            let center_x = x_tick + band_width / 2.;
-            let body_width = band_width * self.body_width_ratio;
-            let body_left = center_x - body_width / 2.;
-            let body_right = center_x + body_width / 2.;
+                // Calculate candlestick body dimensions
+                let center_x = x_tick + band_width / 2.;
+                let body_width = band_width * self.body_width_ratio;
+                let body_left = center_x - body_width / 2.;
+                let body_right = center_x + body_width / 2.;
 
-            // Draw wick (high to low line)
-            let mut wick_builder = PathBuilder::stroke(px(1.));
-            wick_builder.move_to(origin_point(px(center_x), px(high_y), origin));
-            wick_builder.line_to(origin_point(px(center_x), px(low_y), origin));
+                // Draw wick (high to low line): a 1px quad, so no stroke to tessellate.
+                let (wick_top, wick_bottom) = (high_y.min(low_y), high_y.max(low_y));
+                let wick_bounds = Bounds::from_corners(
+                    origin_point(px(center_x - 0.5), px(wick_top), origin),
+                    origin_point(px(center_x + 0.5), px(wick_bottom), origin),
+                );
+                window.paint_quad(fill(wick_bounds, color));
 
-            if let Ok(path) = wick_builder.build() {
-                window.paint_path(path, color);
+                // Draw body (open to close rectangle)
+                // For bullish: top is close, bottom is open
+                // For bearish: top is open, bottom is close
+                let (top, bottom) = if is_bullish {
+                    (close_y, open_y)
+                } else {
+                    (open_y, close_y)
+                };
+
+                let body_bounds = Bounds::from_corners(
+                    origin_point(px(body_left), px(top), origin),
+                    origin_point(px(body_right), px(bottom), origin),
+                );
+
+                window.paint_quad(fill(body_bounds, color));
             }
-
-            // Draw body (open to close rectangle)
-            // For bullish: top is close, bottom is open
-            // For bearish: top is open, bottom is close
-            let (top, bottom) = if is_bullish {
-                (close_y, open_y)
-            } else {
-                (open_y, close_y)
-            };
-
-            let body_bounds = Bounds::from_corners(
-                origin_point(px(body_left), px(top), origin),
-                origin_point(px(body_right), px(bottom), origin),
-            );
-
-            window.paint_quad(fill(body_bounds, color));
-        }
+        });
     }
 
     fn id(&self) -> Option<ElementId> {
-        self.interactive.then(|| self.id.clone())
+        Some(self.id.clone())
+    }
+
+    fn interactive(&self) -> bool {
+        self.interactive
+    }
+
+    fn appear(&mut self, appear: PlotAppear, _window: &mut Window, _cx: &mut App) {
+        self.appear.update(appear);
+    }
+
+    fn appear_generation(&self) -> Option<u64> {
+        self.appear.generation()
     }
 
     fn tooltip_state(
@@ -381,7 +431,7 @@ where
             return None;
         }
 
-        let index = x.least_index(position.x.as_f32());
+        let index = x.nearest_index(position.x.as_f32());
         let d = self.data.get(index)?;
         let center = x.tick(&x_fn(d))? + x.band_width() / 2.;
 

@@ -1,5 +1,6 @@
 use std::{
     f32::consts::{PI, TAU},
+    hash::Hash,
     rc::Rc,
 };
 
@@ -8,21 +9,21 @@ use gpui::{
     Point, SharedString, TextAlign, Window, point, px,
 };
 use gpui_component_macros::IntoPlot;
-use num_traits::{Num, ToPrimitive, Zero};
+use num_traits::Zero;
 
 use crate::{
     ActiveTheme,
     plot::{
-        Plot,
+        Plot, PlotAppear,
         label::{PlotLabel, TEXT_SIZE, Text},
         polygon,
-        scale::{Scale, ScaleLinear, Sealed},
+        scale::{PlotValue, Scale, ScaleLinear},
         shape::RadialLine,
         tooltip::{Dot, Tooltip, TooltipState},
     },
 };
 
-use super::{HOVER_DOT_SIZE, HOVER_HALO_SIZE, TooltipContent, caller_id};
+use super::{ChartAppear, HOVER_DOT_SIZE, HOVER_HALO_SIZE, TooltipContent, caller_id};
 
 const HALF_PI: f32 = PI / 2.;
 
@@ -76,7 +77,7 @@ impl From<AnyElement> for RadarLabel {
 pub struct RadarChart<T, Y>
 where
     T: 'static,
-    Y: Clone + Copy + PartialOrd + Num + ToPrimitive + Sealed + 'static,
+    Y: PlotValue,
 {
     data: Vec<T>,
     values: Vec<Rc<dyn Fn(&T) -> Y>>,
@@ -98,11 +99,12 @@ where
     dot: bool,
     id: ElementId,
     interactive: bool,
+    appear: ChartAppear,
 }
 
 impl<T, Y> RadarChart<T, Y>
 where
-    Y: Clone + Copy + PartialOrd + Num + ToPrimitive + Sealed + 'static,
+    Y: PlotValue,
 {
     #[track_caller]
     pub fn new<I>(data: I) -> Self
@@ -127,6 +129,7 @@ where
             dot: false,
             id: caller_id(),
             interactive: true,
+            appear: ChartAppear::default(),
         }
     }
 
@@ -147,10 +150,29 @@ where
     /// series marks the hovered dimension, and a tooltip shows a row each. Turn
     /// it off for a chart that only decorates, or one an element above it wants
     /// the cursor for: without a hitbox it neither answers the mouse nor takes
-    /// the hover from what sits over it. A chart that is off also drops its path
-    /// cache, which is keyed on the same id.
+    /// the hover from what sits over it.
     pub fn interactive(mut self, interactive: bool) -> Self {
         self.interactive = interactive;
+        self
+    }
+
+    /// Draw the data in the first time this chart is painted. On by default.
+    ///
+    /// The theme sets how long it takes, and the system's reduced-motion
+    /// setting skips it. Turn it off for a chart that is painted again and
+    /// again as it scrolls in and out of view, such as one in each row of a
+    /// long list, where it would draw in every time.
+    pub fn appear(mut self, appear: bool) -> Self {
+        self.appear.set_enabled(appear);
+        self
+    }
+
+    /// Draw the data in again whenever `key` changes, such as the symbol or
+    /// period a chart shows.
+    ///
+    /// Without one the data draws in once, and later data paints in place.
+    pub fn appear_key(mut self, key: impl Hash) -> Self {
+        self.appear.set_key(key);
         self
     }
 
@@ -385,7 +407,7 @@ where
                 .collect()
         };
 
-        ScaleLinear::new(domain, vec![0., outer_radius])
+        ScaleLinear::new(domain, [0., outer_radius])
     }
 
     /// Map a cursor position to the nearest spoke index, or `None` when the
@@ -411,7 +433,7 @@ where
 
 impl<T, Y> Plot for RadarChart<T, Y>
 where
-    Y: Clone + Copy + PartialOrd + Num + ToPrimitive + Sealed + 'static,
+    Y: PlotValue,
 {
     /// Resolve every dimension's label, keeping the text ones for `paint` and
     /// laying out the element ones here (measuring is illegal in `paint`).
@@ -510,7 +532,8 @@ where
             }
         }
 
-        // Draw series
+        // Draw series. They grow out of the center as the chart appears.
+        let appear = self.appear.get().progress();
         for (i, value_fn) in self.values.iter().enumerate() {
             let stroke = self.series_stroke(i, cx);
             let fill = self
@@ -524,13 +547,13 @@ where
             let mut line = RadialLine::new()
                 .data(&self.data)
                 .angle(move |_, i| Some(i as f32 * angle_step))
-                .radius(move |d, _| scale.tick(&value_fn(d)))
+                .radius(move |d, _| scale.tick(&value_fn(d)).map(|r| r * appear))
                 .closed()
                 .fill(fill)
                 .stroke(stroke)
                 .stroke_width(2.);
             if self.dot {
-                line = line.dot().dot_size(8.).dot_fill_color(stroke);
+                line = line.dot().dot_size(8.).dot_fill(stroke);
             }
             line.paint(&bounds, window);
         }
@@ -571,7 +594,19 @@ where
     }
 
     fn id(&self) -> Option<ElementId> {
-        self.interactive.then(|| self.id.clone())
+        Some(self.id.clone())
+    }
+
+    fn interactive(&self) -> bool {
+        self.interactive
+    }
+
+    fn appear(&mut self, appear: PlotAppear, _window: &mut Window, _cx: &mut App) {
+        self.appear.update(appear);
+    }
+
+    fn appear_generation(&self) -> Option<u64> {
+        self.appear.generation()
     }
 
     fn tooltip_state(

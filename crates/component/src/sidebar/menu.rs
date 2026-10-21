@@ -282,6 +282,12 @@ impl SidebarMenuItem {
         (self.collapsed && self.icon.is_some()).then(|| self.label.clone())
     }
 
+    /// Accessible name for the submenu caret: the toggle is icon-only,
+    /// so assistive tech needs the item it acts on.
+    fn caret_accessibility_label(&self) -> SharedString {
+        format!("Toggle {} submenu", self.label).into()
+    }
+
     /// Set the context menu for the menu item.
     pub fn context_menu(
         mut self,
@@ -424,6 +430,7 @@ impl SidebarItem for SidebarMenuItem {
                                     Button::new("caret")
                                         .xsmall()
                                         .ghost()
+                                        .accessibility_label(self.caret_accessibility_label())
                                         // The owner of a roving tabindex expands
                                         // with the arrow keys; the caret is the
                                         // mouse equivalent, not a stop of its own.
@@ -528,5 +535,13 @@ mod tests {
 
         assert!(expanded.collapsed_tooltip().is_none());
         assert!(iconless.collapsed_tooltip().is_none());
+    }
+
+    #[test]
+    fn submenu_caret_is_named_after_the_item() {
+        let item =
+            SidebarMenuItem::new("Projects").children(vec![SidebarMenuItem::new("Overview")]);
+
+        assert_eq!(item.caret_accessibility_label(), "Toggle Projects submenu");
     }
 }

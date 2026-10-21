@@ -206,6 +206,7 @@ impl SettingItem {
     }
 
     fn render_field(
+        title: SharedString,
         field: Rc<dyn AnySettingField>,
         options: RenderOptions,
         window: &mut Window,
@@ -216,27 +217,29 @@ impl SettingItem {
         let type_id = field.deref().type_id();
         let renderer: Box<dyn SettingFieldRender> = match type_id {
             t if t == std::any::TypeId::of::<bool>() => {
-                Box::new(BoolField::new(field_type.is_switch()))
+                Box::new(BoolField::new(field_type.is_switch(), title))
             }
             t if t == TypeId::of::<f64>() && field_type.is_number_input() => {
-                Box::new(NumberField::new(field_type.number_input_options()))
+                Box::new(NumberField::new(field_type.number_input_options(), title))
             }
             t if t == TypeId::of::<SharedString>() && field_type.is_input() => {
-                Box::new(StringField::<SharedString>::new(field_type.input_masked()))
+                Box::new(StringField::<SharedString>::new(title, field_type.input_masked()))
             }
             t if t == TypeId::of::<String>() && field_type.is_input() => {
-                Box::new(StringField::<String>::new(field_type.input_masked()))
+                Box::new(StringField::<String>::new(title, field_type.input_masked()))
             }
             t if t == TypeId::of::<SharedString>() && field_type.is_dropdown() => {
                 Box::new(DropdownField::<SharedString>::new(
                     field_type.dropdown_options(),
                     field_type.dropdown_scrollable(),
+                    title,
                 ))
             }
             t if t == TypeId::of::<String>() && field_type.is_dropdown() => {
                 Box::new(DropdownField::<String>::new(
                     field_type.dropdown_options(),
                     field_type.dropdown_scrollable(),
+                    title,
                 ))
             }
             _ if field_type.is_element() => Box::new(ElementField::new(field_type.element())),
@@ -293,7 +296,7 @@ impl SettingItem {
                                         this.w_full()
                                     }
                                 })
-                                .child(Label::new(title).text_sm())
+                                .child(Label::new(title.clone()).text_sm())
                                 .when_some(description, |this, description| {
                                     this.child(
                                         div()
@@ -305,6 +308,7 @@ impl SettingItem {
                                 }),
                         )
                         .child(div().id("field").child(Self::render_field(
+                            title,
                             field,
                             options.with_layout(layout).with_disabled(disabled),
                             window,

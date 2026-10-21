@@ -17,12 +17,15 @@ use crate::{
 pub(crate) struct StringField<T> {
     /// Password-style rendering; the value in get/set stays unmasked.
     masked: bool,
+    /// The setting's title, the input's accessible name.
+    title: SharedString,
     _marker: std::marker::PhantomData<T>,
 }
 
 impl<T> StringField<T> {
-    pub(crate) fn new(masked: bool) -> Self {
+    pub(crate) fn new(title: SharedString, masked: bool) -> Self {
         Self {
+            title,
             masked,
             _marker: std::marker::PhantomData,
         }
@@ -97,6 +100,7 @@ where
         let state = state_entity.read(cx);
 
         Input::new(&state.input)
+            .aria_label(self.title.clone())
             .disabled(options.is_disabled())
             .with_size(options.size())
             .map(|this| {

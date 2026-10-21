@@ -1496,12 +1496,13 @@ fn handle_scroll(params: &serde_json::Value, cx: &mut App) -> Result<serde_json:
     )?;
     dispatch_mouse(
         window_id,
-        gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+        gpui::PlatformInput::Scroll(gpui::ScrollEvent {
             position,
             // gpui's delta is how far the content moves: wheel down, content up.
             delta: gpui::ScrollDelta::Pixels(point(px(-event.dx), px(-event.dy))),
             modifiers,
             touch_phase: gpui::TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
         }),
         cx,
     )?;

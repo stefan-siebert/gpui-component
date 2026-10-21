@@ -48,6 +48,11 @@ impl Kbd {
         self
     }
 
+    /// The keystroke this tag shows.
+    pub(crate) fn keystroke(&self) -> &Keystroke {
+        &self.stroke
+    }
+
     /// Set the appearance of the keybinding, default is `true`.
     pub fn appearance(mut self, appearance: bool) -> Self {
         self.appearance = appearance;

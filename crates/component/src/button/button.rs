@@ -1,6 +1,5 @@
-use std::rc::Rc;
+use std::{rc::Rc, time::Duration};
 
-use crate::ThemeStyled as _;
 use crate::{
     ActiveTheme, Colorize as _, Disableable, Icon, Placement, RoleOverride, Selectable, Sizable,
     Size, StyleSized, StyledExt,
@@ -8,6 +7,7 @@ use crate::{
     h_flex,
     sizing::{platform_control_h_boost, platform_control_px_boost},
     select::Caret,
+    styled::{FocusLine, focus_style},
     tooltip::{ManagedTooltipExt as _, Tooltip},
 };
 use gpui::{
@@ -16,6 +16,10 @@ use gpui::{
     StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
     prelude::FluentBuilder as _, px, relative, transparent_white,
 };
+
+/// Ink of the focus line a filled button draws inside its fill: its own
+/// foreground, which the theme already keeps legible against that fill.
+const FOCUS_LINE_OPACITY: f32 = 0.6;
 
 #[derive(Default, Clone, Copy)]
 pub enum ButtonRounded {
@@ -217,6 +221,7 @@ pub struct Button {
         Option<(Rc<Box<dyn gpui::Action>>, Option<SharedString>)>,
     )>,
     tooltip_placement: Option<Placement>,
+    tooltip_show_delay: Option<Duration>,
     tooltip_builder: Option<Rc<dyn Fn(&mut Window, &mut App) -> gpui::AnyView>>,
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
     on_hover: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
@@ -264,6 +269,7 @@ impl Button {
             icon_size: None,
             tooltip: None,
             tooltip_placement: None,
+            tooltip_show_delay: None,
             tooltip_builder: None,
             on_click: None,
             focus_ring_enabled: true,
@@ -408,6 +414,14 @@ impl Button {
     /// Omitting placement keeps automatic positioning.
     pub fn tooltip_placement(mut self, placement: Placement) -> Self {
         self.tooltip_placement = Some(placement);
+        self
+    }
+
+    /// Overrides how long the pointer must rest before the tooltip shows.
+    ///
+    /// Defaults to [`gpui_base::TooltipDefaults::show_delay`].
+    pub fn tooltip_show_delay(mut self, delay: Duration) -> Self {
+        self.tooltip_show_delay = Some(delay);
         self
     }
 
@@ -601,6 +615,7 @@ impl RenderOnce for Button {
         let selected = self.shows_selected_style();
         let loading = self.loading;
         let tooltip_placement = self.tooltip_placement;
+        let tooltip_show_delay = self.tooltip_show_delay;
         let hover_group = self.hover_group;
         let hover_group_held = self.hover_group_held;
         let mut base = self.base;
@@ -614,6 +629,14 @@ impl RenderOnce for Button {
             _ => self.size,
         });
         let has_content = self.icon.is_some() || self.label.is_some() || !children.is_empty();
+        // Only borderless variants use this; the others tint their border.
+        let focus_line = if style.no_padding() {
+            FocusLine::Outside
+        } else if style.is_ghost() {
+            FocusLine::Edge
+        } else {
+            FocusLine::Inside(normal_style.fg.opacity(FOCUS_LINE_OPACITY))
+        };
 
         let focus_handle = window
             .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
@@ -667,15 +690,23 @@ impl RenderOnce for Button {
                             .h(px(20.) + hb)
                             .px(px(4.) + pb)
                             .when(self.compact, |this| this.min_w(px(20.) + hb)),
+                        // Upstream's paddings (px_2 / px_2p5 / px_3, compact
+                        // px_1p5 / px_2) plus the Windows boost.
                         Size::Small => this
                             .h(px(24.) + hb)
-                            .px(px(12.) + pb)
+                            .px(px(8.) + pb)
                             .when(self.compact, |this| {
                                 this.min_w(px(24.) + hb).px(px(6.) + pb)
                             }),
-                        _ => this
+                        Size::Medium => this
                             .h(px(32.) + hb)
-                            .px(px(16.) + pb)
+                            .px(px(10.) + pb)
+                            .when(self.compact, |this| {
+                                this.min_w(px(32.) + hb).px(px(8.) + pb)
+                            }),
+                        Size::Large => this
+                            .h(px(32.) + hb)
+                            .px(px(12.) + pb)
                             .when(self.compact, |this| {
                                 this.min_w(px(32.) + hb).px(px(8.) + pb)
                             }),
@@ -708,13 +739,7 @@ impl RenderOnce for Button {
                     // A loading button keeps its normal colors, but must not react
                     // to the pointer, it is not waiting for another click.
                     .when(interactive, |this| {
-                        this.hover(|this| {
-                            let hover_style = style.hovered(self.outline, cx);
-                            this.bg(hover_style.bg)
-                                .border_color(hover_style.border)
-                                .text_color(hover_style.fg)
-                        })
-                        .active(|this| {
+                        this.active(|this| {
                             let active_style = style.active(self.outline, cx);
                             this.bg(active_style.bg)
                                 .border_color(active_style.border)
@@ -726,6 +751,18 @@ impl RenderOnce for Button {
                                 .group_hover(group, |this| this.bg(idle_bg))
                         })
                     })
+            })
+            .hover(|this| {
+                // Always register the hover style: GPUI only refreshes the cached
+                // hover state while one is present. If a selected button skipped it,
+                // the stale state would keep hover colors after unselecting.
+                if !interactive || selected {
+                    return this;
+                }
+                let hover_style = style.hovered(self.outline, cx);
+                this.bg(hover_style.bg)
+                    .border_color(hover_style.border)
+                    .text_color(hover_style.fg)
             })
             .line_height(relative(1.25))
             .refine_style(&instance_style);
@@ -855,26 +892,32 @@ impl RenderOnce for Button {
         })
         .map(|this| {
             if let Some(builder) = self.tooltip_builder {
-                this.managed_tooltip_with_placement(tooltip_placement, move |window, cx| {
-                    builder(window, cx)
-                })
+                this.managed_tooltip_with(
+                    tooltip_placement,
+                    tooltip_show_delay,
+                    move |window, cx| builder(window, cx),
+                )
             } else if let Some((tooltip, action)) = self.tooltip {
-                this.managed_tooltip_with_placement(tooltip_placement, move |window, cx| {
-                    Tooltip::new(tooltip.clone())
-                        .when_some(action.clone(), |this, (action, context)| {
-                            this.action(
-                                action.boxed_clone().as_ref(),
-                                context.as_ref().map(|c| c.as_ref()),
-                            )
-                        })
-                        .build(window, cx)
-                })
+                this.managed_tooltip_with(
+                    tooltip_placement,
+                    tooltip_show_delay,
+                    move |window, cx| {
+                        Tooltip::new(tooltip.clone())
+                            .when_some(action.clone(), |this, (action, context)| {
+                                this.action(
+                                    action.boxed_clone().as_ref(),
+                                    context.as_ref().map(|c| c.as_ref()),
+                                )
+                            })
+                            .build(window, cx)
+                    },
+                )
             } else {
                 this
             }
         })
         .when(is_focused && self.focus_ring_enabled, |this| {
-            this.focus_ring_style(window, cx)
+            focus_style(this, focus_line, window, cx)
         })
     }
 }
@@ -1631,6 +1674,7 @@ mod tests {
             .outline()
             .large()
             .tooltip("Click to save")
+            .tooltip_show_delay(Duration::from_millis(100))
             .compact()
             .loading(false)
             .disabled(false)
@@ -1646,6 +1690,7 @@ mod tests {
         assert!(button.outline);
         assert_eq!(button.size, Size::Large);
         assert!(button.tooltip.is_some());
+        assert_eq!(button.tooltip_show_delay, Some(Duration::from_millis(100)));
         assert!(button.compact);
         assert!(!button.loading);
         assert!(!button.disabled);

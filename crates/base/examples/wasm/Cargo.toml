@@ -1,6 +1,6 @@
 [package]
 name = "gpui-base-examples-wasm"
-version = "0.6.5"
+version = "0.8.0"
 publish = false
 edition.workspace = true
 
@@ -10,14 +10,16 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 chrono = "0.4.38"
 gpui.workspace = true
+gpui-fast = { workspace = true, optional = true }
 gpui-base = { path = "../.." }
 gpui_platform.workspace = true
+gpui-fast-platform = { workspace = true, optional = true }
 console_error_panic_hook = "0.1"
 console_log = "1.0"
 log.workspace = true
 syntect.workspace = true
 tracing-wasm = "0.2"
-wasm-bindgen = "=0.2.121"
+wasm-bindgen = "=0.2.127"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 reqwest_client.workspace = true
@@ -29,3 +31,6 @@ workspace = true
 # follow when detecting its `chrono`, `gpui_base` and `syntect` imports.
 [package.metadata.cargo-machete]
 ignored = ["chrono", "gpui-base", "reqwest_client", "syntect"]
+
+[features]
+gpui-fast = ["dep:gpui-fast", "dep:gpui-fast-platform"]

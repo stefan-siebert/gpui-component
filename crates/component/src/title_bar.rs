@@ -8,6 +8,7 @@ use gpui::{
     Window, WindowButton, WindowButtonLayout, WindowControlArea, WindowOptions, div,
     linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px,
 };
+use gpui_base::TestSupportExt as _;
 use smallvec::SmallVec;
 
 pub const TITLE_BAR_HEIGHT: Pixels = px(34.);
@@ -244,6 +245,7 @@ impl RenderOnce for ControlIcon {
 
         div()
             .id(self.id())
+            .test_support()
             .flex()
             .flex_shrink_0()
             .justify_center()
@@ -328,7 +330,7 @@ impl RenderOnce for WindowControls {
         // title bar's window-menu overlay.
         #[cfg(target_os = "linux")]
         if !matches!(window.window_decorations(), gpui::Decorations::Client { .. }) {
-            return div().id("window-controls");
+            return div().id(self.id).test_support();
         }
 
         // The window manager declares which controls it can honor; a tiling
@@ -360,6 +362,7 @@ impl RenderOnce for WindowControls {
 
         h_flex()
             .id(self.id)
+            .test_support()
             .items_center()
             .flex_shrink_0()
             .h_full()

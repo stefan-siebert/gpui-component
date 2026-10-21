@@ -40,7 +40,8 @@ mod token_presentation;
 pub use inline_tokens::{InlineToken, InlineTokenError, InlineTokenSpan, InputContent};
 pub(crate) use token_presentation::InlineTokenPresentation;
 pub use token_presentation::{
-    InlineTokenClickEvent, InlineTokenClickListener, InlineTokenContext, InlineTokenRenderer,
+    InlineTokenClickEvent, InlineTokenClickListener, InlineTokenContext, InlineTokenHoverEvent,
+    InlineTokenHoverListener, InlineTokenRenderer,
 };
 #[path = "base/kind.rs"]
 mod kind;
@@ -105,10 +106,11 @@ pub use language::{LanguageProvider, set_language_config, set_language_provider}
 pub(crate) use language_config::LanguageConfig;
 pub use language_config::{AutoClosingPair, BracketPair, IndentationRules};
 pub use lsp::{
-    CodeActionItem, CodeActionMenuState, CodeActionProvider, CompletionMenuOptions,
-    CompletionMenuState, CompletionProvider, DefinitionProvider, DocumentColorProvider,
-    DocumentRangeSemanticTokensProvider, HoverPopoverState, HoverProvider, InputOverlayKind, Lsp,
-    ShowDocumentHandler,
+    CodeActionItem, CodeActionMenuState, CodeActionProvider, CompletionHighlighter,
+    CompletionMenuOptions, CompletionMenuState, CompletionProvider, DefinitionProvider,
+    DocumentColorProvider, DocumentRangeSemanticTokensProvider, HoverPopoverState, HoverProvider,
+    InputOverlayKind, Lsp, ShowDocumentHandler, highlight_characters, highlight_contains,
+    highlight_prefix,
 };
 pub use lsp_types::Position;
 pub use mask_pattern::MaskPattern;

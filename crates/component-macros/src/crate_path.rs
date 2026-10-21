@@ -2,30 +2,21 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 
-/// Resolve the GPUI API exposed to the crate where a macro is expanded.
-///
-/// `gpui-kit` is preferred because it re-exports GPUI and is the only direct
-/// dependency required by kit consumers. The `gpui-pre` package fallback
-/// preserves standalone `gpui-component` consumers, including dependencies
-/// that rename that package to `gpui` (the conventional name).
+/// Resolve the consumer's GPUI API, preferring the Kit facade over a direct engine.
 pub(crate) fn gpui() -> syn::Result<TokenStream> {
-    match crate_name("gpui-kit") {
-        Ok(found) => Ok(found_crate_path(found)),
-        Err(kit_error) => crate_name("gpui-pre")
-            // Fork: this workspace builds against the zed fork, whose package
-            // is plain `gpui` rather than the `gpui-pre` snapshot.
-            .or_else(|_| crate_name("gpui"))
-            .map(found_crate_path)
-            .map_err(|gpui_error| {
-                syn::Error::new(
-                    Span::call_site(),
-                    format!(
-                        "IntoPlot requires a direct dependency on `gpui-kit` or `gpui-pre`: \
-                         gpui-kit lookup failed: {kit_error}; gpui-pre lookup failed: {gpui_error}"
-                    ),
-                )
-            }),
+    // Fork: "gpui" — this workspace builds against the zed fork, whose
+    // package is plain `gpui` rather than the `gpui-pre` snapshot. Ahead of
+    // "gpui-fast": proc-macro-crate finds that optional dependency in the
+    // manifest even while its feature is off.
+    for package in ["gpui-kit", "gpui-pre", "gpui", "gpui-fast"] {
+        if let Ok(found) = crate_name(package) {
+            return Ok(found_crate_path(found));
+        }
     }
+    Err(syn::Error::new(
+        Span::call_site(),
+        "IntoPlot requires a direct dependency on gpui-kit, gpui-pre, or gpui-fast",
+    ))
 }
 
 fn found_crate_path(found: FoundCrate) -> TokenStream {
