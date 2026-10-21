@@ -292,6 +292,13 @@ pub(crate) struct ColGroup {
     ///
     /// Including the width with next columns by col_span.
     pub(crate) width: Pixels,
+    /// Fork: the width the column is asked to have — its definition's, or
+    /// what a drag or a fit set. In a table with an `auto_width` column,
+    /// `width` is laid out from it on every frame
+    /// ([`TableState::layout_fill_widths`](super::TableState)): equal while
+    /// the columns fit, narrower while they do not, and back to it once
+    /// there is room again. Elsewhere `width` is this.
+    pub(crate) preferred: Pixels,
     /// The bounds of the column in the table after it renders.
     pub(crate) bounds: Bounds<Pixels>,
     /// Original min_width from the Column definition, before any user resize.

@@ -16,8 +16,8 @@ use gpui::{
     AnyElement, AppContext, Axis, Bounds, ClickEvent, Context, Div, DragMoveEvent, ElementId,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ListSizingBehavior,
     MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, ScrollStrategy,
-    SharedString, Stateful, StatefulInteractiveElement as _, Styled, Task, TextAlign, UniformListScrollHandle,
-    Window, div, prelude::FluentBuilder, px, uniform_list,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled, Task, TextAlign,
+    UniformListScrollHandle, Window, div, prelude::FluentBuilder, px, uniform_list,
 };
 use rust_i18n::t;
 
@@ -297,9 +297,16 @@ pub struct TableState<D: TableDelegate> {
     /// this column are ignored until the next single press.
     fitted_col: Option<usize>,
 
-    /// Previous table width used to detect container size changes.
-    /// When the table width changes, auto-width columns are recomputed.
+    /// The table width the auto-width columns were last laid out for; zero
+    /// until the first layout, which is what [`Self::auto_widths_ready`]
+    /// reads.
     prev_table_width: Pixels,
+    /// Fork: the width of the flat header row on the last frame, and of the
+    /// delegate's trailing empty column in it. The difference is the room the
+    /// columns of a table with an `auto_width` column share
+    /// ([`Self::fill_room`]). Zero until measured.
+    head_row_width: Pixels,
+    last_empty_col_width: Pixels,
     /// The insertion gap index (`0..=cols_count`) while dragging a column
     /// header: the dragged column will be inserted between the columns
     /// `gap - 1` and `gap` on drop.
@@ -335,6 +342,8 @@ where
             selected_cell: None,
             resizing_col: None,
             prev_table_width: px(0.),
+            head_row_width: px(0.),
+            last_empty_col_width: px(0.),
             fitted_col: None,
             col_drag_gap: None,
             bounds: Bounds::default(),
@@ -754,6 +763,7 @@ where
                 let column = self.delegate().column(col_ix, cx);
                 ColGroup {
                     width: column.width,
+                    preferred: column.width,
                     bounds: Bounds::default(),
                     original_min_width: column.min_width,
                     column,
@@ -764,56 +774,229 @@ where
         self.update_header_layout(cx);
     }
 
-    /// Recompute widths of `auto_width` columns to fill remaining table space.
+    /// Lays out the columns of a table with an `auto_width` column for this
+    /// frame, and returns whether a width changed.
     ///
-    /// Called at the start of each render.  Uses the table bounds from the
-    /// previous frame (set via `on_prepaint`).  The computation is
-    /// deterministic (`table_width - sum(fixed)`) so it converges in one
-    /// frame and does not oscillate.
-    ///
-    /// When the user manually resizes an auto-width column, the new width is
-    /// kept as long as the table container width stays the same.  Once the
-    /// container width changes (window resize, panel resize) we recompute.
-    fn update_auto_widths(&mut self) {
+    /// Called at the start of each render, with the room measured on the
+    /// previous frame ([`Self::fill_room`]); see [`Self::layout_fill_widths`]
+    /// for what it does with it. While idle the auto columns are drawn with
+    /// `flex_1` instead ([`Self::auto_columns_flex`]), which comes to the same
+    /// widths without trailing a pane resize by a frame. Both agree only
+    /// because the room here is the room flex has: before 2026-10-21 it was the
+    /// table's whole width, borders and the trailing empty column included, so
+    /// a drag's first frame widened the auto column by those 14 px and its
+    /// release narrowed it again.
+    fn update_auto_widths(&mut self) -> bool {
         let table_width = self.bounds.size.width;
 
         // Skip on the very first frame (bounds not yet measured).
-        if table_width <= px(0.) {
-            return;
+        if table_width <= px(0.) || !self.has_auto_width_cols() {
+            return false;
         }
 
-        let has_auto = self.col_groups.iter().any(|c| c.column.auto_width);
-        if !has_auto {
-            return;
+        self.prev_table_width = table_width;
+        let room = self.fill_room();
+        self.layout_fill_widths(room)
+    }
+
+    fn has_auto_width_cols(&self) -> bool {
+        self.col_groups.iter().any(|c| c.column.auto_width)
+    }
+
+    /// The room the columns share: the flat header row less its trailing
+    /// empty column, plus the fixed columns beside it. The table's own width
+    /// until the header has been measured, and always for a grouped header,
+    /// which is not.
+    fn fill_room(&self) -> Pixels {
+        if self.head_row_width <= px(0.) {
+            return self.bounds.size.width;
         }
+        let fixed = if self.fixed_left_cols_count() > 0 {
+            self.fixed_head_cols_bounds.size.width
+        } else {
+            px(0.)
+        };
+        (self.head_row_width - self.last_empty_col_width + fixed).max(px(0.))
+    }
 
-        let table_changed = (table_width - self.prev_table_width).abs() > px(1.);
+    /// Fork: sets each column's `width` from its `preferred` width so that
+    /// all of them fill `room`, and returns whether a width changed.
+    ///
+    /// The other columns keep their preferred widths and the `auto_width`
+    /// columns share what is left, each at least its `min_width`. When that
+    /// does not fit, the resizable columns give way in proportion to their
+    /// preferred widths, none below its own `min_width`; a column that cannot
+    /// be resized keeps its width. Their preferred widths stay as they are, so
+    /// they come back as soon as the room does.
+    fn layout_fill_widths(&mut self, room: Pixels) -> bool {
+        let auto_count = self
+            .col_groups
+            .iter()
+            .filter(|c| c.column.auto_width)
+            .count();
+        if auto_count == 0 {
+            return false;
+        }
+        let auto_min: Pixels = self
+            .col_groups
+            .iter()
+            .filter(|c| c.column.auto_width)
+            .map(|c| c.column.min_width)
+            .sum();
+        let shrinks = |c: &ColGroup| !c.column.auto_width && c.is_resizable();
+        let rigid: Pixels = self
+            .col_groups
+            .iter()
+            .filter(|c| !c.column.auto_width && !c.is_resizable())
+            .map(|c| c.preferred)
+            .sum();
+        let budget = (room - auto_min - rigid).max(px(0.));
 
-        if table_changed {
-            // Sum all non-auto column widths.
-            let fixed_total: Pixels = self
-                .col_groups
-                .iter()
-                .filter(|c| !c.column.auto_width)
-                .map(|c| c.width)
-                .sum();
-
-            let auto_count = self
-                .col_groups
-                .iter()
-                .filter(|c| c.column.auto_width)
-                .count();
-            let remaining = (table_width - fixed_total).max(px(0.));
-            let per_auto = remaining / (auto_count.max(1) as f32);
-
-            for col in &mut self.col_groups {
-                if col.column.auto_width {
-                    col.width = per_auto.max(col.column.min_width);
+        let mut widths: Vec<Pixels> = self.col_groups.iter().map(|c| c.preferred).collect();
+        let wanted: Pixels = self
+            .col_groups
+            .iter()
+            .filter(|c| shrinks(c))
+            .map(|c| c.preferred)
+            .sum();
+        if wanted > budget {
+            // Shrink in proportion; a column that reaches its minimum stays
+            // there and the others share the rest, until none is below it.
+            let mut at_min = vec![false; self.col_groups.len()];
+            loop {
+                let held: Pixels = self
+                    .col_groups
+                    .iter()
+                    .zip(&at_min)
+                    .filter(|(c, at_min)| shrinks(c) && **at_min)
+                    .map(|(c, _)| c.column.min_width)
+                    .sum();
+                let free: Pixels = self
+                    .col_groups
+                    .iter()
+                    .zip(&at_min)
+                    .filter(|(c, at_min)| shrinks(c) && !**at_min)
+                    .map(|(c, _)| c.preferred)
+                    .sum();
+                let scale = if free > px(0.) {
+                    ((budget - held).max(px(0.)) / free).min(1.)
+                } else {
+                    0.
+                };
+                let mut settled = true;
+                for (ix, col) in self.col_groups.iter().enumerate() {
+                    if !shrinks(col) {
+                        continue;
+                    }
+                    if at_min[ix] {
+                        widths[ix] = col.column.min_width;
+                        continue;
+                    }
+                    let width = col.preferred * scale;
+                    if width < col.column.min_width {
+                        at_min[ix] = true;
+                        settled = false;
+                    }
+                    widths[ix] = width.max(col.column.min_width);
+                }
+                if settled {
+                    break;
                 }
             }
-
-            self.prev_table_width = table_width;
         }
+
+        let others: Pixels = self
+            .col_groups
+            .iter()
+            .zip(&widths)
+            .filter(|(c, _)| !c.column.auto_width)
+            .map(|(_, width)| *width)
+            .sum();
+        let per_auto = (room - others).max(px(0.)) / auto_count as f32;
+        let mut changed = false;
+        for (col, width) in self.col_groups.iter_mut().zip(widths) {
+            let width = if col.column.auto_width {
+                per_auto.max(col.column.min_width)
+            } else {
+                width
+            };
+            if (col.width - width).abs() > px(0.01) {
+                col.width = width;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Fork: the column a drag of column `ix`'s right edge trades width with
+    /// in a table with an `auto_width` column — the next one to the right
+    /// that is resizable or fills. `None` when there is none, or when both
+    /// fill: the edge between two fill columns has nothing to move.
+    fn fill_partner(&self, ix: usize) -> Option<usize> {
+        let this = self.col_groups.get(ix)?;
+        let partner = (ix + 1..self.col_groups.len()).find(|&next| {
+            self.col_groups
+                .get(next)
+                .is_some_and(|c| c.column.auto_width || c.is_resizable())
+        })?;
+        let partner_fills = self
+            .col_groups
+            .get(partner)
+            .is_some_and(|c| c.column.auto_width);
+        (!(this.column.auto_width && partner_fills)).then_some(partner)
+    }
+
+    /// Fork: moves the right edge of column `ix` so that the column becomes
+    /// `target` wide, in a table with an `auto_width` column, and returns
+    /// whether a width changed.
+    ///
+    /// The width comes from or goes to [`Self::fill_partner`], so the edge
+    /// stays under the pointer and no other edge moves; an `auto_width`
+    /// column on either side takes part by filling, as it always does. Both
+    /// columns stay within their `min_width` (the original one) and
+    /// `max_width`. Upstream's resize instead pushes the columns on the right
+    /// outward, which a table that fills its width can only show by letting
+    /// the auto column take the change back on release.
+    fn drag_col_edge(&mut self, ix: usize, target: Pixels, cx: &mut Context<Self>) -> bool {
+        let Some(partner) = self.fill_partner(ix) else {
+            return false;
+        };
+        let (Some(left), Some(right)) = (self.col_groups.get(ix), self.col_groups.get(partner))
+        else {
+            return false;
+        };
+        let range = |c: &ColGroup| {
+            let max = if c.column.auto_width {
+                px(f32::MAX)
+            } else {
+                c.column.max_width
+            };
+            (c.original_min_width, max)
+        };
+        let (left_min, left_max) = range(left);
+        let (right_min, right_max) = range(right);
+        let lowest = (left_min - left.width).max(right.width - right_max);
+        let highest = (left_max - left.width).min(right.width - right_min);
+        if lowest > highest {
+            return false;
+        }
+        let delta = (target - left.width).max(lowest).min(highest);
+        if delta.abs() < px(0.01) {
+            return false;
+        }
+        let (left_auto, left_width) = (left.column.auto_width, left.width);
+        let (right_auto, right_width) = (right.column.auto_width, right.width);
+        if !left_auto {
+            self.col_groups[ix].preferred = left_width + delta;
+        }
+        if !right_auto {
+            self.col_groups[partner].preferred = right_width - delta;
+        }
+        let room = self.fill_room();
+        self.layout_fill_widths(room);
+        self.update_header_layout(cx);
+        cx.notify();
+        true
     }
 
     /// Whether auto-width columns have been computed at least once.
@@ -1469,6 +1652,7 @@ where
 
                 if col_group.width != new_width {
                     col_group.width = new_width;
+                    col_group.preferred = new_width;
                     // For auto_width columns, update min_width so the column doesn't
                     // auto-shrink below the user's chosen size. If the user drags
                     // smaller, min_width follows down (but not below original).
@@ -1481,6 +1665,10 @@ where
         }
 
         if changed {
+            if self.has_auto_width_cols() {
+                let room = self.fill_room();
+                self.layout_fill_widths(room);
+            }
             self.update_header_layout(cx);
             cx.notify();
         }
@@ -1665,14 +1853,10 @@ where
 
         let col_width = col_group.width;
         let col_padding = col_group.column.paddings;
-        // Auto_width columns flex only on the very first frame, before their
-        // width has been measured (avoids a visible flash). Once measured, they
-        // render at their computed pixel width — same as fixed columns — so that
-        // resizing a neighbouring column pushes columns outward instead of the
-        // auto column greedily absorbing the change (which pinned the resized
-        // column's right edge and made the resize look mirrored). The previous
-        // virtual-list jitter that motivated permanent flex_1 is gone: the body
-        // now renders scrollable columns directly in an h_flex.
+        // Auto_width columns flex while idle and on the first frame, and render
+        // at their computed pixel width during a column drag
+        // (`auto_columns_flex`); `update_auto_widths` computes the width flex
+        // arrives at, so the switch does not move anything.
         let use_flex =
             col_group.column.auto_width && (self.auto_columns_flex() || !self.auto_widths_ready());
 
@@ -1797,6 +1981,10 @@ where
                 .get(ix)
                 .map(|col| col.is_resizable())
                 .unwrap_or(false)
+            // Fork: in a table that fills its width an edge with nothing to
+            // trade with (the last column's, against the empty column) has no
+            // handle.
+            && (!self.has_auto_width_cols() || self.fill_partner(ix).is_some())
     }
 
     /// The interactive band that drags the boundary on the right of column
@@ -1836,6 +2024,17 @@ where
                             if view.fitted_col == Some(ix) {
                                 return;
                             }
+                            let fills = view.has_auto_width_cols();
+                            if fills && view.resizing_col.is_none() {
+                                // A drag starts from what is shown: columns
+                                // squeezed for lack of room are asked for
+                                // their squeezed width from now on.
+                                for col_group in &mut view.col_groups {
+                                    if !col_group.column.auto_width {
+                                        col_group.preferred = col_group.width;
+                                    }
+                                }
+                            }
                             view.resizing_col = Some(ix);
 
                             let col_group = view
@@ -1844,12 +2043,12 @@ where
                                 .expect("BUG: invalid col index")
                                 .clone();
 
-                            view.resize_cols(
-                                ix,
-                                e.event.position.x - HANDLE_SIZE - col_group.bounds.left(),
-                                window,
-                                cx,
-                            );
+                            let target = e.event.position.x - HANDLE_SIZE - col_group.bounds.left();
+                            if fills {
+                                view.drag_col_edge(ix, target, cx);
+                            } else {
+                                view.resize_cols(ix, target, window, cx);
+                            }
 
                             // scroll the table if the drag is near the edge
                             view.scroll_table_by_col_resizing(e.event.position, &col_group);
@@ -2450,6 +2649,11 @@ where
                         } else {
                             // Flat header: use header_col_spans to support column spans even
                             // without group headers (a local feature beyond upstream's design).
+                            //
+                            // Fork: the row and its trailing empty column are
+                            // measured for the room auto-width columns fill
+                            // (`fill_room`).
+                            let view = cx.entity();
                             this.child(
                                 h_flex()
                                     .relative()
@@ -2461,7 +2665,26 @@ where
                                                 self.render_th(col_ix, colspan, window, cx)
                                             }),
                                     )
-                                    .child(self.delegate.render_last_empty_col(window, cx)),
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .flex_shrink_0()
+                                            .child(self.delegate.render_last_empty_col(window, cx))
+                                            .on_prepaint({
+                                                let view = view.clone();
+                                                move |bounds, _, cx| {
+                                                    view.update(cx, |table, _| {
+                                                        table.last_empty_col_width =
+                                                            bounds.size.width
+                                                    })
+                                                }
+                                            }),
+                                    )
+                                    .on_prepaint(move |bounds, _, cx| {
+                                        view.update(cx, |table, _| {
+                                            table.head_row_width = bounds.size.width
+                                        })
+                                    }),
                             )
                         }
                     }),
@@ -2932,7 +3155,9 @@ where
 {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.measure(window, cx);
-        self.update_auto_widths();
+        if self.update_auto_widths() {
+            self.update_header_layout(cx);
+        }
 
         let columns_count = self.delegate.columns_count(cx);
         let left_columns_count = self
@@ -3257,6 +3482,196 @@ mod tests {
                 .y)
                 > end
         );
+    }
+
+    /// A file table: an icon and a mark column that cannot be resized, a
+    /// name that fills, and three resizable columns.
+    struct FillDelegate;
+
+    impl TableDelegate for FillDelegate {
+        fn columns_count(&self, _: &App) -> usize {
+            6
+        }
+        fn rows_count(&self, _: &App) -> usize {
+            3
+        }
+        fn column(&self, col_ix: usize, _: &App) -> Column {
+            match col_ix {
+                0 => Column::new("icon", "").width(px(40.)).resizable(false),
+                1 => Column::new("name", "Name")
+                    .width(px(200.))
+                    .min_width(px(120.))
+                    .flex_grow(),
+                2 => Column::new("mark", "").width(px(40.)).resizable(false),
+                3 => Column::new("size", "Size").width(px(100.)),
+                4 => Column::new("modified", "Modified").width(px(160.)),
+                _ => Column::new("permissions", "Permissions").width(px(136.)),
+            }
+        }
+        fn render_td(
+            &mut self,
+            row: usize,
+            _: usize,
+            _: &mut Window,
+            _: &mut Context<TableState<Self>>,
+        ) -> impl IntoElement {
+            div().child(row.to_string())
+        }
+    }
+
+    fn widths<D: TableDelegate>(table: &TableState<D>) -> Vec<Pixels> {
+        table.col_groups.iter().map(|c| c.width).collect()
+    }
+
+    #[gpui::test]
+    fn fill_layout_squeezes_and_restores_preferred_widths(cx: &mut TestAppContext) {
+        cx.skip_drawing();
+        let window = cx.add_window(|window, cx| TableState::new(FillDelegate, window, cx));
+        window
+            .update(cx, |table, _, _| {
+                // Room to spare: the name takes the rest.
+                table.layout_fill_widths(px(800.));
+                assert_eq!(
+                    widths(table),
+                    [px(40.), px(324.), px(40.), px(100.), px(160.), px(136.)]
+                );
+
+                // 500 px: the name at its 120 px minimum, the rigid columns
+                // as they are, and the three resizable ones share 300 px in
+                // proportion to 100 : 160 : 136.
+                table.layout_fill_widths(px(500.));
+                let squeezed = widths(table);
+                assert_eq!(squeezed[1], px(120.));
+                assert_eq!((squeezed[0], squeezed[2]), (px(40.), px(40.)));
+                let shared: f32 = squeezed[3..].iter().map(|w| f32::from(*w)).sum();
+                assert!((shared - 300.).abs() < 0.01, "{squeezed:?}");
+                assert!((f32::from(squeezed[4] / squeezed[3]) - 1.6).abs() < 0.01);
+
+                // So little room that a column reaches its minimum: it stays
+                // there, and the name stays at its own.
+                table.layout_fill_widths(px(240.));
+                assert!(widths(table)[3..].iter().all(|w| *w >= px(20.)));
+                assert_eq!(widths(table)[1], px(120.));
+
+                // The room comes back, and so do the widths asked for.
+                table.layout_fill_widths(px(800.));
+                assert_eq!(
+                    widths(table),
+                    [px(40.), px(324.), px(40.), px(100.), px(160.), px(136.)]
+                );
+            })
+            .unwrap();
+    }
+
+    struct FillTable(Entity<TableState<FillDelegate>>);
+
+    impl Render for FillTable {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(640.)).h(px(200.)).child(DataTable::new(&self.0))
+        }
+    }
+
+    /// The right edge of each column's header cell.
+    fn edges(
+        state: &Entity<TableState<FillDelegate>>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Vec<Pixels> {
+        state.read_with(cx, |state, _| {
+            state.col_groups.iter().map(|c| c.bounds.right()).collect()
+        })
+    }
+
+    /// Presses on the handle on the right of column `ix`, moves by `dx` in
+    /// six steps and releases. Returns the edges after the last move and after
+    /// the release.
+    fn drag_edge(
+        state: &Entity<TableState<FillDelegate>>,
+        ix: usize,
+        dx: f32,
+        cx: &mut gpui::VisualTestContext,
+    ) -> (Vec<Pixels>, Vec<Pixels>, Pixels) {
+        let bounds = state.read_with(cx, |state, _| state.col_groups[ix].bounds);
+        let mut position = gpui::point(bounds.right() - px(1.), bounds.center().y);
+        cx.simulate_mouse_down(position, MouseButton::Left, gpui::Modifiers::none());
+        for _ in 0..6 {
+            position.x += px(dx / 6.);
+            cx.simulate_mouse_move(position, MouseButton::Left, gpui::Modifiers::none());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert_eq!(state.read_with(cx, |state, _| state.resizing_col), Some(ix));
+        let dragged = edges(state, cx);
+        // Released where the handle now is, as a real drag ends.
+        cx.simulate_mouse_up(position, MouseButton::Left, gpui::Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(state.read_with(cx, |state, _| state.resizing_col), None);
+        (dragged, edges(state, cx), position.x)
+    }
+
+    /// Before 2026-10-21 the fill column was computed for the whole table
+    /// width but flexed into 14 px less, so a drag's first frame pushed every
+    /// edge on its right outward and the release pulled the dragged one back
+    /// to where it started.
+    #[gpui::test]
+    fn dragging_an_edge_in_a_filling_table_moves_only_that_edge(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            FillTable(cx.new(|cx| TableState::new(FillDelegate, window, cx)))
+        });
+        for _ in 0..3 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        let state = view.read_with(cx, |view, _| view.0.clone());
+
+        // Idle, the flexed name is exactly as wide as its computed width.
+        let (computed, shown) = state.read_with(cx, |state, _| {
+            (
+                state.col_groups[1].width,
+                state.col_groups[1].bounds.size.width,
+            )
+        });
+        assert!(
+            (computed - shown).abs() < px(0.5),
+            "{computed:?} vs {shown:?}"
+        );
+        let start = edges(&state, cx);
+
+        // The size column's edge: it and the modified column trade width.
+        let (dragged, released, pointer) = drag_edge(&state, 3, 30., cx);
+        assert!(
+            (dragged[3] - (pointer - HANDLE_SIZE)).abs() < px(1.),
+            "{dragged:?}"
+        );
+        for ix in [0, 1, 2, 4, 5] {
+            assert!(
+                (dragged[ix] - start[ix]).abs() < px(0.5),
+                "{ix}: {start:?} -> {dragged:?}"
+            );
+        }
+        assert_eq!(released, dragged);
+        // Nothing reaches past the room: the last edge is where it was.
+        assert!((released[5] - start[5]).abs() < px(0.5));
+
+        // The name's edge: the name and the size column trade, the mark
+        // column between them moves along, the size column's right edge
+        // stays.
+        let before = released;
+        let (dragged, released, pointer) = drag_edge(&state, 1, -24., cx);
+        assert!(
+            (dragged[1] - (pointer - HANDLE_SIZE)).abs() < px(1.),
+            "{dragged:?}"
+        );
+        assert!((dragged[2] - dragged[1] - px(40.)).abs() < px(0.5));
+        for ix in [3, 4, 5] {
+            assert!(
+                (dragged[ix] - before[ix]).abs() < px(0.5),
+                "{ix}: {before:?} -> {dragged:?}"
+            );
+        }
+        assert_eq!(released, dragged);
+
+        // The last column's edge has nothing to trade with, so no handle.
+        assert!(!state.read_with(cx, |state, _| state.is_col_resizable(5)));
     }
 
     impl TableDelegate for WidthsDelegate {
