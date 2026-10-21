@@ -4412,6 +4412,16 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         Some(self.text.slice(range).to_string())
     }
 
+    // iOS bounds every native text edit by the document's length and offers
+    // no keyboard without it (gpui_ios `document_range`).
+    fn text_length_utf16(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        Some(self.offset_to_utf16(self.text.len()))
+    }
+
     fn selected_text_range(
         &mut self,
         _ignore_disabled_input: bool,
