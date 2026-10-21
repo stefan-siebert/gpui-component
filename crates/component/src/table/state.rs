@@ -23,9 +23,6 @@ use rust_i18n::t;
 
 use super::*;
 
-/// How far behind the pointer a resize drag trails the column edge.
-const HANDLE_SIZE: Pixels = px(2.);
-
 /// Grab room on each side of a resize handle's hairline, so the divider can be
 /// caught without pixel-hunting. Both halves of the band are this wide, so
 /// widening the grab area stays symmetric about the boundary. `resizable`'s
@@ -307,6 +304,17 @@ pub struct TableState<D: TableDelegate> {
     /// ([`Self::fill_room`]). Zero until measured.
     head_row_width: Pixels,
     last_empty_col_width: Pixels,
+    /// Fork: in a table with an `auto_width` column, the room the columns
+    /// leave over (positive) or push past the right edge (negative) since a
+    /// column was resized — so that a resize moves every edge on its right
+    /// and the auto column keeps its width. A pane resize still goes to the
+    /// auto column alone. Drawn as the margin before the trailing spacer of
+    /// the header and the rows.
+    fill_slack: Pixels,
+    /// Fork: where the pointer pressed a resize handle, relative to the edge
+    /// it moves, so that the edge keeps that distance to the pointer instead
+    /// of snapping to it on the drag's first frame.
+    resize_grab_offset: Pixels,
     /// The insertion gap index (`0..=cols_count`) while dragging a column
     /// header: the dragged column will be inserted between the columns
     /// `gap - 1` and `gap` on drop.
@@ -344,6 +352,8 @@ where
             prev_table_width: px(0.),
             head_row_width: px(0.),
             last_empty_col_width: px(0.),
+            fill_slack: px(0.),
+            resize_grab_offset: px(0.),
             fitted_col: None,
             col_drag_gap: None,
             bounds: Bounds::default(),
@@ -763,29 +773,33 @@ where
                 let column = self.delegate().column(col_ix, cx);
                 ColGroup {
                     width: column.width,
-                    preferred: column.width,
                     bounds: Bounds::default(),
                     original_min_width: column.min_width,
                     column,
                 }
             })
             .collect();
+        self.fill_slack = px(0.);
 
         self.update_header_layout(cx);
     }
 
-    /// Lays out the columns of a table with an `auto_width` column for this
-    /// frame, and returns whether a width changed.
+    /// Lays out the `auto_width` columns for this frame and returns whether a
+    /// width changed.
     ///
-    /// Called at the start of each render, with the room measured on the
-    /// previous frame ([`Self::fill_room`]); see [`Self::layout_fill_widths`]
-    /// for what it does with it. While idle the auto columns are drawn with
-    /// `flex_1` instead ([`Self::auto_columns_flex`]), which comes to the same
-    /// widths without trailing a pane resize by a frame. Both agree only
-    /// because the room here is the room flex has: before 2026-10-21 it was the
-    /// table's whole width, borders and the trailing empty column included, so
-    /// a drag's first frame widened the auto column by those 14 px and its
-    /// release narrowed it again.
+    /// They share the room the header row has ([`Self::fill_room`]) less the
+    /// other columns and less [`Self::fill_slack`], each at least its
+    /// `min_width`. Called at the start of each render, with the previous
+    /// frame's measurements; while idle the auto columns are drawn with
+    /// `flex_1` beside a spacer that holds the slack instead
+    /// ([`Self::auto_columns_flex`]), which comes to the same widths without
+    /// trailing a pane resize by a frame.
+    ///
+    /// Both agree only because the room is the room flex has: before
+    /// 2026-10-21 it was the table's whole width — its border and the
+    /// trailing empty column, 14 px, included — and the rows had no spacer at
+    /// all, so a drag's first frame widened the auto column and its release
+    /// narrowed it again, the rows 12 px apart from the header.
     fn update_auto_widths(&mut self) -> bool {
         let table_width = self.bounds.size.width;
 
@@ -793,10 +807,29 @@ where
         if table_width <= px(0.) || !self.has_auto_width_cols() {
             return false;
         }
-
         self.prev_table_width = table_width;
-        let room = self.fill_room();
-        self.layout_fill_widths(room)
+
+        let auto_count = self
+            .col_groups
+            .iter()
+            .filter(|c| c.column.auto_width)
+            .count();
+        let others: Pixels = self
+            .col_groups
+            .iter()
+            .filter(|c| !c.column.auto_width)
+            .map(|c| c.width)
+            .sum();
+        let per_auto = (self.fill_room() - others - self.fill_slack) / auto_count as f32;
+        let mut changed = false;
+        for col in self.col_groups.iter_mut().filter(|c| c.column.auto_width) {
+            let width = per_auto.max(col.column.min_width);
+            if (col.width - width).abs() > px(0.01) {
+                col.width = width;
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn has_auto_width_cols(&self) -> bool {
@@ -819,184 +852,32 @@ where
         (self.head_row_width - self.last_empty_col_width + fixed).max(px(0.))
     }
 
-    /// Fork: sets each column's `width` from its `preferred` width so that
-    /// all of them fill `room`, and returns whether a width changed.
-    ///
-    /// The other columns keep their preferred widths and the `auto_width`
-    /// columns share what is left, each at least its `min_width`. When that
-    /// does not fit, the resizable columns give way in proportion to their
-    /// preferred widths, none below its own `min_width`; a column that cannot
-    /// be resized keeps its width. Their preferred widths stay as they are, so
-    /// they come back as soon as the room does.
-    fn layout_fill_widths(&mut self, room: Pixels) -> bool {
-        let auto_count = self
-            .col_groups
-            .iter()
-            .filter(|c| c.column.auto_width)
-            .count();
-        if auto_count == 0 {
-            return false;
+    /// Fork: records [`Self::fill_slack`] after a column changed width.
+    fn update_fill_slack(&mut self) {
+        if !self.keeps_fill_slack() {
+            return;
         }
-        let auto_min: Pixels = self
-            .col_groups
-            .iter()
-            .filter(|c| c.column.auto_width)
-            .map(|c| c.column.min_width)
-            .sum();
-        let shrinks = |c: &ColGroup| !c.column.auto_width && c.is_resizable();
-        let rigid: Pixels = self
-            .col_groups
-            .iter()
-            .filter(|c| !c.column.auto_width && !c.is_resizable())
-            .map(|c| c.preferred)
-            .sum();
-        let budget = (room - auto_min - rigid).max(px(0.));
-
-        let mut widths: Vec<Pixels> = self.col_groups.iter().map(|c| c.preferred).collect();
-        let wanted: Pixels = self
-            .col_groups
-            .iter()
-            .filter(|c| shrinks(c))
-            .map(|c| c.preferred)
-            .sum();
-        if wanted > budget {
-            // Shrink in proportion; a column that reaches its minimum stays
-            // there and the others share the rest, until none is below it.
-            let mut at_min = vec![false; self.col_groups.len()];
-            loop {
-                let held: Pixels = self
-                    .col_groups
-                    .iter()
-                    .zip(&at_min)
-                    .filter(|(c, at_min)| shrinks(c) && **at_min)
-                    .map(|(c, _)| c.column.min_width)
-                    .sum();
-                let free: Pixels = self
-                    .col_groups
-                    .iter()
-                    .zip(&at_min)
-                    .filter(|(c, at_min)| shrinks(c) && !**at_min)
-                    .map(|(c, _)| c.preferred)
-                    .sum();
-                let scale = if free > px(0.) {
-                    ((budget - held).max(px(0.)) / free).min(1.)
-                } else {
-                    0.
-                };
-                let mut settled = true;
-                for (ix, col) in self.col_groups.iter().enumerate() {
-                    if !shrinks(col) {
-                        continue;
-                    }
-                    if at_min[ix] {
-                        widths[ix] = col.column.min_width;
-                        continue;
-                    }
-                    let width = col.preferred * scale;
-                    if width < col.column.min_width {
-                        at_min[ix] = true;
-                        settled = false;
-                    }
-                    widths[ix] = width.max(col.column.min_width);
-                }
-                if settled {
-                    break;
-                }
-            }
-        }
-
-        let others: Pixels = self
-            .col_groups
-            .iter()
-            .zip(&widths)
-            .filter(|(c, _)| !c.column.auto_width)
-            .map(|(_, width)| *width)
-            .sum();
-        let per_auto = (room - others).max(px(0.)) / auto_count as f32;
-        let mut changed = false;
-        for (col, width) in self.col_groups.iter_mut().zip(widths) {
-            let width = if col.column.auto_width {
-                per_auto.max(col.column.min_width)
-            } else {
-                width
-            };
-            if (col.width - width).abs() > px(0.01) {
-                col.width = width;
-                changed = true;
-            }
-        }
-        changed
+        let total: Pixels = self.col_groups.iter().map(|c| c.width).sum();
+        self.fill_slack = self.fill_room() - total;
     }
 
-    /// Fork: the column a drag of column `ix`'s right edge trades width with
-    /// in a table with an `auto_width` column — the next one to the right
-    /// that is resizable or fills. `None` when there is none, or when both
-    /// fill: the edge between two fill columns has nothing to move.
-    fn fill_partner(&self, ix: usize) -> Option<usize> {
-        let this = self.col_groups.get(ix)?;
-        let partner = (ix + 1..self.col_groups.len()).find(|&next| {
-            self.col_groups
-                .get(next)
-                .is_some_and(|c| c.column.auto_width || c.is_resizable())
-        })?;
-        let partner_fills = self
-            .col_groups
-            .get(partner)
-            .is_some_and(|c| c.column.auto_width);
-        (!(this.column.auto_width && partner_fills)).then_some(partner)
+    /// Fork: whether resizing a column moves the edges on its right
+    /// ([`Self::fill_slack`]): in a table with an `auto_width` column and a
+    /// flat header, whose trailing empty column has been measured. A grouped
+    /// header draws no slack, so there the auto column still takes a resize
+    /// back on release, as it did before 2026-10-21.
+    fn keeps_fill_slack(&self) -> bool {
+        self.has_auto_width_cols() && self.head_row_width > px(0.)
     }
 
-    /// Fork: moves the right edge of column `ix` so that the column becomes
-    /// `target` wide, in a table with an `auto_width` column, and returns
-    /// whether a width changed.
-    ///
-    /// The width comes from or goes to [`Self::fill_partner`], so the edge
-    /// stays under the pointer and no other edge moves; an `auto_width`
-    /// column on either side takes part by filling, as it always does. Both
-    /// columns stay within their `min_width` (the original one) and
-    /// `max_width`. Upstream's resize instead pushes the columns on the right
-    /// outward, which a table that fills its width can only show by letting
-    /// the auto column take the change back on release.
-    fn drag_col_edge(&mut self, ix: usize, target: Pixels, cx: &mut Context<Self>) -> bool {
-        let Some(partner) = self.fill_partner(ix) else {
-            return false;
-        };
-        let (Some(left), Some(right)) = (self.col_groups.get(ix), self.col_groups.get(partner))
-        else {
-            return false;
-        };
-        let range = |c: &ColGroup| {
-            let max = if c.column.auto_width {
-                px(f32::MAX)
-            } else {
-                c.column.max_width
-            };
-            (c.original_min_width, max)
-        };
-        let (left_min, left_max) = range(left);
-        let (right_min, right_max) = range(right);
-        let lowest = (left_min - left.width).max(right.width - right_max);
-        let highest = (left_max - left.width).min(right.width - right_min);
-        if lowest > highest {
-            return false;
+    /// The margin before the trailing spacer: the slack where the table keeps
+    /// one, nothing elsewhere.
+    fn trailing_margin(&self) -> Pixels {
+        if self.keeps_fill_slack() {
+            self.fill_slack
+        } else {
+            px(0.)
         }
-        let delta = (target - left.width).max(lowest).min(highest);
-        if delta.abs() < px(0.01) {
-            return false;
-        }
-        let (left_auto, left_width) = (left.column.auto_width, left.width);
-        let (right_auto, right_width) = (right.column.auto_width, right.width);
-        if !left_auto {
-            self.col_groups[ix].preferred = left_width + delta;
-        }
-        if !right_auto {
-            self.col_groups[partner].preferred = right_width - delta;
-        }
-        let room = self.fill_room();
-        self.layout_fill_widths(room);
-        self.update_header_layout(cx);
-        cx.notify();
-        true
     }
 
     /// Whether auto-width columns have been computed at least once.
@@ -1652,23 +1533,15 @@ where
 
                 if col_group.width != new_width {
                     col_group.width = new_width;
-                    col_group.preferred = new_width;
-                    // For auto_width columns, update min_width so the column doesn't
-                    // auto-shrink below the user's chosen size. If the user drags
-                    // smaller, min_width follows down (but not below original).
-                    if col_group.column.auto_width {
-                        col_group.column.min_width = new_width;
-                    }
                     changed = true;
                 }
             }
         }
 
         if changed {
-            if self.has_auto_width_cols() {
-                let room = self.fill_room();
-                self.layout_fill_widths(room);
-            }
+            // Fork: the edges on the right move with this one, the auto
+            // column keeps its width.
+            self.update_fill_slack();
             self.update_header_layout(cx);
             cx.notify();
         }
@@ -1981,10 +1854,6 @@ where
                 .get(ix)
                 .map(|col| col.is_resizable())
                 .unwrap_or(false)
-            // Fork: in a table that fills its width an edge with nothing to
-            // trade with (the last column's, against the empty column) has no
-            // handle.
-            && (!self.has_auto_width_cols() || self.fill_partner(ix).is_some())
     }
 
     /// The interactive band that drags the boundary on the right of column
@@ -2024,17 +1893,6 @@ where
                             if view.fitted_col == Some(ix) {
                                 return;
                             }
-                            let fills = view.has_auto_width_cols();
-                            if fills && view.resizing_col.is_none() {
-                                // A drag starts from what is shown: columns
-                                // squeezed for lack of room are asked for
-                                // their squeezed width from now on.
-                                for col_group in &mut view.col_groups {
-                                    if !col_group.column.auto_width {
-                                        col_group.preferred = col_group.width;
-                                    }
-                                }
-                            }
                             view.resizing_col = Some(ix);
 
                             let col_group = view
@@ -2043,12 +1901,13 @@ where
                                 .expect("BUG: invalid col index")
                                 .clone();
 
-                            let target = e.event.position.x - HANDLE_SIZE - col_group.bounds.left();
-                            if fills {
-                                view.drag_col_edge(ix, target, cx);
-                            } else {
-                                view.resize_cols(ix, target, window, cx);
-                            }
+                            view.resize_cols(
+                                ix,
+                                e.event.position.x + view.resize_grab_offset
+                                    - col_group.bounds.left(),
+                                window,
+                                cx,
+                            );
 
                             // scroll the table if the drag is near the edge
                             view.scroll_table_by_col_resizing(e.event.position, &col_group);
@@ -2063,22 +1922,21 @@ where
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |view, e: &MouseDownEvent, window, cx| {
+                    if let Some(col_group) = view.col_groups.get(ix) {
+                        view.resize_grab_offset = col_group.bounds.right() - e.position.x;
+                    }
                     match e.click_count {
                         1 => view.fitted_col = None,
                         2 => {
-                            // Fork: a double-click resets an auto_width column
-                            // to its original min_width; other columns fit their
+                            // Fork: a double-click makes an auto_width column
+                            // fill the rest again; other columns fit their
                             // content (upstream #3489).
                             let auto_width = view
                                 .col_groups
                                 .get(ix)
                                 .is_some_and(|col_group| col_group.column.auto_width);
                             if auto_width {
-                                if let Some(col_group) = view.col_groups.get_mut(ix) {
-                                    col_group.column.min_width = col_group.original_min_width;
-                                    col_group.width = col_group.original_min_width;
-                                }
-                                view.prev_table_width = px(0.); // force recalc
+                                view.fill_slack = px(0.);
                                 view.fitted_col = None;
                                 cx.notify();
                             } else if view.fit_col(ix, window, cx) {
@@ -2251,9 +2109,19 @@ where
                 .iter()
                 .map(|cg| cg.width)
                 .sum();
+            // Fork: a column that does not flex keeps its width in the rows,
+            // so only an auto column's minimum counts — summing the minimums
+            // let a narrow pane squeeze the auto column in the header below
+            // the width it keeps in the rows.
             let total_min_width: Pixels = self.col_groups[col_ix..col_ix + colspan]
                 .iter()
-                .map(|cg| cg.column.min_width)
+                .map(|cg| {
+                    if cg.column.auto_width {
+                        cg.column.min_width
+                    } else {
+                        cg.width
+                    }
+                })
                 .sum();
 
             let cell = h_flex()
@@ -2669,6 +2537,7 @@ where
                                         div()
                                             .h_full()
                                             .flex_shrink_0()
+                                            .ml(self.trailing_margin())
                                             .child(self.delegate.render_last_empty_col(window, cx))
                                             .on_prepaint({
                                                 let view = view.clone();
@@ -2942,6 +2811,17 @@ where
                     });
 
                     cells
+                })
+                // Fork: the header's trailing empty column and slack, so that
+                // an auto column flexes to the header's width in the rows too.
+                .when(self.keeps_fill_slack(), |this| {
+                    this.child(
+                        div()
+                            .h_full()
+                            .flex_shrink_0()
+                            .w(self.last_empty_col_width)
+                            .ml(self.trailing_margin()),
+                    )
                 })
                 // Row selected / right-clicked style.
                 //
@@ -3385,6 +3265,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
     use gpui::{App, Entity, TestAppContext};
 
     use super::*;
@@ -3485,8 +3367,13 @@ mod tests {
     }
 
     /// A file table: an icon and a mark column that cannot be resized, a
-    /// name that fills, and three resizable columns.
-    struct FillDelegate;
+    /// name that fills, and three resizable columns. With `spans`, the icon
+    /// and the mark share a header cell with the column after them, as in
+    /// Elane's file panel. Records where the first row's cells are painted.
+    struct FillDelegate {
+        cells: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
+        spans: bool,
+    }
 
     impl TableDelegate for FillDelegate {
         fn columns_count(&self, _: &App) -> usize {
@@ -3496,13 +3383,20 @@ mod tests {
             3
         }
         fn column(&self, col_ix: usize, _: &App) -> Column {
+            let span = if self.spans { 2 } else { 1 };
             match col_ix {
-                0 => Column::new("icon", "").width(px(40.)).resizable(false),
+                0 => Column::new("icon", "")
+                    .width(px(40.))
+                    .resizable(false)
+                    .header_colspan(span),
                 1 => Column::new("name", "Name")
                     .width(px(200.))
                     .min_width(px(120.))
                     .flex_grow(),
-                2 => Column::new("mark", "").width(px(40.)).resizable(false),
+                2 => Column::new("mark", "")
+                    .width(px(40.))
+                    .resizable(false)
+                    .header_colspan(span),
                 3 => Column::new("size", "Size").width(px(100.)),
                 4 => Column::new("modified", "Modified").width(px(160.)),
                 _ => Column::new("permissions", "Permissions").width(px(136.)),
@@ -3511,167 +3405,287 @@ mod tests {
         fn render_td(
             &mut self,
             row: usize,
-            _: usize,
+            col_ix: usize,
             _: &mut Window,
             _: &mut Context<TableState<Self>>,
         ) -> impl IntoElement {
-            div().child(row.to_string())
+            let cells = self.cells.clone();
+            div()
+                .size_full()
+                .child(row.to_string())
+                .when(row == 0, |this| {
+                    this.on_prepaint(move |bounds, _, _| {
+                        cells.borrow_mut().insert(col_ix, bounds);
+                    })
+                })
         }
     }
 
-    fn widths<D: TableDelegate>(table: &TableState<D>) -> Vec<Pixels> {
-        table.col_groups.iter().map(|c| c.width).collect()
+    struct FillTable {
+        state: Entity<TableState<FillDelegate>>,
+        width: Pixels,
     }
-
-    #[gpui::test]
-    fn fill_layout_squeezes_and_restores_preferred_widths(cx: &mut TestAppContext) {
-        cx.skip_drawing();
-        let window = cx.add_window(|window, cx| TableState::new(FillDelegate, window, cx));
-        window
-            .update(cx, |table, _, _| {
-                // Room to spare: the name takes the rest.
-                table.layout_fill_widths(px(800.));
-                assert_eq!(
-                    widths(table),
-                    [px(40.), px(324.), px(40.), px(100.), px(160.), px(136.)]
-                );
-
-                // 500 px: the name at its 120 px minimum, the rigid columns
-                // as they are, and the three resizable ones share 300 px in
-                // proportion to 100 : 160 : 136.
-                table.layout_fill_widths(px(500.));
-                let squeezed = widths(table);
-                assert_eq!(squeezed[1], px(120.));
-                assert_eq!((squeezed[0], squeezed[2]), (px(40.), px(40.)));
-                let shared: f32 = squeezed[3..].iter().map(|w| f32::from(*w)).sum();
-                assert!((shared - 300.).abs() < 0.01, "{squeezed:?}");
-                assert!((f32::from(squeezed[4] / squeezed[3]) - 1.6).abs() < 0.01);
-
-                // So little room that a column reaches its minimum: it stays
-                // there, and the name stays at its own.
-                table.layout_fill_widths(px(240.));
-                assert!(widths(table)[3..].iter().all(|w| *w >= px(20.)));
-                assert_eq!(widths(table)[1], px(120.));
-
-                // The room comes back, and so do the widths asked for.
-                table.layout_fill_widths(px(800.));
-                assert_eq!(
-                    widths(table),
-                    [px(40.), px(324.), px(40.), px(100.), px(160.), px(136.)]
-                );
-            })
-            .unwrap();
-    }
-
-    struct FillTable(Entity<TableState<FillDelegate>>);
 
     impl Render for FillTable {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().w(px(640.)).h(px(200.)).child(DataTable::new(&self.0))
+            div()
+                .w(self.width)
+                .h(px(200.))
+                .child(DataTable::new(&self.state))
         }
     }
 
-    /// The right edge of each column's header cell.
-    fn edges(
+    /// A 640 px file table, drawn until it has settled, its state, and where
+    /// its first row's cells go.
+    fn fill_table(
+        cx: &mut TestAppContext,
+        spans: bool,
+    ) -> (
+        Entity<FillTable>,
+        Entity<TableState<FillDelegate>>,
+        Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
+        &mut gpui::VisualTestContext,
+    ) {
+        cx.update(crate::init);
+        let cells = Rc::new(RefCell::new(HashMap::default()));
+        let (view, cx) = cx.add_window_view({
+            let cells = cells.clone();
+            |window, cx| FillTable {
+                state: cx.new(|cx| TableState::new(FillDelegate { cells, spans }, window, cx)),
+                width: px(640.),
+            }
+        });
+        draw(cx);
+        let state = view.read_with(cx, |view, _| view.state.clone());
+        (view, state, cells, cx)
+    }
+
+    fn draw(cx: &mut gpui::VisualTestContext) {
+        for _ in 0..3 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+    }
+
+    /// The right edge of each column's content in the first row. (A header
+    /// cell can span two columns.)
+    fn edges(cells: &Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>) -> Vec<Pixels> {
+        let cells = cells.borrow();
+        (0..6)
+            .map(|ix| cells.get(&ix).expect("first row painted").right())
+            .collect()
+    }
+
+    /// The fill column is as wide as it is drawn, and the first row's cells
+    /// line up with the header: its left edge, and the right edge of every
+    /// header cell.
+    fn assert_rows_follow_header(
         state: &Entity<TableState<FillDelegate>>,
+        cells: &Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
         cx: &mut gpui::VisualTestContext,
-    ) -> Vec<Pixels> {
-        state.read_with(cx, |state, _| {
-            state.col_groups.iter().map(|c| c.bounds.right()).collect()
-        })
+    ) {
+        let (computed, header) = state.read_with(cx, |state, _| {
+            (
+                state.col_groups[1].width,
+                state
+                    .col_groups
+                    .iter()
+                    .map(|c| c.bounds)
+                    .collect::<Vec<_>>(),
+            )
+        });
+        assert!(
+            (computed - header[1].size.width).abs() < px(0.5),
+            "name computed {computed:?}, drawn {:?}",
+            header[1].size.width
+        );
+        // The cells' padding, the same in every column.
+        let spans = state.read_with(cx, |state, _| state.delegate().spans);
+        let cells = cells.borrow();
+        let inset = cells.get(&0).expect("first row painted").left() - header[0].left();
+        let span_ends: &[usize] = if spans {
+            &[1, 3, 4, 5]
+        } else {
+            &[0, 1, 2, 3, 4, 5]
+        };
+        for &ix in span_ends {
+            let cell = cells.get(&ix).expect("first row painted");
+            assert!(
+                (cell.right() + inset - header[ix].right()).abs() < px(0.5),
+                "column {ix}: cell ends at {:?}, header at {:?}",
+                cell.right(),
+                header[ix].right()
+            );
+        }
     }
 
     /// Presses on the handle on the right of column `ix`, moves by `dx` in
-    /// six steps and releases. Returns the edges after the last move and after
-    /// the release.
+    /// six steps and releases. Returns how far the pointer had moved on the
+    /// drag's first frame and the edges then, after the last move, and after
+    /// the release. (gpui starts the drag on the first move and reports moves
+    /// from the second on.)
     fn drag_edge(
         state: &Entity<TableState<FillDelegate>>,
+        cells: &Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
         ix: usize,
         dx: f32,
         cx: &mut gpui::VisualTestContext,
-    ) -> (Vec<Pixels>, Vec<Pixels>, Pixels) {
+    ) -> ((Pixels, Vec<Pixels>), Vec<Pixels>, Vec<Pixels>) {
         let bounds = state.read_with(cx, |state, _| state.col_groups[ix].bounds);
         let mut position = gpui::point(bounds.right() - px(1.), bounds.center().y);
         cx.simulate_mouse_down(position, MouseButton::Left, gpui::Modifiers::none());
+        let start = position.x;
+        let mut first = None;
         for _ in 0..6 {
             position.x += px(dx / 6.);
             cx.simulate_mouse_move(position, MouseButton::Left, gpui::Modifiers::none());
             cx.update(|window, cx| window.draw(cx).clear(cx));
+            if state.read_with(cx, |state, _| state.resizing_col.is_some()) && first.is_none() {
+                first = Some((position.x - start, edges(cells)));
+            }
         }
         assert_eq!(state.read_with(cx, |state, _| state.resizing_col), Some(ix));
-        let dragged = edges(state, cx);
+        let dragged = edges(cells);
+        assert_rows_follow_header(state, cells, cx);
         // Released where the handle now is, as a real drag ends.
         cx.simulate_mouse_up(position, MouseButton::Left, gpui::Modifiers::none());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
+        draw(cx);
         assert_eq!(state.read_with(cx, |state, _| state.resizing_col), None);
-        (dragged, edges(state, cx), position.x)
+        assert_rows_follow_header(state, cells, cx);
+        let first = first.expect("the drag started");
+        (first, dragged, edges(cells))
     }
 
-    /// Before 2026-10-21 the fill column was computed for the whole table
-    /// width but flexed into 14 px less, so a drag's first frame pushed every
-    /// edge on its right outward and the release pulled the dragged one back
-    /// to where it started.
+    /// `after` is `before` with the edges from `from` on moved by `delta`.
+    fn assert_pushed(before: &[Pixels], after: &[Pixels], from: usize, delta: Pixels) {
+        for (ix, (before, after)) in before.iter().zip(after).enumerate() {
+            let expected = if ix >= from { *before + delta } else { *before };
+            assert!(
+                (*after - expected).abs() < px(0.5),
+                "edge {ix}: {before:?} -> {after:?}, expected {expected:?}"
+            );
+        }
+    }
+
+    /// A dragged edge follows the pointer and every edge on its right moves
+    /// with it, at the fill column's edge too; nothing moves on the drag's
+    /// first frame or on its release. Before 2026-10-21 the fill column was
+    /// computed 14 px wider than it flexed, so the first frame pushed every
+    /// edge outward, the release let the fill column take the change back,
+    /// and the rows, which had no trailing empty column, sat 12 px off their
+    /// header while idle.
     #[gpui::test]
-    fn dragging_an_edge_in_a_filling_table_moves_only_that_edge(cx: &mut TestAppContext) {
-        cx.update(crate::init);
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            FillTable(cx.new(|cx| TableState::new(FillDelegate, window, cx)))
-        });
-        for _ in 0..3 {
-            cx.update(|window, cx| window.draw(cx).clear(cx));
-        }
-        let state = view.read_with(cx, |view, _| view.0.clone());
+    fn dragging_an_edge_pushes_every_edge_on_its_right(cx: &mut TestAppContext) {
+        drag_pushes_every_edge_on_its_right(cx, false);
+        drag_pushes_every_edge_on_its_right(cx, true);
+    }
 
-        // Idle, the flexed name is exactly as wide as its computed width.
-        let (computed, shown) = state.read_with(cx, |state, _| {
-            (
-                state.col_groups[1].width,
-                state.col_groups[1].bounds.size.width,
-            )
-        });
-        assert!(
-            (computed - shown).abs() < px(0.5),
-            "{computed:?} vs {shown:?}"
-        );
-        let start = edges(&state, cx);
+    fn drag_pushes_every_edge_on_its_right(cx: &mut TestAppContext, spans: bool) {
+        let (_view, state, cells, cx) = fill_table(cx, spans);
+        assert_rows_follow_header(&state, &cells, cx);
+        let start = edges(&cells);
 
-        // The size column's edge: it and the modified column trade width.
-        let (dragged, released, pointer) = drag_edge(&state, 3, 30., cx);
-        assert!(
-            (dragged[3] - (pointer - HANDLE_SIZE)).abs() < px(1.),
-            "{dragged:?}"
-        );
-        for ix in [0, 1, 2, 4, 5] {
-            assert!(
-                (dragged[ix] - start[ix]).abs() < px(0.5),
-                "{ix}: {start:?} -> {dragged:?}"
-            );
-        }
+        // The size column's edge.
+        let ((moved, first), dragged, released) = drag_edge(&state, &cells, 3, 30., cx);
+        assert_pushed(&start, &first, 3, moved);
+        assert_pushed(&start, &dragged, 3, px(30.));
         assert_eq!(released, dragged);
-        // Nothing reaches past the room: the last edge is where it was.
-        assert!((released[5] - start[5]).abs() < px(0.5));
 
-        // The name's edge: the name and the size column trade, the mark
-        // column between them moves along, the size column's right edge
-        // stays.
+        // Back in: the gap it leaves stays on the right.
         let before = released;
-        let (dragged, released, pointer) = drag_edge(&state, 1, -24., cx);
-        assert!(
-            (dragged[1] - (pointer - HANDLE_SIZE)).abs() < px(1.),
-            "{dragged:?}"
-        );
-        assert!((dragged[2] - dragged[1] - px(40.)).abs() < px(0.5));
-        for ix in [3, 4, 5] {
-            assert!(
-                (dragged[ix] - before[ix]).abs() < px(0.5),
-                "{ix}: {before:?} -> {dragged:?}"
-            );
-        }
+        let (_, dragged, released) = drag_edge(&state, &cells, 3, -60., cx);
+        assert_pushed(&before, &dragged, 3, px(-60.));
         assert_eq!(released, dragged);
 
-        // The last column's edge has nothing to trade with, so no handle.
-        assert!(!state.read_with(cx, |state, _| state.is_col_resizable(5)));
+        // The name's edge: the mark column and everything after it move.
+        let before = released;
+        let (_, dragged, released) = drag_edge(&state, &cells, 1, -24., cx);
+        assert_pushed(&before, &dragged, 1, px(-24.));
+        assert_eq!(released, dragged);
+
+        // The last column has a handle too.
+        let before = released;
+        let (_, dragged, released) = drag_edge(&state, &cells, 5, 18., cx);
+        assert_pushed(&before, &dragged, 5, px(18.));
+        assert_eq!(released, dragged);
+
+        // Out past the right edge: the last columns are pushed out of view.
+        let before = released;
+        let (_, dragged, released) = drag_edge(&state, &cells, 1, 120., cx);
+        assert_pushed(&before, &dragged, 1, px(120.));
+        assert!(released[5] > start[5] + px(60.));
+        assert_eq!(released, dragged);
+    }
+
+    /// A narrower or wider pane changes the fill column alone, whatever the
+    /// drags before left over or pushed out, down to the fill column's
+    /// minimum.
+    #[gpui::test]
+    fn a_pane_resize_changes_only_the_fill_column(cx: &mut TestAppContext) {
+        pane_resize_changes_only_the_fill_column(cx, false);
+        pane_resize_changes_only_the_fill_column(cx, true);
+    }
+
+    fn pane_resize_changes_only_the_fill_column(cx: &mut TestAppContext, spans: bool) {
+        let (view, state, cells, cx) = fill_table(cx, spans);
+        let (_, _, before) = drag_edge(&state, &cells, 4, -40., cx);
+        let resize = |width: f32, cx: &mut gpui::VisualTestContext| {
+            view.update(cx, |view, cx| {
+                view.width = px(width);
+                cx.notify();
+            });
+            draw(cx);
+        };
+
+        resize(620., cx);
+        let after = edges(&cells);
+        assert_pushed(&before, &after, 1, px(-20.));
+        assert_rows_follow_header(&state, &cells, cx);
+
+        // The name stops at its minimum, the rest goes out of view.
+        resize(300., cx);
+        let name = state.read_with(cx, |state, _| state.col_groups[1].bounds.size.width);
+        assert!((name - px(120.)).abs() < px(0.5), "{name:?}");
+        assert_rows_follow_header(&state, &cells, cx);
+
+        resize(640., cx);
+        assert_eq!(edges(&cells), before);
+
+        // A drag after the resize still starts where the edges are shown.
+        let ((moved, first), _, _) = drag_edge(&state, &cells, 3, 12., cx);
+        assert_pushed(&before, &first, 3, moved);
+    }
+
+    /// A double-click on the fill column's edge closes the gap that shrinking
+    /// a column left, and takes back what widening one pushed out of view.
+    #[gpui::test]
+    fn double_clicking_the_fill_edge_fills_the_room_again(cx: &mut TestAppContext) {
+        double_click_fills_the_room_again(cx, false);
+        double_click_fills_the_room_again(cx, true);
+    }
+
+    fn double_click_fills_the_room_again(cx: &mut TestAppContext, spans: bool) {
+        let (_view, state, cells, cx) = fill_table(cx, spans);
+        let start = edges(&cells);
+        drag_edge(&state, &cells, 4, -40., cx);
+        assert!(edges(&cells)[5] < start[5] - px(39.));
+
+        let bounds = state.read_with(cx, |state, _| state.col_groups[1].bounds);
+        let position = gpui::point(bounds.right() - px(1.), bounds.center().y);
+        cx.simulate_click(position, gpui::Modifiers::none());
+        cx.simulate_event(MouseDownEvent {
+            position,
+            button: MouseButton::Left,
+            modifiers: gpui::Modifiers::none(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_mouse_up(position, MouseButton::Left, gpui::Modifiers::none());
+        draw(cx);
+
+        let filled = edges(&cells);
+        assert!((filled[5] - start[5]).abs() < px(0.5), "{start:?} {filled:?}");
+        assert!((filled[1] - (start[1] + px(40.))).abs() < px(0.5));
+        assert_rows_follow_header(&state, &cells, cx);
     }
 
     impl TableDelegate for WidthsDelegate {
