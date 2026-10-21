@@ -2422,6 +2422,26 @@ fn name_of(element: &UiElement) -> Option<String> {
     (!joined.is_empty()).then(|| truncate_chars(&joined, 60))
 }
 
+/// The name a snapshot line prints: the painted text, or the accessibility
+/// label where nothing is painted.
+///
+/// The label also wins where it says exactly what is painted apart from the
+/// spaces: a label painted in several runs — an underlined access key, "A"
+/// then "dd" — is joined with a space between the runs, which is nothing a
+/// person reads ("A d d") and nothing an agent would think to match.
+fn line_name(element: &UiElement, label: Option<&str>) -> Option<String> {
+    let painted = name_of(element);
+    let Some(label) = label.filter(|label| !label.trim().is_empty()) else {
+        return painted;
+    };
+    let without_spaces =
+        |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
+    match painted {
+        Some(painted) if without_spaces(&painted) != without_spaces(label) => Some(painted),
+        _ => Some(truncate_chars(label.trim(), 60)),
+    }
+}
+
 fn truncate_chars(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
         return text.to_string();
@@ -2660,7 +2680,7 @@ fn snapshot_nodes(
         let role = node.and_then(|node| node.role).or(derived);
 
         let test_id = test_id_of(strip_id_decoration(&element.id)).map(str::to_string);
-        let name = name_of(element).or_else(|| node.and_then(|node| node.label.clone()));
+        let name = line_name(element, node.and_then(|node| node.label.as_deref()));
 
         let says_something = role.is_some() || test_id.is_some() || name.is_some();
         let wanted = says_something && (!interactive_only || is_interactive(role));
@@ -4168,6 +4188,32 @@ mod tests {
         let name = name_of(&wordy).unwrap();
         assert_eq!(name.chars().count(), 61, "60 characters plus the ellipsis");
         assert!(name.ends_with('…'));
+    }
+
+    /// A label painted in runs (an underlined access key) is named by its
+    /// accessibility label; a label that says something else than the
+    /// painted text does not replace it, and one fills in where nothing is
+    /// painted.
+    #[test]
+    fn a_label_painted_in_runs_is_named_by_its_accessibility_label() {
+        let runs = ui_element("W/a[0]", None, &["A", "dd"], vec![]);
+        assert_eq!(line_name(&runs, Some("Add")).as_deref(), Some("Add"));
+        let runs = ui_element("W/a[0]", None, &["T", "rust and Add"], vec![]);
+        assert_eq!(
+            line_name(&runs, Some("Trust and Add")).as_deref(),
+            Some("Trust and Add")
+        );
+
+        let other = ui_element("W/a[0]", None, &["Save"], vec![]);
+        assert_eq!(line_name(&other, Some("Store")).as_deref(), Some("Save"));
+        assert_eq!(line_name(&other, None).as_deref(), Some("Save"));
+
+        let icon_only = ui_element("W/a[0]", None, &[], vec![]);
+        assert_eq!(
+            line_name(&icon_only, Some("Close")).as_deref(),
+            Some("Close")
+        );
+        assert_eq!(line_name(&icon_only, Some("  ")), None);
     }
 
     /// The size difference against the full tree comes from dropping the
