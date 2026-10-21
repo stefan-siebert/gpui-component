@@ -228,7 +228,8 @@ Upstream pressure: `settings.rs` 0 upstream commits; `page.rs` 2 (`952202f6` foc
 | ~~`b974dcf0`~~ | ~~`DataTable::header_size(Size)`~~ — **dropped 2026-10-21** for upstream's `DataTable::header_row_height(Pixels)` (#3420, same purpose, also fixes PageUp/PageDown by the header band). Elane calls `.header_row_height(Size::Medium.table_row_height())`. |
 | `1c453d8e` | `TableDelegate::visible_rows_rendered(range, ..)` — called on **every** frame the rows render (Elane's thumbnail scheduler publishes from it). |
 | `5f336c79` (merge) | Fork row rendering kept; selection read through upstream's accessors; upstream's cell→row click escalation adopted. |
-| `d6370e31` | **Filling tables lay out for the room flex has, and a drag trades with the neighbour** (2026-10-21). `update_auto_widths` runs every frame against `fill_room()` — the flat header row less its trailing empty column, measured (`head_row_width`, `last_empty_col_width`); before, it used the table's whole width, 14 px more than flex had, so a drag's first frame pushed every edge outward and the release (flex again) let the auto column take the dragged column's gain back: the edge returned to where it started. A drag in a table with an `auto_width` column goes to `drag_col_edge`: width moves between the column and `fill_partner` (next resizable or filling column), so only the dragged edge moves; the last column gets no handle. `ColGroup::preferred` holds the asked-for width; `layout_fill_widths` squeezes resizable columns in proportion when there is no room and restores them when there is. Tables without an auto column resize as upstream does. |
+| ~~`d6370e31`~~ | ~~Filling tables: a drag trades with the neighbour~~ — **superseded 2026-10-21 by `0f7a6d8c`** (rejected: the user wants every edge on the right pushed along). Its `fill_room()` stays: `update_auto_widths` runs every frame against the flat header row less its measured trailing empty column (`head_row_width`, `last_empty_col_width`), not the table's whole width — 14 px more than flex had, so a drag's first frame pushed every edge outward. |
+| `0f7a6d8c` | **A dragged edge pushes every column on its right** (2026-10-21), at the auto column's edge too, and the last column has a handle. `fill_slack` = room − Σ widths after a resize; the auto column is room − others − slack, so release (flex again) does not take the drag back; the slack is drawn as `ml()` before the trailing spacer, negative when columns are pushed out of view (clipped). A pane resize changes only the auto column, down to its `min_width`. Double-click on the auto column's handle → slack 0. Rows get the header's trailing spacer (they flexed 12 px wider without it). The drag keeps its grab offset (`resize_grab_offset`) instead of `pointer − 2`. A spanned header cell's minimum = auto column's `min_width` + the other columns' widths. Flat headers only (`keeps_fill_slack`); grouped headers unchanged. |
 
 Elane: `TableEvent::RowClick` (`file_panel.rs:1682`), `header_colspan` (`file_table.rs`), `Column::flex_grow()`
 (`file_table.rs:371`), `visible_rows_rendered` (`file_table.rs`, `file_table/cells.rs`).
@@ -236,11 +237,13 @@ Elane: `TableEvent::RowClick` (`file_panel.rs:1682`), `header_colspan` (`file_ta
 
 **Must survive merges:** body columns not virtualised horizontally; header and body flex/pin decisions flip together
 (`auto_columns_flex`); computed fill widths equal the flexed ones (`fill_room` measures the header row and its empty
-column — a new chrome element in the row must be subtracted there too); a filling table's drag goes through
-`drag_col_edge`; colspan handle → last spanned column; `visible_rows_rendered` call inside the uniform_list
-processor. Tests: `fill_layout_squeezes_and_restores_preferred_widths` and
-`dragging_an_edge_in_a_filling_table_moves_only_that_edge` lock the fill layout and the drag (the latter fails on
-both jumps against the code before `d6370e31`); the other table patches still have none.
+column — a new chrome element in the row must be subtracted there too, and the rows need the same trailing spacer
+as the header); a resize in a filling table updates `fill_slack`, drawn in header and rows alike; colspan handle →
+last spanned column; `visible_rows_rendered` call inside the uniform_list processor. Tests:
+`dragging_an_edge_pushes_every_edge_on_its_right`, `a_pane_resize_changes_only_the_fill_column` and
+`double_clicking_the_fill_edge_fills_the_room_again` (each with and without spanned headers; they compare the first
+row's cells with the header) lock the fill layout and the drag — they fail against `03a1988e` and `d6370e31`; the
+other table patches still have none.
 Upstream pressure: `state.rs` **13** upstream commits, `data_table.rs` 6, `delegate.rs` 2, `column.rs` 2 (see §13).
 
 ---
