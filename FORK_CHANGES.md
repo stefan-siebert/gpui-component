@@ -227,12 +227,14 @@ Upstream pressure: `settings.rs` 0 upstream commits; `page.rs` 2 (`952202f6` foc
 | (fork) | `TableState::set_col_groups_from_delegate` (rebuild columns without `cx.notify()`). |
 | ~~`b974dcf0`~~ | ~~`DataTable::header_size(Size)`~~ — **dropped 2026-10-21** for upstream's `DataTable::header_row_height(Pixels)` (#3420, same purpose, also fixes PageUp/PageDown by the header band). Elane calls `.header_row_height(Size::Medium.table_row_height())`. |
 | `1c453d8e` | `TableDelegate::visible_rows_rendered(range, ..)` — called on **every** frame the rows render (Elane's thumbnail scheduler publishes from it). |
+| (fork, 2026-10-23) | `TableDelegate::has_context_menu()` (default `true`): `false` leaves the table's `ContextMenu` wrapper out. Upstream `c8fdf332` (#3402, in with the 2026-10-21 merge) makes that wrapper `stop_propagation` the right-button press it opens on, so a host with a row menu of its own never saw the press — Elane's file-panel row menu went dark, an empty table menu took the focus instead. Test: `a_right_click_reaches_a_host_with_its_own_menu` (fails with the wrapper installed). |
 | `5f336c79` (merge) | Fork row rendering kept; selection read through upstream's accessors; upstream's cell→row click escalation adopted. |
 | ~~`d6370e31`~~ | ~~Filling tables: a drag trades with the neighbour~~ — **superseded 2026-10-21 by `0f7a6d8c`** (rejected: the user wants every edge on the right pushed along). Its `fill_room()` stays: `update_auto_widths` runs every frame against the flat header row less its measured trailing empty column (`head_row_width`, `last_empty_col_width`), not the table's whole width — 14 px more than flex had, so a drag's first frame pushed every edge outward. |
 | `0f7a6d8c` | **A dragged edge pushes every column on its right** (2026-10-21), at the auto column's edge too, and the last column has a handle. `fill_slack` = room − Σ widths after a resize; the auto column is room − others − slack, so release (flex again) does not take the drag back; the slack is drawn as `ml()` before the trailing spacer, negative when columns are pushed out of view (clipped). A pane resize changes only the auto column, down to its `min_width`. Double-click on the auto column's handle → slack 0. Rows get the header's trailing spacer (they flexed 12 px wider without it). The drag keeps its grab offset (`resize_grab_offset`) instead of `pointer − 2`. A spanned header cell's minimum = auto column's `min_width` + the other columns' widths. Flat headers only (`keeps_fill_slack`); grouped headers unchanged. |
 
 Elane: `TableEvent::RowClick` (`file_panel.rs:1682`), `header_colspan` (`file_table.rs`), `Column::flex_grow()`
-(`file_table.rs:371`), `visible_rows_rendered` (`file_table.rs`, `file_table/cells.rs`).
+(`file_table.rs:371`), `visible_rows_rendered` (`file_table.rs`, `file_table/cells.rs`), `has_context_menu`
+(`file_table.rs`, returns `false`).
 `last_clicked_col`, `set_col_groups_from_delegate`, `.auto_width()` not called by Elane directly.
 
 **Must survive merges:** body columns not virtualised horizontally; header and body flex/pin decisions flip together
@@ -350,7 +352,7 @@ Confirmed by grep in Elane `src/` and `crates/` (2026-10-21):
 | `MenuIcon::Raster` | `services/shell_menu/submenu.rs` |
 | `Notification::{autohide_after, on_expire}` | `ui/notify.rs` |
 | `Kbd::arrow_glyphs` | `fkey_bar.rs` |
-| `TableEvent::RowClick`, `Column::{flex_grow, header_colspan}`, `TableDelegate::visible_rows_rendered` | `file_panel.rs`, `file_table.rs`, `file_table/cells.rs` |
+| `TableEvent::RowClick`, `Column::{flex_grow, header_colspan}`, `TableDelegate::{visible_rows_rendered, has_context_menu}` | `file_panel.rs`, `file_table.rs`, `file_table/cells.rs` |
 | `ResizablePanelGroup::snap_to`, `ResizableState::is_resizing` | `panel_splitter.rs` |
 | `HoverCard::content_offset` | `file_table/cells.rs` |
 | `SelectableText`, `TextSelection`, `TextSelectionHandle` re-exports | `preview_window/info_box.rs`, `hex.rs` |

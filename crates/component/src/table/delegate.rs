@@ -122,6 +122,16 @@ pub trait TableDelegate: Sized + 'static {
         div().id(("row", row_ix))
     }
 
+    /// Whether the table installs its context menu (`context_menu`) at all.
+    ///
+    /// Return `false` when the host opens a menu of its own from a
+    /// right-click listener around the table. The table's menu stops the
+    /// right-button press it opens on, so with it installed the host's
+    /// listener never runs — even when `context_menu` adds nothing.
+    fn has_context_menu(&self) -> bool {
+        true
+    }
+
     /// Render the context menu for the row at the given row index.
     fn context_menu(
         &mut self,

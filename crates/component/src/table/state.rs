@@ -3102,18 +3102,6 @@ where
             .px_px()
             .overflow_hidden()
             .child(self.render_table_header(left_columns_count, window, cx))
-            .context_menu({
-                let view = cx.entity().clone();
-                move |this, window: &mut Window, cx: &mut Context<PopupMenu>| {
-                    if let Some(row_ix) = view.read(cx).right_clicked_row {
-                        view.update(cx, |menu, cx| {
-                            menu.delegate_mut().context_menu(row_ix, this, window, cx)
-                        })
-                    } else {
-                        this
-                    }
-                }
-            })
             .map(|this| {
                 if rows_count == 0 {
                     this.children(empty_view)
@@ -3214,6 +3202,27 @@ where
                     )
                 }
             });
+        // Fork: a host with a menu of its own opts out
+        // (`TableDelegate::has_context_menu`); the menu would stop the
+        // right-button press before the host's listener sees it.
+        let inner_table = if self.delegate.has_context_menu() {
+            inner_table
+                .context_menu({
+                    let view = cx.entity().clone();
+                    move |this, window: &mut Window, cx: &mut Context<PopupMenu>| {
+                        if let Some(row_ix) = view.read(cx).right_clicked_row {
+                            view.update(cx, |menu, cx| {
+                                menu.delegate_mut().context_menu(row_ix, this, window, cx)
+                            })
+                        } else {
+                            this
+                        }
+                    }
+                })
+                .into_any_element()
+        } else {
+            inner_table.into_any_element()
+        };
 
         div()
             .size_full()
@@ -3363,6 +3372,85 @@ mod tests {
                 .offset()
                 .y)
                 > end
+        );
+    }
+
+    /// A table whose host opens its own menu: `has_context_menu` says no.
+    struct HostMenuDelegate;
+
+    impl TableDelegate for HostMenuDelegate {
+        fn columns_count(&self, _: &App) -> usize {
+            1
+        }
+        fn rows_count(&self, _: &App) -> usize {
+            3
+        }
+        fn column(&self, _: usize, _: &App) -> Column {
+            Column::new("value", "Value")
+        }
+        fn render_td(
+            &mut self,
+            row: usize,
+            _: usize,
+            _: &mut Window,
+            _: &mut Context<TableState<Self>>,
+        ) -> impl IntoElement {
+            div().child(row.to_string())
+        }
+        fn has_context_menu(&self) -> bool {
+            false
+        }
+    }
+
+    /// The table inside a host that counts the right-button presses
+    /// reaching it, the way Elane's file panel opens its row menu.
+    struct HostMenuTable {
+        table: Entity<TableState<HostMenuDelegate>>,
+        presses: Rc<RefCell<usize>>,
+    }
+
+    impl Render for HostMenuTable {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let presses = self.presses.clone();
+            div()
+                .w(px(240.))
+                .h(px(200.))
+                .on_mouse_down(MouseButton::Right, move |_, _, _| {
+                    *presses.borrow_mut() += 1;
+                })
+                .child(DataTable::new(&self.table))
+        }
+    }
+
+    /// Opted out of the table's menu, a right-click on a row reaches the
+    /// host's listener and still names the row. The installed menu stops
+    /// the press (upstream c8fdf332); Elane's row menu went dark that way.
+    #[gpui::test]
+    fn a_right_click_reaches_a_host_with_its_own_menu(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let presses = Rc::new(RefCell::new(0));
+        let (view, cx) = cx.add_window_view({
+            let presses = presses.clone();
+            move |window, cx| HostMenuTable {
+                table: cx.new(|cx| TableState::new(HostMenuDelegate, window, cx)),
+                presses,
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let state = view.read_with(cx, |view, _| view.table.clone());
+        let header = state.read_with(cx, |state, _| state.col_groups[0].bounds);
+        // The middle of the second row, one header height below the first.
+        let row = gpui::point(
+            header.center().x,
+            header.bottom() + header.size.height * 1.5,
+        );
+        cx.simulate_mouse_down(row, MouseButton::Right, Default::default());
+        cx.simulate_mouse_up(row, MouseButton::Right, Default::default());
+        cx.run_until_parked();
+        assert_eq!(*presses.borrow(), 1, "the host saw the press");
+        assert_eq!(
+            state.read_with(cx, |state, _| state.right_clicked_row()),
+            Some(1)
         );
     }
 
