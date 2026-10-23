@@ -317,6 +317,7 @@ Elane: `src/ui/components/breadcrumb.rs` (`CollapsibleBreadcrumb`). Tests: 14 (`
 | `7606dd2b`, `0086f5a9` | `platform_control_{h,px,py}_boost()` (Windows +4/+2/+2 px, else 0) applied in `Size::input_px/input_py` and `StyleSized::input_h` (explicit px instead of `h_5()`…), and in `Button` sizes. |
 | `2114aac5` | Button focus: inset solid `theme.ring` border instead of an outset alpha glow (`button.rs` today carries no visible remainder of this in the net diff — upstream's `eb6c13ad` reworked the focus line). |
 | `5a9f2632` | Tests adapted (`dock/tab_panel.rs` close button `20px + boost`; settings click tests ignored on Windows). |
+| `00cf4d81` | **Control scale** (2026-10-24): `set_control_scale` / `control_scale` / `scaled_px`, one process-wide factor (an `AtomicU32` — the size helpers run in builder chains without `cx`). Button, `input_h`/`input_px`/`input_py`, `table_row_height` + cell padding, PopupMenu item height, Tab/TabBar heights and paddings, Switch track (thumb derived), `title_bar_height()` (+ traffic-light position) multiply by it. `Size::{button_height, input_height, menu_item_height}` public. Rem geometry (Checkbox, Radio, icons) untouched. Same commit: `PopupMenu` and `Kbd` `Sizable`, mono font size derived from the font size (13:16) when a theme sets none. Elane plan: `docs/superpowers/plans/2026-10-23-ui-density-and-sizing.md`. |
 
 **Note:** in `Button` the fork also changes horizontal padding on **all** platforms relative to upstream
 (Small `px_2`=8 → 12 px, Medium `px_2p5`=10 → 16 px, Large `px_3`=12 → 16 px, compact paddings likewise). That
@@ -352,6 +353,7 @@ Confirmed by grep in Elane `src/` and `crates/` (2026-10-21):
 | `MenuIcon::Raster` | `services/shell_menu/submenu.rs` |
 | `Notification::{autohide_after, on_expire}` | `ui/notify.rs` |
 | `Kbd::arrow_glyphs` | `fkey_bar.rs` |
+| `set_control_scale`, `scaled_px`, `title_bar_height()`, `Size::{button_height, input_height, menu_item_height}`, `Sizable` on `PopupMenu`/`Kbd` | `ui/constants.rs` (Phase 2 of the density plan adopts the rest) |
 | `TableEvent::RowClick`, `Column::{flex_grow, header_colspan}`, `TableDelegate::{visible_rows_rendered, has_context_menu}` | `file_panel.rs`, `file_table.rs`, `file_table/cells.rs` |
 | `ResizablePanelGroup::snap_to`, `ResizableState::is_resizing` | `panel_splitter.rs` |
 | `HoverCard::content_offset` | `file_table/cells.rs` |
