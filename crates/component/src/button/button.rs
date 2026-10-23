@@ -5,8 +5,8 @@ use crate::{
     Size, StyleSized, StyledExt,
     button::ButtonIcon,
     h_flex,
-    sizing::{platform_control_h_boost, platform_control_px_boost},
     select::Caret,
+    sizing::{platform_control_px_boost, scaled_px},
     styled::{FocusLine, focus_style},
     tooltip::{ManagedTooltipExt as _, Tooltip},
 };
@@ -668,47 +668,44 @@ impl RenderOnce for Button {
                 |this| this.shadow_xs(),
             )
             .when(!style.no_padding(), |this| {
-                // Per-platform size boosts — a fork addition: WinUI3 controls
-                // are ~32px tall where macOS native ones are ~22-24px, so each
-                // `Size` tier gets a Windows-only bump.
-                let hb = platform_control_h_boost();
+                // Per-platform size boosts and the control scale — fork
+                // additions: WinUI3 controls are ~32px tall where macOS native
+                // ones are ~22-24px, so each `Size` tier gets a Windows-only
+                // bump, and the app's control scale on top
+                // (`Size::button_height`).
+                let height = self.size.button_height();
                 let pb = platform_control_px_boost();
 
                 if self.label.is_none() && children.is_empty() {
                     // Icon Button
-                    match self.size {
-                        Size::Size(s) => this.size(s),
-                        Size::XSmall => this.size(px(20.) + hb),
-                        Size::Small => this.size(px(24.) + hb),
-                        Size::Large | Size::Medium => this.size(px(32.) + hb),
-                    }
+                    this.size(height)
                 } else {
                     // Normal Button
                     match self.size {
                         Size::Size(size) => this.px(size * 0.2),
                         Size::XSmall => this
-                            .h(px(20.) + hb)
-                            .px(px(4.) + pb)
-                            .when(self.compact, |this| this.min_w(px(20.) + hb)),
+                            .h(height)
+                            .px(scaled_px(px(4.) + pb))
+                            .when(self.compact, |this| this.min_w(height)),
                         // Upstream's paddings (px_2 / px_2p5 / px_3, compact
                         // px_1p5 / px_2) plus the Windows boost.
                         Size::Small => this
-                            .h(px(24.) + hb)
-                            .px(px(8.) + pb)
+                            .h(height)
+                            .px(scaled_px(px(8.) + pb))
                             .when(self.compact, |this| {
-                                this.min_w(px(24.) + hb).px(px(6.) + pb)
+                                this.min_w(height).px(scaled_px(px(6.) + pb))
                             }),
                         Size::Medium => this
-                            .h(px(32.) + hb)
-                            .px(px(10.) + pb)
+                            .h(height)
+                            .px(scaled_px(px(10.) + pb))
                             .when(self.compact, |this| {
-                                this.min_w(px(32.) + hb).px(px(8.) + pb)
+                                this.min_w(height).px(scaled_px(px(8.) + pb))
                             }),
                         Size::Large => this
-                            .h(px(32.) + hb)
-                            .px(px(12.) + pb)
+                            .h(height)
+                            .px(scaled_px(px(12.) + pb))
                             .when(self.compact, |this| {
-                                this.min_w(px(32.) + hb).px(px(8.) + pb)
+                                this.min_w(height).px(scaled_px(px(8.) + pb))
                             }),
                     }
                 }

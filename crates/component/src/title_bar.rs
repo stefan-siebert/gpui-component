@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::{ActiveTheme, Icon, IconName, Sizable as _, StyledExt, h_flex};
+use crate::{ActiveTheme, Icon, IconName, Sizable as _, StyledExt, h_flex, scaled_px};
 use gpui::{
     AnyElement, App, Background, ClickEvent, Context, Hsla, InteractiveElement,
     IntoElement, MAX_BUTTONS_PER_SIDE, MouseButton, ParentElement, Pixels, Point, Render,
@@ -11,7 +11,22 @@ use gpui::{
 use gpui_base::TestSupportExt as _;
 use smallvec::SmallVec;
 
+/// The title bar's height at control scale 1; [`title_bar_height`] is what a
+/// `TitleBar` renders at.
 pub const TITLE_BAR_HEIGHT: Pixels = px(34.);
+
+/// The height a `TitleBar` renders at: [`TITLE_BAR_HEIGHT`] at the control
+/// scale (fork addition, see `sizing.rs`). Ask this, not the constant, to line
+/// something up with the bar.
+pub fn title_bar_height() -> Pixels {
+    scaled_px(TITLE_BAR_HEIGHT)
+}
+
+/// Where the macOS traffic lights go in a title bar `height` tall: 9 px in from
+/// the left, and centred the way upstream's (9, 9) centres them in 34 px.
+fn traffic_light_position(height: Pixels) -> Point<Pixels> {
+    gpui::point(px(9.0), px(((height.as_f32() - 16.0) / 2.0).round()))
+}
 // macOS only: space reserved for the native traffic lights. Fullscreen hides
 // them, so callers must fall back to `TITLE_BAR_LEFT_PADDING_DEFAULT` when
 // `window.is_fullscreen()` is true — see `TitleBar::render` below.
@@ -67,7 +82,7 @@ impl TitleBar {
         TitlebarOptions {
             title: None,
             appears_transparent: true,
-            traffic_light_position: Some(gpui::point(px(9.0), px(9.0))),
+            traffic_light_position: Some(traffic_light_position(title_bar_height())),
         }
     }
 
@@ -253,7 +268,7 @@ impl RenderOnce for ControlIcon {
             .items_center()
             // Windows: tall rectangular buttons spanning the full title bar height
             .when(!is_linux, |this| {
-                this.w(TITLE_BAR_HEIGHT)
+                this.w(title_bar_height())
                     .h_full()
                     .text_color(cx.theme().foreground)
                     .hover(|style| style.bg(hover_bg).text_color(hover_fg))
@@ -403,6 +418,10 @@ struct TitleBarState {
     /// core in `dispatch_event`, WM_NULL still answered, screen frozen).
     #[cfg(target_os = "windows")]
     synthetic_nc_down_posted: bool,
+    /// The bar height the native traffic lights were last placed for — they
+    /// are moved only when the control scale changed it, not every frame.
+    #[cfg(target_os = "macos")]
+    traffic_lights_for: Pixels,
 }
 
 // TODO: Remove this when GPUI has released v0.2.3
@@ -471,7 +490,16 @@ impl RenderOnce for TitleBar {
             last_mousedown_pos: None,
             #[cfg(target_os = "windows")]
             synthetic_nc_down_posted: false,
+            #[cfg(target_os = "macos")]
+            traffic_lights_for: TITLE_BAR_HEIGHT,
         });
+
+        let height = title_bar_height();
+        #[cfg(target_os = "macos")]
+        if state.read(cx).traffic_lights_for != height {
+            window.set_traffic_light_position(traffic_light_position(height));
+            state.update(cx, |state, _| state.traffic_lights_for = height);
+        }
 
         // Main title bar container - all event handlers go here (like Zed's approach)
         h_flex()
@@ -480,7 +508,7 @@ impl RenderOnce for TitleBar {
             // Mark as drag zone for the platform
             .window_control_area(WindowControlArea::Drag)
             .w_full()
-            .h(TITLE_BAR_HEIGHT)
+            .h(height)
             // Left padding: skip if left window controls will provide spacing
             .when(!has_left_controls, |this| this.pl(left_padding))
             .border_b_1()

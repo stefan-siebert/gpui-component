@@ -16,7 +16,7 @@ use crate::{
     dialog::overlay_color,
     h_flex,
     scroll::ScrollableElement as _,
-    title_bar::TITLE_BAR_HEIGHT,
+    title_bar::title_bar_height,
     v_flex,
 };
 
@@ -25,14 +25,14 @@ pub(crate) fn init(_: &mut App) {}
 /// The settings for sheets.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SheetSettings {
-    /// The margin top for the sheet, default is [`TITLE_BAR_HEIGHT`].
+    /// The margin top for the sheet, default is [`crate::title_bar_height`].
     pub margin_top: Pixels,
 }
 
 impl Default for SheetSettings {
     fn default() -> Self {
         Self {
-            margin_top: TITLE_BAR_HEIGHT,
+            margin_top: title_bar_height(),
         }
     }
 }

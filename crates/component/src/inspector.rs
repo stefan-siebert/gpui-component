@@ -14,7 +14,7 @@ use lsp_types::{
 use ropey::Rope;
 
 use crate::{
-    ActiveTheme, IconName, Selectable, Sizable, TITLE_BAR_HEIGHT,
+    ActiveTheme, IconName, Selectable, Sizable,
     alert::Alert,
     button::{Button, ButtonVariants},
     clipboard::Clipboard,
@@ -22,7 +22,7 @@ use crate::{
     h_flex,
     input::{CompletionProvider, Editor, EditorState, InputEvent, RopeExt, TabSize},
     link::Link,
-    v_flex,
+    title_bar_height, v_flex,
 };
 
 actions!(inspector, [ToggleInspector]);
@@ -501,8 +501,8 @@ fn render_inspector(
                 .w_full()
                 .justify_between()
                 .gap_2()
-                .h(TITLE_BAR_HEIGHT)
-                .line_height(TITLE_BAR_HEIGHT)
+                .h(title_bar_height())
+                .line_height(title_bar_height())
                 .overflow_x_hidden()
                 .px_2()
                 .border_b_1()

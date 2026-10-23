@@ -20,11 +20,11 @@ use gpui_base::{
 };
 
 use crate::{
-    ActiveTheme as _, Edges, Icon, IconName, Sizable as _, StyledExt, TITLE_BAR_HEIGHT,
+    ActiveTheme as _, Edges, Icon, IconName, Sizable as _, StyledExt,
     animation::cubic_bezier,
     button::{Button, ButtonVariants as _},
     styled::toast_shadow,
-    v_flex,
+    title_bar_height, v_flex,
 };
 
 const NOTIFICATION_TRANSITION_DURATION: Duration = Duration::from_millis(400);
@@ -581,7 +581,7 @@ impl Default for NotificationSettings {
         Self {
             placement: Anchor::TopRight,
             margins: Edges {
-                top: TITLE_BAR_HEIGHT + offset, // avoid overlap with title bar
+                top: title_bar_height() + offset, // avoid overlap with title bar
                 right: offset,
                 bottom: offset,
                 left: offset,

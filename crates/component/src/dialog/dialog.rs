@@ -13,12 +13,12 @@ use gpui_base::{ElementExt as _, TextSelectionScopeId, motion::Transition};
 use rust_i18n::t;
 
 use crate::{
-    ActiveTheme as _, IconName, Sizable as _, StyledExt, TITLE_BAR_HEIGHT, WindowExt as _,
+    ActiveTheme as _, IconName, Sizable as _, StyledExt, WindowExt as _,
     animation::cubic_bezier,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::{DialogContent, DialogDispatchAnchor, DialogTitle},
     scroll::ScrollableElement as _,
-    v_flex,
+    title_bar_height, v_flex,
 };
 
 pub static ANIMATION_DURATION: LazyLock<Duration> = LazyLock::new(|| Duration::from_secs_f64(0.25));
@@ -721,7 +721,7 @@ impl RenderOnce for Dialog {
                             .focus_handle(self.focus_handle.clone())
                             .close_on_escape(self.props.keyboard && !closing)
                             .close_on_backdrop_press(self.props.overlay_closable && !closing)
-                            .dismiss_below_y(TITLE_BAR_HEIGHT)
+                            .dismiss_below_y(title_bar_height())
                             .when(self.props.overlay && !closing, |this| {
                                 this.backdrop(
                                     div()

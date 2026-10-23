@@ -19,7 +19,7 @@ use crate::menu::{DropdownMenu as _, PopupMenuItem};
 use crate::scroll::ScrollableMask;
 use crate::{
     ActiveTheme, ElementExt, Icon, InteractiveElementExt as _, Selectable, Sizable, Size,
-    StyledExt, h_flex, styled::raised_shadow,
+    StyledExt, h_flex, scaled_px, styled::raised_shadow,
 };
 
 struct TabIndicatorBounds {
@@ -378,9 +378,9 @@ impl Sizable for TabBar {
 impl RenderOnce for TabBar {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let default_gap = match self.size {
-            Size::Small | Size::XSmall => px(8.),
-            Size::Large => px(16.),
-            _ => px(12.),
+            Size::Small | Size::XSmall => scaled_px(px(8.)),
+            Size::Large => scaled_px(px(16.)),
+            _ => scaled_px(px(12.)),
         };
         let (bg, paddings, gap): (Background, _, _) = match self.variant {
             TabVariant::Tab => {
@@ -412,10 +412,10 @@ impl RenderOnce for TabBar {
             TabVariant::Underline => {
                 // This gap is same as the tab inner_paddings
                 let gap = match self.size {
-                    Size::XSmall => px(10.),
-                    Size::Small => px(12.),
-                    Size::Large => px(20.),
-                    _ => px(16.),
+                    Size::XSmall => scaled_px(px(10.)),
+                    Size::Small => scaled_px(px(12.)),
+                    Size::Large => scaled_px(px(20.)),
+                    _ => scaled_px(px(16.)),
                 };
 
                 (cx.theme().transparent.into(), Edges::all(px(0.)), gap)
@@ -470,9 +470,9 @@ impl RenderOnce for TabBar {
             scroll_handle: scroll_handle.clone(),
             view: window.current_view(),
             peek: match self.size {
-                Size::XSmall | Size::Small => px(24.),
-                Size::Large => px(40.),
-                _ => px(32.),
+                Size::XSmall | Size::Small => scaled_px(px(24.)),
+                Size::Large => scaled_px(px(40.)),
+                _ => scaled_px(px(32.)),
             },
             num_tabs,
         };

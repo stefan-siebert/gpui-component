@@ -1,4 +1,6 @@
-use gpui::{Edges, Pixels, Styled, px};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use gpui::{App, Edges, Pixels, Styled, px};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -39,6 +41,58 @@ pub(crate) fn platform_control_py_boost() -> Pixels {
     } else {
         px(0.0)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Control scale (fork addition)
+// ---------------------------------------------------------------------------
+//
+// One factor every size tier's geometry is multiplied by — the heights and
+// paddings of buttons, inputs, menu items, table rows, tabs and the title bar —
+// so an app can let its controls follow its own density and font-size
+// settings. Text needs no factor: it is sized in rems and follows the window's
+// rem size already, which is exactly why fixed-pixel boxes around it did not
+// fit once the font grew.
+//
+// Process-wide rather than a `Theme` field, because the size helpers run in
+// builder chains that have no `cx` (`StyleSized`, `Size::table_row_height`),
+// and an app has one control scale the way it has one theme. A
+// `Size::Size(px)` the caller chose stays as it is.
+
+static CONTROL_SCALE: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
+
+/// The control scale [`set_control_scale`] accepts; values outside are clamped.
+pub const CONTROL_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.5..=3.0;
+
+/// The factor every size tier's geometry is multiplied by, `1.0` by default.
+pub fn control_scale() -> f32 {
+    f32::from_bits(CONTROL_SCALE.load(Ordering::Relaxed))
+}
+
+/// Set the control scale, clamped to [`CONTROL_SCALE_RANGE`] (a value that is
+/// not finite means `1.0`), and refresh every window if it changed.
+pub fn set_control_scale(scale: f32, cx: &mut App) {
+    let scale = if scale.is_finite() {
+        scale.clamp(*CONTROL_SCALE_RANGE.start(), *CONTROL_SCALE_RANGE.end())
+    } else {
+        1.0
+    };
+    let previous = CONTROL_SCALE.swap(scale.to_bits(), Ordering::Relaxed);
+    if previous != scale.to_bits() {
+        cx.refresh_windows();
+    }
+}
+
+/// `value` at the control scale, rounded to whole pixels.
+///
+/// For geometry that has to line up with a control without being one — a
+/// bar's height, a slot beside a button.
+pub fn scaled_px(value: Pixels) -> Pixels {
+    scaled_by(value, control_scale())
+}
+
+fn scaled_by(value: Pixels, scale: f32) -> Pixels {
+    px((value.as_f32() * scale).round())
 }
 
 /// A size for elements.
@@ -92,15 +146,49 @@ impl Size {
         }
     }
 
-    /// Returns the height for table row.
+    /// Returns the height for table row, at the control scale.
     #[inline]
     pub fn table_row_height(&self) -> Pixels {
         match self {
             Size::Size(size) => *size,
-            Size::XSmall => px(26.),
-            Size::Small => px(30.),
-            Size::Large => px(40.),
-            _ => px(32.),
+            Size::XSmall => scaled_px(px(26.)),
+            Size::Small => scaled_px(px(30.)),
+            Size::Large => scaled_px(px(40.)),
+            _ => scaled_px(px(32.)),
+        }
+    }
+
+    /// The height of a `Button` of this size — the icon button's edge too —
+    /// at the control scale, Windows boost included.
+    pub fn button_height(&self) -> Pixels {
+        let boost = platform_control_h_boost();
+        match self {
+            Size::Size(size) => *size,
+            Size::XSmall => scaled_px(px(20.) + boost),
+            Size::Small => scaled_px(px(24.) + boost),
+            Size::Medium | Size::Large => scaled_px(px(32.) + boost),
+        }
+    }
+
+    /// The height of an `Input`, `Select` and the like of this size, at the
+    /// control scale, Windows boost included.
+    pub fn input_height(&self) -> Pixels {
+        let boost = platform_control_h_boost();
+        match self {
+            Size::Large => scaled_px(px(44.) + boost),
+            Size::Medium => scaled_px(px(32.) + boost),
+            Size::Small => scaled_px(px(24.) + boost),
+            Size::XSmall => scaled_px(px(20.) + boost),
+            Size::Size(_) => scaled_px(px(24.) + boost),
+        }
+    }
+
+    /// The height of a `PopupMenu` item of this size, at the control scale.
+    pub fn menu_item_height(&self) -> Pixels {
+        match self {
+            Size::XSmall | Size::Small => scaled_px(px(20.)),
+            Size::Size(size) => *size,
+            Size::Medium | Size::Large => scaled_px(px(26.)),
         }
     }
 
@@ -109,28 +197,28 @@ impl Size {
     pub fn table_cell_padding(&self) -> Edges<Pixels> {
         match self {
             Size::XSmall => Edges {
-                top: px(2.),
-                bottom: px(2.),
-                left: px(4.),
-                right: px(4.),
+                top: scaled_px(px(2.)),
+                bottom: scaled_px(px(2.)),
+                left: scaled_px(px(4.)),
+                right: scaled_px(px(4.)),
             },
             Size::Small => Edges {
-                top: px(3.),
-                bottom: px(3.),
-                left: px(6.),
-                right: px(6.),
+                top: scaled_px(px(3.)),
+                bottom: scaled_px(px(3.)),
+                left: scaled_px(px(6.)),
+                right: scaled_px(px(6.)),
             },
             Size::Large => Edges {
-                top: px(8.),
-                bottom: px(8.),
-                left: px(12.),
-                right: px(12.),
+                top: scaled_px(px(8.)),
+                bottom: scaled_px(px(8.)),
+                left: scaled_px(px(12.)),
+                right: scaled_px(px(12.)),
             },
             _ => Edges {
-                top: px(4.),
-                bottom: px(4.),
-                left: px(8.),
-                right: px(8.),
+                top: scaled_px(px(4.)),
+                bottom: scaled_px(px(4.)),
+                left: scaled_px(px(8.)),
+                right: scaled_px(px(8.)),
             },
         }
     }
@@ -186,25 +274,25 @@ impl Size {
     /// Returns the horizontal input padding.
     pub fn input_px(&self) -> Pixels {
         let boost = platform_control_px_boost();
-        match self {
+        scaled_px(match self {
             Self::Large => px(12.) + boost,
             Self::Medium => px(10.) + boost,
             Self::Small => px(8.) + boost,
             Self::XSmall => px(4.) + boost,
             _ => px(8.) + boost,
-        }
+        })
     }
 
     /// Returns the vertical input padding.
     pub fn input_py(&self) -> Pixels {
         let boost = platform_control_py_boost();
-        match self {
+        scaled_px(match self {
             Size::Large => px(10.) + boost,
             Size::Medium => px(8.) + boost,
             Size::Small => px(2.) + boost,
             Size::XSmall => px(0.) + boost,
             _ => px(2.) + boost,
-        }
+        })
     }
 
     /// Returns the horizontal padding of a row in an input's dropdown list.
@@ -321,14 +409,7 @@ impl<T: Styled> StyleSized<T> for T {
 
     #[inline]
     fn input_h(self, size: Size) -> Self {
-        let boost = platform_control_h_boost();
-        match size {
-            Size::Large => self.h(px(44.) + boost),
-            Size::Medium => self.h(px(32.) + boost),
-            Size::Small => self.h(px(24.) + boost),
-            Size::XSmall => self.h(px(20.) + boost),
-            _ => self.h(px(24.) + boost),
-        }
+        self.h(size.input_height())
     }
 
     #[inline]
@@ -389,6 +470,7 @@ impl<T: Styled> StyleSized<T> for T {
 mod tests {
     use gpui::px;
 
+    use super::scaled_by;
     use crate::Size;
 
     #[test]
@@ -433,6 +515,15 @@ mod tests {
         assert_eq!(Size::Medium.table_row_height(), px(32.));
         assert_eq!(Size::Large.table_row_height(), px(40.));
         assert_eq!(Size::Size(px(48.)).table_row_height(), px(48.));
+    }
+
+    #[test]
+    fn scaled_rounds_to_whole_pixels() {
+        assert_eq!(scaled_by(px(24.), 1.0), px(24.));
+        assert_eq!(scaled_by(px(24.), 0.85), px(20.));
+        assert_eq!(scaled_by(px(26.), 0.85), px(22.));
+        assert_eq!(scaled_by(px(32.), 1.15), px(37.));
+        assert_eq!(scaled_by(px(0.), 2.0), px(0.));
     }
 
     #[test]

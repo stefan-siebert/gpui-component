@@ -1,5 +1,7 @@
 pub use crate::component_traits::{Collapsible, Disableable, Selectable};
-pub use crate::sizing::{Sizable, Size, StyleSized};
+pub use crate::sizing::{
+    CONTROL_SCALE_RANGE, Sizable, Size, StyleSized, control_scale, scaled_px, set_control_scale,
+};
 use gpui::{
     App, BoxShadow, Corners, Edges, Hsla, InteractiveElement as _, ParentElement, Pixels,
     StyleRefinement, Styled, Window, div, hsla, prelude::FluentBuilder as _, px,

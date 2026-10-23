@@ -1,7 +1,7 @@
 use std::{rc::Rc, time::Duration};
 
 use crate::animation::{Lerp, ease_in_out_cubic};
-use crate::{ActiveTheme, Icon, IconName, Selectable, Sizable, Size, StyledExt, h_flex};
+use crate::{ActiveTheme, Icon, IconName, Selectable, Sizable, Size, StyledExt, h_flex, scaled_px};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Background, ClickEvent, Edges, ElementId,
@@ -29,10 +29,30 @@ pub(super) struct FolderTabMetrics {
 impl FolderTabMetrics {
     pub(super) fn new(size: Size, cx: &App) -> Self {
         let (top_padding, padding_x, separator_height, radius) = match size {
-            Size::XSmall => (px(2.), px(8.), px(12.), cx.theme().radius),
-            Size::Small => (px(4.), px(8.), px(12.), cx.theme().radius),
-            Size::Large => (px(8.), px(16.), px(16.), cx.theme().radius_lg),
-            _ => (px(4.), px(12.), px(16.), cx.theme().radius_lg),
+            Size::XSmall => (
+                scaled_px(px(2.)),
+                scaled_px(px(8.)),
+                scaled_px(px(12.)),
+                cx.theme().radius,
+            ),
+            Size::Small => (
+                scaled_px(px(4.)),
+                scaled_px(px(8.)),
+                scaled_px(px(12.)),
+                cx.theme().radius,
+            ),
+            Size::Large => (
+                scaled_px(px(8.)),
+                scaled_px(px(16.)),
+                scaled_px(px(16.)),
+                cx.theme().radius_lg,
+            ),
+            _ => (
+                scaled_px(px(4.)),
+                scaled_px(px(12.)),
+                scaled_px(px(16.)),
+                cx.theme().radius_lg,
+            ),
         };
         Self {
             top_padding,
@@ -64,20 +84,20 @@ impl TabVariant {
     fn height(&self, size: Size) -> Pixels {
         match size {
             Size::XSmall => match self {
-                TabVariant::Underline => px(26.),
-                _ => px(20.),
+                TabVariant::Underline => scaled_px(px(26.)),
+                _ => scaled_px(px(20.)),
             },
             Size::Small => match self {
-                TabVariant::Underline => px(30.),
-                _ => px(24.),
+                TabVariant::Underline => scaled_px(px(30.)),
+                _ => scaled_px(px(24.)),
             },
             Size::Large => match self {
-                TabVariant::Underline => px(44.),
-                _ => px(36.),
+                TabVariant::Underline => scaled_px(px(44.)),
+                _ => scaled_px(px(36.)),
             },
             _ => match self {
-                TabVariant::Underline => px(36.),
-                _ => px(32.),
+                TabVariant::Underline => scaled_px(px(36.)),
+                _ => scaled_px(px(32.)),
             },
         }
     }
@@ -85,25 +105,25 @@ impl TabVariant {
     pub(super) fn inner_height(&self, size: Size) -> Pixels {
         match size {
             Size::XSmall => match self {
-                TabVariant::Tab | TabVariant::Outline | TabVariant::Pill => px(18.),
-                TabVariant::Segmented | TabVariant::Folder => px(16.),
-                TabVariant::Underline => px(20.),
+                TabVariant::Tab | TabVariant::Outline | TabVariant::Pill => scaled_px(px(18.)),
+                TabVariant::Segmented | TabVariant::Folder => scaled_px(px(16.)),
+                TabVariant::Underline => scaled_px(px(20.)),
             },
             Size::Small => match self {
-                TabVariant::Tab | TabVariant::Outline | TabVariant::Pill => px(22.),
-                TabVariant::Segmented | TabVariant::Folder => px(18.),
-                TabVariant::Underline => px(22.),
+                TabVariant::Tab | TabVariant::Outline | TabVariant::Pill => scaled_px(px(22.)),
+                TabVariant::Segmented | TabVariant::Folder => scaled_px(px(18.)),
+                TabVariant::Underline => scaled_px(px(22.)),
             },
             Size::Large => match self {
-                TabVariant::Tab | TabVariant::Outline | TabVariant::Pill => px(36.),
-                TabVariant::Segmented | TabVariant::Folder => px(28.),
-                TabVariant::Underline => px(32.),
+                TabVariant::Tab | TabVariant::Outline | TabVariant::Pill => scaled_px(px(36.)),
+                TabVariant::Segmented | TabVariant::Folder => scaled_px(px(28.)),
+                TabVariant::Underline => scaled_px(px(32.)),
             },
             _ => match self {
-                TabVariant::Tab => px(30.),
-                TabVariant::Outline | TabVariant::Pill => px(26.),
-                TabVariant::Segmented | TabVariant::Folder => px(24.),
-                TabVariant::Underline => px(26.),
+                TabVariant::Tab => scaled_px(px(30.)),
+                TabVariant::Outline | TabVariant::Pill => scaled_px(px(26.)),
+                TabVariant::Segmented | TabVariant::Folder => scaled_px(px(24.)),
+                TabVariant::Underline => scaled_px(px(26.)),
             },
         }
     }
@@ -111,10 +131,10 @@ impl TabVariant {
     /// Default px(12) to match a dock tab bar's px_3
     fn inner_paddings(&self, size: Size) -> Edges<Pixels> {
         let mut padding_x = match size {
-            Size::XSmall => px(8.),
-            Size::Small => px(10.),
-            Size::Large => px(16.),
-            _ => px(12.),
+            Size::XSmall => scaled_px(px(8.)),
+            Size::Small => scaled_px(px(10.)),
+            Size::Large => scaled_px(px(16.)),
+            _ => scaled_px(px(12.)),
         };
 
         // A folder tab pads its content itself, see `FolderTabMetrics`.

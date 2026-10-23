@@ -4,7 +4,7 @@ use gpui::{
     prelude::FluentBuilder as _, relative,
 };
 
-use crate::{ActiveTheme, StyledExt};
+use crate::{ActiveTheme, Sizable, Size, StyledExt};
 
 /// A tag for displaying keyboard keybindings.
 #[derive(IntoElement, Clone, Debug)]
@@ -14,6 +14,7 @@ pub struct Kbd {
     appearance: bool,
     outline: bool,
     arrow_glyphs: bool,
+    size: Size,
 }
 
 impl From<Keystroke> for Kbd {
@@ -24,6 +25,7 @@ impl From<Keystroke> for Kbd {
             appearance: true,
             outline: false,
             arrow_glyphs: false,
+            size: Size::default(),
         }
     }
 }
@@ -37,6 +39,7 @@ impl Kbd {
             appearance: true,
             outline: false,
             arrow_glyphs: false,
+            size: Size::default(),
         }
     }
 
@@ -269,18 +272,29 @@ impl RenderOnce for Kbd {
                     .border_color(cx.theme().border)
                     .bg(cx.theme().tokens.background)
             })
-            .py_0p5()
-            .px_1()
-            .min_w_5()
+            // Fork addition: a size, so a tag fits the bar it sits in. Medium
+            // (and Small) is upstream's one look; every tier is in rems, so
+            // the tag follows the font size like the text beside it.
+            .map(|this| match self.size {
+                Size::XSmall => this.py_0().px_0p5().min_w_4().text_xs(),
+                Size::Large => this.py_0p5().px_1p5().min_w_6().text_sm(),
+                _ => this.py_0p5().px_1().min_w_5().text_xs(),
+            })
             .text_center()
             .rounded(cx.theme().radius.half())
             .line_height(relative(1.))
-            .text_xs()
             .whitespace_normal()
             .flex_shrink_0()
             .refine_style(&self.style)
             .child(Self::format_keystroke(&self.stroke, self.arrow_glyphs))
             .into_any_element()
+    }
+}
+
+impl Sizable for Kbd {
+    fn with_size(mut self, size: impl Into<Size>) -> Self {
+        self.size = size.into();
+        self
     }
 }
 

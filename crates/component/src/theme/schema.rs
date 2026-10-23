@@ -1095,10 +1095,14 @@ impl Theme {
             .mono_font_family
             .clone()
             .unwrap_or(defaults.mono_font_family);
-        self.mono_font_size = config
-            .mono_font_size
-            .map(px)
-            .unwrap_or(defaults.mono_font_size);
+        // Fork addition: a theme that sets no mono size gets one relative to
+        // its font size, in the defaults' proportion (13 to 16), so the mono
+        // text follows a font-size change instead of staying at 13 px.
+        self.mono_font_size = config.mono_font_size.map(px).unwrap_or_else(|| {
+            px((self.font_size.as_f32() * defaults.mono_font_size.as_f32()
+                / defaults.font_size.as_f32())
+            .round())
+        });
         self.radius = config
             .radius
             .map(|r| px(r as f32))
@@ -1178,6 +1182,25 @@ mod tests {
         assert_eq!(theme.button_primary, component_color);
         assert_eq!(resolved.spacing.md, px(14.));
         assert_eq!(resolved.typography.md.size, px(15.));
+    }
+
+    #[test]
+    fn mono_font_size_follows_the_font_size_unless_set() {
+        let apply = |value: serde_json::Value| {
+            let config = serde_json::from_value::<ThemeConfig>(value).unwrap();
+            let mut theme = Theme::default();
+            theme.apply_config(&std::rc::Rc::new(config));
+            theme.mono_font_size
+        };
+        assert_eq!(apply(serde_json::json!({ "name": "Default" })), px(13.));
+        assert_eq!(
+            apply(serde_json::json!({ "name": "Large", "font.size": 24.0 })),
+            px(20.)
+        );
+        assert_eq!(
+            apply(serde_json::json!({ "name": "Set", "font.size": 24.0, "mono_font.size": 15.0 })),
+            px(15.)
+        );
     }
 
     #[test]

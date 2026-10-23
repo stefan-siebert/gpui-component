@@ -1,6 +1,6 @@
 use crate::{
     ActiveTheme, Disableable, FocusableExt, Side, Sizable, Size, StyleSized as _, StyledExt,
-    ThemeStyled as _, text::Text, tooltip::ComponentTooltip,
+    ThemeStyled as _, scaled_px, text::Text, tooltip::ComponentTooltip,
 };
 use gpui::{
     App, Background, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement as _,
@@ -191,17 +191,16 @@ impl RenderOnce for Switch {
         let toggle_bg: Background = cx.theme().tokens.switch_thumb.into();
         let disabled_label_color = cx.theme().muted_foreground;
 
+        // At the control scale (fork addition); the thumb is derived from the
+        // track rather than scaled on its own, so rounding cannot make it
+        // miss the track's inset by a pixel.
         let (bg_width, bg_height) = match self.size {
-            Size::XSmall | Size::Small => (px(28.), px(16.)),
-            Size::Large => (px(44.), px(24.)),
-            _ => (px(36.), px(20.)),
-        };
-        let bar_width = match self.size {
-            Size::XSmall | Size::Small => px(12.),
-            Size::Large => px(20.),
-            _ => px(16.),
+            Size::XSmall | Size::Small => (scaled_px(px(28.)), scaled_px(px(16.))),
+            Size::Large => (scaled_px(px(44.)), scaled_px(px(24.))),
+            _ => (scaled_px(px(36.)), scaled_px(px(20.))),
         };
         let inset = px(2.);
+        let bar_width = bg_height - inset * 2.;
         let radius = if cx.theme().radius >= px(4.) {
             bg_height
         } else {

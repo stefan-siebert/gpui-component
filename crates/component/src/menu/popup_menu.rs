@@ -3,7 +3,7 @@ use crate::actions::{Cancel, Confirm, SelectDown, SelectUp};
 use crate::actions::{SelectLeft, SelectRight};
 use crate::menu::menu_item::MenuItemElement;
 use crate::scroll::ScrollableElement;
-use crate::{ActiveTheme, ElementExt, Icon, IconName, Sizable as _, h_flex, v_flex};
+use crate::{ActiveTheme, ElementExt, Icon, IconName, Sizable, h_flex, v_flex};
 use crate::{Side, Size, kbd::Kbd};
 use gpui::{
     Action, Anchor, AnyElement, App, AppContext, Bounds, Context, DismissEvent, Edges, Entity,
@@ -1256,6 +1256,19 @@ impl PopupMenu {
         };
     }
 
+    /// The size this menu renders at: a submenu takes its root menu's, so one
+    /// menu is one size whatever order its builder set things in.
+    fn effective_size(&self, cx: &App) -> Size {
+        match self
+            .parent_menu
+            .as_ref()
+            .and_then(|parent| parent.upgrade())
+        {
+            Some(parent) => parent.read(cx).effective_size(cx),
+            None => self.size,
+        }
+    }
+
     fn render_item(
         &self,
         ix: usize,
@@ -1278,9 +1291,11 @@ impl PopupMenu {
 
         let is_submenu = matches!(item, PopupMenuItem::Submenu { .. });
 
-        let (item_height, radius) = match self.size {
-            Size::Small => (px(20.), options.radius.half()),
-            _ => (px(26.), options.radius),
+        let size = self.effective_size(cx);
+        let item_height = size.menu_item_height();
+        let radius = match size {
+            Size::XSmall | Size::Small => options.radius.half(),
+            _ => options.radius,
         };
 
         let this = MenuItemElement::new(ix)
@@ -1478,6 +1493,14 @@ impl PopupMenu {
 }
 
 impl FluentBuilder for PopupMenu {}
+// Fork addition: upstream keeps `size` private with no setter, so every menu
+// was Medium (26 px items) whatever the controls around it were.
+impl Sizable for PopupMenu {
+    fn with_size(mut self, size: impl Into<Size>) -> Self {
+        self.size = size.into();
+        self
+    }
+}
 impl EventEmitter<DismissEvent> for PopupMenu {}
 impl Focusable for PopupMenu {
     fn focus_handle(&self, _: &App) -> FocusHandle {
