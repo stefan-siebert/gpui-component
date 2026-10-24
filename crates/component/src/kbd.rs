@@ -121,9 +121,9 @@ impl Kbd {
     }
 
     fn format_keystroke(key: &Keystroke, arrow_glyphs: bool) -> String {
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         const SEPARATOR: &str = "";
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(target_vendor = "apple"))]
         const SEPARATOR: &str = "+";
 
         let mut parts = vec![];
@@ -132,34 +132,34 @@ impl Kbd {
         // And in Windows is: Ctrl+Alt+Shift+Win
 
         if key.modifiers.control {
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             parts.push("⌃");
 
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             parts.push("Ctrl");
         }
 
         if key.modifiers.alt {
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             parts.push("⌥");
 
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             parts.push("Alt");
         }
 
         if key.modifiers.shift {
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             parts.push("⇧");
 
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             parts.push("Shift");
         }
 
         if key.modifiers.platform {
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             parts.push("⌘");
 
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             parts.push("Win");
         }
 
@@ -174,57 +174,57 @@ impl Kbd {
         };
         match key_str {
             _ if arrow_glyphs && arrow.is_some() => keys.extend(arrow),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             "ctrl" => keys.push('⌃'),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             "ctrl" => keys.push_str("Ctrl"),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             "alt" => keys.push('⌥'),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             "alt" => keys.push_str("Alt"),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             "shift" => keys.push('⇧'),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             "shift" => keys.push_str("Shift"),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             "cmd" => keys.push('⌘'),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             "cmd" => keys.push_str("Win"),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             "space" => keys.push_str("Space"),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             "backspace" => keys.push('⌫'),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             "backspace" => keys.push_str("Backspace"),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             "delete" => keys.push('⌫'),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             "delete" => keys.push_str("Delete"),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             "escape" => keys.push('⎋'),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             "escape" => keys.push_str("Esc"),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             "enter" => keys.push('⏎'),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             "enter" => keys.push_str("Enter"),
             "pagedown" => keys.push_str("Page Down"),
             "pageup" => keys.push_str("Page Up"),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             "left" => keys.push('←'),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             "left" => keys.push_str("Left"),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             "right" => keys.push('→'),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             "right" => keys.push_str("Right"),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             "up" => keys.push('↑'),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             "up" => keys.push_str("Up"),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             "down" => keys.push('↓'),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             "down" => keys.push_str("Down"),
             _ => {
                 if key_str.len() == 1 {
