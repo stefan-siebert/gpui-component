@@ -320,6 +320,7 @@ Elane: `src/ui/components/breadcrumb.rs` (`CollapsibleBreadcrumb`). Tests: 14 (`
 | `2114aac5` | Button focus: inset solid `theme.ring` border instead of an outset alpha glow (`button.rs` today carries no visible remainder of this in the net diff — upstream's `eb6c13ad` reworked the focus line). |
 | `5a9f2632` | Tests adapted (`dock/tab_panel.rs` close button `20px + boost`; settings click tests ignored on Windows). |
 | `00cf4d81` | **Control scale** (2026-10-24): `set_control_scale` / `control_scale` / `scaled_px`, one process-wide factor (an `AtomicU32` — the size helpers run in builder chains without `cx`). Button, `input_h`/`input_px`/`input_py`, `table_row_height` + cell padding, PopupMenu item height, Tab/TabBar heights and paddings, Switch track (thumb derived), `title_bar_height()` (+ traffic-light position) multiply by it. `Size::{button_height, input_height, menu_item_height}` public. Rem geometry (Checkbox, Radio, icons) untouched. Same commit: `PopupMenu` and `Kbd` `Sizable`, mono font size derived from the font size (13:16) when a theme sets none. Elane plan: `docs/superpowers/plans/2026-10-23-ui-density-and-sizing.md`. |
+| `babe321d` | `PopupMenu` follows the scale and the font (2026-10-24): item padding `scaled_px(8)`, default max height `scaled_px(450)`, default max width 31.25 rem (was 500 px) — it bounds labels. |
 
 **Note:** in `Button` the fork also changes horizontal padding on **all** platforms relative to upstream
 (Small `px_2`=8 → 12 px, Medium `px_2p5`=10 → 16 px, Large `px_3`=12 → 16 px, compact paddings likewise). That
