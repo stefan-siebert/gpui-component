@@ -1233,15 +1233,17 @@ impl PopupMenu {
         Some(icon.xsmall().into_any_element())
     }
 
+    /// The widest the menu gets: what `max_w` set, else 31.25 rem (500 px at
+    /// a 16 px font) — a bound for its labels, so it follows the font.
     #[inline]
-    fn max_width(&self) -> Pixels {
-        self.max_width.unwrap_or(px(500.))
+    fn max_width(&self, window: &Window) -> Pixels {
+        self.max_width.unwrap_or(window.rem_size() * 31.25)
     }
 
     /// Calculate the anchor corner and left offset for child submenu
     fn update_submenu_menu_anchor(&mut self, window: &Window) {
         let bounds = self.bounds;
-        let max_width = self.max_width();
+        let max_width = self.max_width(window);
         let (anchor, left) = if max_width + bounds.origin.x > window.bounds().size.width {
             (Anchor::TopRight, -px(16.))
         } else {
@@ -1287,7 +1289,9 @@ impl PopupMenu {
 
         let selected = self.selected_index == Some(ix);
         const EDGE_PADDING: Pixels = px(4.);
-        const INNER_PADDING: Pixels = px(8.);
+        // The item's own padding grows with the control scale, as its height
+        // does (`Size::menu_item_height`).
+        let inner_padding = crate::scaled_px(px(8.));
 
         let is_submenu = matches!(item, PopupMenuItem::Submenu { .. });
 
@@ -1302,7 +1306,7 @@ impl PopupMenu {
             .relative()
             .text_sm()
             .py_0()
-            .px(INNER_PADDING)
+            .px(inner_padding)
             .rounded(radius)
             .items_center()
             .selected(selected)
@@ -1542,7 +1546,7 @@ impl Render for PopupMenu {
 
         let max_height = self.max_height.unwrap_or_else(|| {
             let window_half_height = window.window_bounds().get_bounds().size.height * 0.5;
-            window_half_height.min(px(450.))
+            window_half_height.min(crate::scaled_px(px(450.)))
         });
 
         let has_left_icon = self
@@ -1550,7 +1554,7 @@ impl Render for PopupMenu {
             .iter()
             .any(|item| item.has_left_icon(self.check_side));
 
-        let max_width = self.max_width();
+        let max_width = self.max_width(window);
         let options = RenderOptions {
             has_left_icon,
             check_side: self.check_side,
