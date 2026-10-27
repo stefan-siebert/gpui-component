@@ -1,14 +1,16 @@
 use std::{cell::Cell, rc::Rc, time::Duration};
 
 use gpui::{
-    AnyElement, App, Axis, Corners, Edges, ElementId, InteractiveElement, IntoElement,
+    AnyElement, App, Axis, Corners, Edges, ElementId, InteractiveElement, IntoElement, MouseButton,
     ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled,
-    Window, prelude::FluentBuilder as _, relative,
+    Window, prelude::FluentBuilder as _, px, relative,
 };
 use gpui_base::{Toggle as BaseToggle, ToggleGroup as BaseToggleGroup};
 use smallvec::{SmallVec, smallvec};
 
-use crate::{ActiveTheme, Disableable, Icon, Sizable, Size, StyledExt, tooltip::ComponentTooltip};
+use crate::{
+    ActiveTheme, Disableable, Icon, Sizable, Size, StyledExt, scaled_px, tooltip::ComponentTooltip,
+};
 
 #[derive(Default, Copy, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ToggleVariant {
@@ -38,6 +40,7 @@ pub struct Toggle {
     size: Size,
     variant: ToggleVariant,
     disabled: bool,
+    tab_stop: bool,
     border_corners: Corners<bool>,
     border_edges: Edges<bool>,
     children: SmallVec<[AnyElement; 1]>,
@@ -55,6 +58,7 @@ impl Toggle {
             size: Size::default(),
             variant: ToggleVariant::default(),
             disabled: false,
+            tab_stop: true,
             border_corners: Corners {
                 top_left: true,
                 top_right: true,
@@ -99,6 +103,17 @@ impl Toggle {
     /// Set the checked state of the toggle, default: false
     pub fn checked(mut self, checked: bool) -> Self {
         self.checked = checked;
+        self
+    }
+
+    /// Whether the toggle is a tab stop of its own. Default is true.
+    ///
+    /// With `false` it is not reached by Tab and a click does not focus it,
+    /// as with [`Button::tab_stop`](crate::button::Button::tab_stop) — for a
+    /// toggle inside a bar or dialog that keeps the focus itself (fork
+    /// addition).
+    pub fn tab_stop(mut self, tab_stop: bool) -> Self {
+        self.tab_stop = tab_stop;
         self
     }
 
@@ -160,13 +175,24 @@ impl RenderOnce for Toggle {
         let disabled = self.disabled;
         let hoverable = !disabled && !checked;
         let rounding = cx.theme().radius;
-        let pressed_background = cx.theme().tokens.accent;
-        let pressed_foreground = cx.theme().accent_foreground;
+        // Fork change: pressed is the primary fill. Upstream's accent is the
+        // hover colour, and in darker themes (Catppuccin Macchiato, measured
+        // 2026-10-27) it is so close to the background that on and off could
+        // not be told apart — for a mode toggle that is the one thing it has
+        // to show.
+        let pressed_background = cx.theme().primary;
+        let pressed_foreground = cx.theme().primary_foreground;
         let instance_style = self.style.clone();
+        let tab_stop = self.tab_stop;
 
         BaseToggle::new(self.id)
             .pressed(checked)
             .disabled(disabled)
+            .tab_stop(tab_stop)
+            .when(!tab_stop && !disabled, |this| {
+                // Avoid focus on mouse down, as Button does.
+                this.on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            })
             .when_some(
                 self.tooltip.text.as_ref().map(|(text, _)| text.clone()),
                 |this, label| this.accessibility_label(label),
@@ -179,11 +205,19 @@ impl RenderOnce for Toggle {
             .line_height(relative(1.25))
             .items_center()
             .justify_center()
-            .map(|this| match self.size {
-                Size::XSmall => this.min_w_5().h_5().px_0p5().text_xs(),
-                Size::Small => this.min_w_6().h_6().px_1().text_sm(),
-                Size::Large => this.min_w_9().h_9().px_3().text_base(),
-                _ => this.min_w_8().h_8().px_2().text_sm(),
+            // A tier is as tall as a Button of the same tier — the control
+            // scale and the Windows boost included — so toggles and buttons
+            // side by side line up (fork change; upstream sizes them in rems,
+            // and Large at 36 px). Paddings are upstream's, scaled.
+            .map(|this| {
+                let height = self.size.button_height();
+                let this = this.min_w(height).h(height);
+                match self.size {
+                    Size::XSmall => this.px(scaled_px(px(2.))).text_xs(),
+                    Size::Small => this.px(scaled_px(px(4.))).text_sm(),
+                    Size::Large => this.px(scaled_px(px(12.))).text_base(),
+                    _ => this.px(scaled_px(px(8.))).text_sm(),
+                }
             })
             .when(self.border_corners.top_left, |this| {
                 this.rounded_tl(rounding)
@@ -233,6 +267,7 @@ pub struct ToggleGroup {
     size: Size,
     variant: ToggleVariant,
     disabled: bool,
+    tab_stop: bool,
     segmented: bool,
     items: Vec<Toggle>,
     on_click: Option<Rc<dyn Fn(&Vec<bool>, &mut Window, &mut App) + 'static>>,
@@ -247,6 +282,7 @@ impl ToggleGroup {
             size: Size::default(),
             variant: ToggleVariant::default(),
             disabled: false,
+            tab_stop: true,
             segmented: false,
             items: Vec::new(),
             on_click: None,
@@ -273,6 +309,13 @@ impl ToggleGroup {
         on_click: impl Fn(&Vec<bool>, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_click = Some(Rc::new(on_click));
+        self
+    }
+
+    /// Whether the group's toggles are tab stops; see [`Toggle::tab_stop`]
+    /// (fork addition).
+    pub fn tab_stop(mut self, tab_stop: bool) -> Self {
+        self.tab_stop = tab_stop;
         self
     }
 
@@ -316,6 +359,7 @@ impl Styled for ToggleGroup {
 impl RenderOnce for ToggleGroup {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let disabled = self.disabled;
+        let tab_stop = self.tab_stop;
         let items_len = self.items.len();
         let checks = self
             .items
@@ -380,7 +424,9 @@ impl RenderOnce for ToggleGroup {
 
                                 let effective_disabled = disabled || item.disabled;
                                 let clicked_index = clicked_index.clone();
+                                let item_tab_stop = tab_stop && item.tab_stop;
                                 item.disabled(effective_disabled)
+                                    .tab_stop(item_tab_stop)
                                     .with_size(self.size)
                                     .with_variant(self.variant)
                                     .on_click(move |_, _, cx| {
@@ -500,6 +546,40 @@ mod tests {
         cx.simulate_click(point(px(10.), px(10.)), Modifiers::default());
         assert!(changes.borrow().is_empty());
         assert_eq!(parent_clicks.get(), 0);
+    }
+
+    struct UnfocusableToggleHarness {
+        changes: Rc<RefCell<Vec<bool>>>,
+    }
+
+    impl Render for UnfocusableToggleHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let changes = self.changes.clone();
+            h_flex().size(px(100.)).child(
+                Toggle::new("toggle")
+                    .label("Bold")
+                    .tab_stop(false)
+                    .size_full()
+                    .on_click(move |next, _, _| changes.borrow_mut().push(*next)),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn a_toggle_without_tab_stop_works_but_takes_no_focus(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view({
+            let changes = changes.clone();
+            move |_, _| UnfocusableToggleHarness { changes }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        cx.simulate_click(point(px(10.), px(10.)), Modifiers::default());
+        assert_eq!(changes.borrow().as_slice(), &[true]);
+        cx.update(|window, cx| assert!(window.focused(cx).is_none(), "a click focused it"));
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.update(|window, cx| assert!(window.focused(cx).is_none(), "Tab reached it"));
     }
 
     struct ToggleGroupHarness {
