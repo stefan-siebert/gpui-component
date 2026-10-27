@@ -132,6 +132,12 @@ impl RenderOnce for Separator {
         self.base
             .flex()
             .flex_shrink_0()
+            // The line is absolute, so without a minimum the separator takes
+            // no space: it straddles its neighbours' edge on half a pixel.
+            .map(|this| match axis {
+                Axis::Vertical => this.min_w(px(1.)),
+                Axis::Horizontal => this.min_h(px(1.)),
+            })
             .items_center()
             .justify_center()
             .refine_style(&self.style)
@@ -151,5 +157,60 @@ impl RenderOnce for Separator {
                         .child(label),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{h_flex, v_flex};
+    use gpui::{Context, InteractiveElement as _, Render, TestAppContext, VisualTestContext};
+
+    struct Harness {
+        axis: Axis,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let block =
+                |name: &'static str| div().debug_selector(move || name.into()).size(px(10.));
+            match self.axis {
+                Axis::Horizontal => v_flex()
+                    .w(px(100.))
+                    .child(block("before"))
+                    .child(Separator::horizontal())
+                    .child(block("after"))
+                    .into_any_element(),
+                Axis::Vertical => h_flex()
+                    .h(px(100.))
+                    .child(block("before"))
+                    .child(Separator::vertical())
+                    .child(block("after"))
+                    .into_any_element(),
+            }
+        }
+    }
+
+    fn harness(cx: &mut TestAppContext, axis: Axis) -> &mut VisualTestContext {
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(move |_, _| Harness { axis });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx
+    }
+
+    #[gpui::test]
+    fn a_horizontal_separator_takes_the_pixel_it_draws(cx: &mut TestAppContext) {
+        let cx = harness(cx, Axis::Horizontal);
+        let before = cx.debug_bounds("before").unwrap();
+        let after = cx.debug_bounds("after").unwrap();
+        assert_eq!(after.top() - before.bottom(), px(1.));
+    }
+
+    #[gpui::test]
+    fn a_vertical_separator_takes_the_pixel_it_draws(cx: &mut TestAppContext) {
+        let cx = harness(cx, Axis::Vertical);
+        let before = cx.debug_bounds("before").unwrap();
+        let after = cx.debug_bounds("after").unwrap();
+        assert_eq!(after.left() - before.right(), px(1.));
     }
 }
