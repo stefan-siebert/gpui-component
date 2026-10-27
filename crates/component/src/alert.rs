@@ -8,6 +8,7 @@ use gpui::{
 
 use crate::{
     ActiveTheme as _, Colorize, Icon, IconName, Sizable, Size, StyledExt, h_flex,
+    sizing::scaled_px,
     text::{Text, TextViewStyle},
 };
 
@@ -176,12 +177,15 @@ impl RenderOnce for Alert {
             return Empty.into_any_element();
         }
 
+        // Box geometry follows the control scale, like Button's (fork).
         let (radius, padding_x, padding_y, gap) = match self.size {
             Size::XSmall => (cx.theme().radius, px(12.), px(6.), px(6.)),
             Size::Small => (cx.theme().radius, px(12.), px(8.), px(6.)),
             Size::Large => (cx.theme().radius_lg, px(20.), px(14.), px(12.)),
             _ => (cx.theme().radius, px(16.), px(10.), px(12.)),
         };
+        let (padding_x, padding_y, gap) =
+            (scaled_px(padding_x), scaled_px(padding_y), scaled_px(gap));
 
         let bg = self.variant.bg(cx);
         let fg = self.variant.fg(cx);
@@ -211,7 +215,9 @@ impl RenderOnce for Alert {
                     .gap(gap)
                     .child(
                         div()
-                            .when(!self.banner, |this| this.mt(px(5.)))
+                            // In rems: it lines the icon up with the first
+                            // line of text, and both grow with the font (fork).
+                            .when(!self.banner, |this| this.mt(rems(0.3125)))
                             .child(self.icon),
                     )
                     .child(
