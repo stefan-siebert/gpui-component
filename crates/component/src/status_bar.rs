@@ -22,6 +22,10 @@ use crate::{ActiveTheme, StyledExt, h_flex};
 /// `left` and `right`, end-aligned with only `left`, and start-aligned
 /// otherwise (only `right`, or neither — like a plain container).
 ///
+/// When the bar is too narrow, the `right` region keeps its width and the
+/// others give way: a long message on the left is cut, the indicators at the
+/// right end stay whole.
+///
 /// ```
 /// # mod gpui_kit { pub extern crate gpui_component as component; }
 /// use gpui_kit::component::status_bar::StatusBar;
@@ -102,6 +106,55 @@ impl RenderOnce for StatusBar {
                     .when(has_left && !has_right, |this| this.justify_end())
                     .children(self.children),
             )
-            .when(has_right, |this| this.child(region().children(self.right)))
+            .when(has_right, |this| {
+                this.child(region().flex_shrink_0().children(self.right))
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::{
+        AvailableSpace, Bounds, IntoElement as _, ParentElement as _, Pixels, Styled as _,
+        TestAppContext, div, point, px, size,
+    };
+
+    use super::StatusBar;
+
+    #[gpui::test]
+    fn a_long_left_side_gives_way_to_the_right_side(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let cx = cx.add_empty_window();
+        let right_item: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
+        let record = right_item.clone();
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(
+                AvailableSpace::Definite(px(200.)),
+                AvailableSpace::MinContent,
+            ),
+            move |_, _| {
+                StatusBar::new()
+                    .w(px(200.))
+                    .left(div().w(px(400.)).h(px(10.)))
+                    .right(
+                        div()
+                            .on_children_prepainted(move |bounds, _, _| {
+                                record.set(bounds.first().copied())
+                            })
+                            .child(div().w(px(80.)).h(px(10.))),
+                    )
+                    .into_any_element()
+            },
+        );
+        let right_item = right_item.get().unwrap();
+        assert_eq!(right_item.size.width, px(80.));
+        assert!(
+            right_item.right() <= px(200.),
+            "the right item ends at {:?}, past the bar's edge",
+            right_item.right()
+        );
     }
 }
