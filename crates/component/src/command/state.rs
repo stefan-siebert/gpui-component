@@ -6,7 +6,7 @@ use gpui::{
     Focusable, FontFallbacks, FontFeatures, FontStyle, FontWeight, InteractiveElement, IntoElement,
     KeyBinding, Keystroke, ListSizingBehavior, ParentElement, Pixels, Render, Role, ScrollStrategy,
     SharedString, Size, StatefulInteractiveElement as _, StyleRefinement, Styled, Subscription,
-    TextOverflow, WhiteSpace, Window, div, prelude::FluentBuilder as _, px, size,
+    TextOverflow, WhiteSpace, Window, div, prelude::FluentBuilder as _, px, rems, size,
 };
 use rust_i18n::t;
 
@@ -39,6 +39,7 @@ pub(crate) struct CommandModel {
     pub(crate) entries: Vec<CommandEntry>,
     pub(crate) searchable: bool,
     pub(crate) filterable: bool,
+    pub(crate) dispatch_actions: bool,
     pub(crate) on_query: Option<Rc<OnQuery>>,
     pub(crate) on_select: Option<Rc<OnIndex>>,
     pub(crate) on_confirm: Option<Rc<OnIndex>>,
@@ -51,6 +52,7 @@ impl Default for CommandModel {
             entries: Vec::new(),
             searchable: true,
             filterable: true,
+            dispatch_actions: true,
             on_query: None,
             on_select: None,
             on_confirm: None,
@@ -623,7 +625,11 @@ impl CommandState {
         }
 
         let index_path = self.matched[matched_ix].index_path;
-        let action = item.action.as_ref().map(|action| action.boxed_clone());
+        let action = item
+            .action
+            .as_ref()
+            .filter(|_| self.model.dispatch_actions)
+            .map(|action| action.boxed_clone());
         let on_confirm = self.model.on_confirm.clone();
 
         if let Some(action) = action {
@@ -797,6 +803,9 @@ impl CommandState {
         }
 
         let action = item.action.as_ref()?;
+        if let Some(context) = item.key_context.as_ref() {
+            return Kbd::binding_for_action(action.as_ref(), Some(context), window);
+        }
         Kbd::binding_for_action_in(action.as_ref(), &self.focus_handle(cx), window)
             .or_else(|| Kbd::binding_for_action(action.as_ref(), None, window))
     }
@@ -830,20 +839,24 @@ impl CommandState {
         } else {
             muted_foreground
         };
-        let content = match &item.content {
-            Some(render) => render(window, cx),
-            None => h_flex()
-                .flex_1()
-                .gap_2()
-                .items_center()
+        // The binding owns the trailing slot, so only an item without one can
+        // show its check there.
+        let trailing = match binding {
+            Some(binding) => Some(binding.ml_auto().into_any_element()),
+            None => item.checked.then(|| {
+                crate::Sizable::xsmall(Icon::new(IconName::Check).ml_auto()).into_any_element()
+            }),
+        };
+        let label_line = |content: gpui::Div| {
+            content
                 .when_some(item.icon.clone(), |this, icon| {
                     this.child(icon.size_4().text_color(icon_color))
                 })
                 .when_some(item.label_text().cloned(), |this, label| this.child(label))
-                .into_any_element(),
         };
 
-        self.item_row(selected, window, cx)
+        let row = self
+            .item_row(selected, window, cx)
             .id(self.matched[matched_ix].index_path)
             .test_support()
             .role(Role::ListBoxOption)
@@ -859,16 +872,29 @@ impl CommandState {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.confirm(matched_ix, window, cx);
                     }))
-            })
-            .child(content)
-            .map(|this| match binding {
-                Some(binding) => this.child(binding.ml_auto()),
-                // The binding owns the trailing slot, so only an item without
-                // one can show its check there.
-                None => this.when(item.checked, |this| {
-                    this.child(crate::Sizable::xsmall(Icon::new(IconName::Check).ml_auto()))
-                }),
-            })
+            });
+
+        match (&item.content, item.description_text().cloned()) {
+            (Some(render), _) => row.child(render(window, cx)).children(trailing),
+            (None, None) => row
+                .child(label_line(h_flex().flex_1().gap_2().items_center()))
+                .children(trailing),
+            // The description goes under the label line as a block child of
+            // the column, not into the row: text in a flex row is measured
+            // at its max-content width and never wraps.
+            (None, Some(description)) => row
+                .flex_col()
+                .items_stretch()
+                .gap_0p5()
+                .child(label_line(h_flex().w_full().gap_2().items_center()).children(trailing))
+                .child(
+                    div()
+                        .when(item.icon.is_some(), |this| this.pl(rems(1.5)))
+                        .text_xs()
+                        .text_color(icon_color)
+                        .child(description),
+                ),
+        }
             .into_any_element()
     }
 
@@ -1217,6 +1243,190 @@ mod tests {
         assert_eq!(
             harness.read_with(cx, |harness, _| harness.events.clone()),
             ["confirm:0:0"]
+        );
+    }
+
+    #[gpui::test]
+    fn confirm_without_dispatch_only_reports_the_item(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let action_events = events.clone();
+        cx.update(|cx| {
+            cx.on_action(move |_: &OpenTestItem, _| {
+                action_events.borrow_mut().push("action".into());
+            });
+        });
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            let confirm_events = events.clone();
+            let state = cx.new(|cx| {
+                let mut state = CommandState::new(window, cx);
+                state.install_model(
+                    CommandModel {
+                        entries: vec![CommandEntry::Item(
+                            CommandItem::new()
+                                .label("open")
+                                .action(Box::new(OpenTestItem)),
+                        )],
+                        dispatch_actions: false,
+                        on_confirm: Some(Rc::new(move |index, _, _| {
+                            confirm_events
+                                .borrow_mut()
+                                .push(format!("confirm:{}:{}", index.section, index.row));
+                        })),
+                        ..CommandModel::default()
+                    },
+                    cx,
+                );
+                state
+            });
+            state.update(cx, |state, cx| state.confirm(0, window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(events.borrow().as_slice(), ["confirm:0:0"]);
+    }
+
+    struct CommandItemSizeHarness {
+        state: Entity<CommandState>,
+        matched_ix: usize,
+        size: Rc<Cell<Option<gpui::Size<Pixels>>>>,
+    }
+
+    impl Render for CommandItemSizeHarness {
+        fn render(
+            &mut self,
+            window: &mut Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let size = self.size.clone();
+            let item = self.state.update(cx, |state, cx| {
+                state.render_item(self.matched_ix, window, cx)
+            });
+
+            div()
+                .on_children_prepainted(move |bounds, _, _| size.set(Some(bounds[0].size)))
+                .child(item)
+        }
+    }
+
+    fn item_size(
+        cx: &mut gpui::VisualTestContext,
+        state: &Entity<CommandState>,
+        matched_ix: usize,
+    ) -> gpui::Size<Pixels> {
+        item_size_in(cx, state, matched_ix, AvailableSpace::min_size())
+    }
+
+    fn item_size_in(
+        cx: &mut gpui::VisualTestContext,
+        state: &Entity<CommandState>,
+        matched_ix: usize,
+        available: gpui::Size<AvailableSpace>,
+    ) -> gpui::Size<Pixels> {
+        let size = Rc::new(Cell::new(None));
+        let probe = cx.update(|_, cx| {
+            cx.new(|_| CommandItemSizeHarness {
+                state: state.clone(),
+                matched_ix,
+                size: size.clone(),
+            })
+        });
+        cx.draw(point(px(0.), px(0.)), available, move |_, _| {
+            probe.into_any_element()
+        });
+        size.get().unwrap()
+    }
+
+    #[gpui::test]
+    fn key_context_picks_the_hint_and_a_description_adds_a_line(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            crate::init(cx);
+            cx.bind_keys([KeyBinding::new("ctrl-o", OpenTestItem, Some("Elsewhere"))]);
+        });
+        let cx = cx.add_empty_window();
+        let state = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut state = CommandState::new(window, cx);
+                let open = || {
+                    CommandItem::new()
+                        .label("Open")
+                        .action(Box::new(OpenTestItem))
+                };
+                state.install_model(
+                    CommandModel {
+                        entries: vec![
+                            CommandEntry::Item(open().key_context("Elsewhere")),
+                            CommandEntry::Item(open().key_context("Nowhere")),
+                            CommandEntry::Item(
+                                open()
+                                    .key_context("Nowhere")
+                                    .description("In the window behind"),
+                            ),
+                        ],
+                        ..CommandModel::default()
+                    },
+                    cx,
+                );
+                state
+            })
+        });
+
+        let elsewhere = item_size(cx, &state, 0);
+        let nowhere = item_size(cx, &state, 1);
+        let described = item_size(cx, &state, 2);
+        assert!(
+            elsewhere.width > nowhere.width,
+            "the binding of the named context should add a Kbd ({elsewhere:?} vs {nowhere:?})",
+        );
+        assert!(
+            described.height > nowhere.height,
+            "the description should add a line ({described:?} vs {nowhere:?})",
+        );
+    }
+
+    #[gpui::test]
+    fn a_long_description_wraps_inside_the_row(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            crate::init(cx);
+            cx.bind_keys([KeyBinding::new("ctrl-o", OpenTestItem, Some("Elsewhere"))]);
+        });
+        let cx = cx.add_empty_window();
+        let state = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut state = CommandState::new(window, cx);
+                let open = |description: &'static str| {
+                    CommandItem::new()
+                        .label("Open")
+                        .action(Box::new(OpenTestItem))
+                        .key_context("Elsewhere")
+                        .description(description)
+                };
+                state.install_model(
+                    CommandModel {
+                        entries: vec![
+                            CommandEntry::Item(open("Short")),
+                            CommandEntry::Item(open(
+                                "A description far longer than the row is wide, \
+                                 which has to wrap onto further lines",
+                            )),
+                        ],
+                        ..CommandModel::default()
+                    },
+                    cx,
+                );
+                state
+            })
+        });
+
+        let width = px(240.);
+        let available = gpui::size(AvailableSpace::Definite(width), AvailableSpace::MinContent);
+        let short = item_size_in(cx, &state, 0, available);
+        let long = item_size_in(cx, &state, 1, available);
+        assert!(long.width <= width, "the row should keep its width ({long:?})");
+        assert!(
+            long.height > short.height,
+            "the long description should wrap ({long:?} vs {short:?})",
         );
     }
 

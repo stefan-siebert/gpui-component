@@ -62,6 +62,7 @@ pub struct Command {
     entries: Vec<CommandEntry>,
     searchable: bool,
     filterable: bool,
+    dispatch_actions: bool,
     on_query: Option<Rc<OnQuery>>,
     on_select: Option<Rc<OnIndex>>,
     on_confirm: Option<Rc<OnIndex>>,
@@ -77,6 +78,7 @@ impl Command {
             entries: Vec::new(),
             searchable: true,
             filterable: true,
+            dispatch_actions: true,
             on_query: None,
             on_select: None,
             on_confirm: None,
@@ -124,6 +126,17 @@ impl Command {
     /// highlight back to the first item instead of a local textual match.
     pub fn filterable(mut self, filterable: bool) -> Self {
         self.filterable = filterable;
+        self
+    }
+
+    /// Whether confirming an item dispatches its Action, default: `true`.
+    ///
+    /// Turn it off when the host dispatches it itself — after closing the
+    /// palette and moving focus back to where the Action applies. The Action
+    /// then only names the item's keybinding hint, and [`Self::on_confirm`]
+    /// is how the host learns which item was chosen.
+    pub fn dispatch_actions(mut self, dispatch: bool) -> Self {
+        self.dispatch_actions = dispatch;
         self
     }
 
@@ -253,6 +266,7 @@ impl RenderOnce for Command {
             entries: self.entries,
             searchable: self.searchable,
             filterable: self.filterable,
+            dispatch_actions: self.dispatch_actions,
             on_query: self.on_query,
             on_select: self.on_select,
             on_confirm: self.on_confirm,

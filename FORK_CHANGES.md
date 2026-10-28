@@ -300,6 +300,7 @@ Elane: `src/ui/components/breadcrumb.rs` (`CollapsibleBreadcrumb`). Tests: 14 (`
 | Text selection `base/text_selection.rs` | `fa50328c` | A bare mouse move while a gesture is open ends it (release taken by the platform, e.g. title-bar window move). | indirect | `a_release_the_window_never_saw_ends_the_gesture` (`selectable_text.rs`) |
 | Re-exports `lib.rs` | `7fcfbd86` | `SelectableText`, `TextSelection`, `TextSelectionHandle` from `gpui_base`. | `preview_window/info_box.rs`, `hex.rs` | — |
 | Separator `separator.rs` | `9106b4f9` | The separator keeps a minimum of 1 px along its axis (`min_h` horizontal, `min_w` vertical). Its line is absolute, so upstream's separator took no space: neighbours closed up over it and the line, centred on a zero-size box, sat on half a pixel. | every 1 px divider in Elane (dialogs, popups, context menu icon bar, hex group gaps, markdown rule) | `a_horizontal_separator_takes_the_pixel_it_draws`, `a_vertical_…` |
+| Command `command/{command,item,state}.rs` | (this commit) | `CommandItem::description` (a second, muted line under the label, also searched; it sits below the label line as a block child, so it wraps — text in the row itself never would), `CommandItem::key_context` (the keybinding hint from that context instead of the palette's focus path), `Command::dispatch_actions(false)` (confirm reports through `on_confirm` only; the host dispatches after moving focus back). | `command_palette.rs` | `matches_the_description`, `confirm_without_dispatch_only_reports_the_item`, `key_context_picks_the_hint_and_a_description_adds_a_line`, `a_long_description_wraps_inside_the_row` |
 | TextView `text/compat.rs` | `71a16233` | `TextView::image_source(resolver)` forwarded to gpui-base. | `help_window.rs` | — |
 | Switch `base/switch.rs` | `c660df8e` → `9ba70c79` | `gpui_base::Switch::track_focus` doc + styled Switch passes its handle so the ring and Tab land on the same handle. (Fork's own border ring superseded by upstream's in `5f336c79`.) | settings/dialogs | `tab_focuses_the_caller_owned_handle` |
 | Input `base/input/base/movement.rs` | `3c93460b` | Up/Down `cx.propagate()` in a single-line input (reach the list/dialog). | `change_dir.rs`, `path_dropdown.rs`, `plugin_dialog.rs` rely on it | — |
@@ -367,6 +368,7 @@ Confirmed by grep in Elane `src/` and `crates/` (2026-10-21):
 | `HoverCard::content_offset` | `file_table/cells.rs` |
 | `SelectableText`, `TextSelection`, `TextSelectionHandle` re-exports | `preview_window/info_box.rs`, `hex.rs` |
 | `TextView::image_source` | `help_window.rs` |
+| `CommandItem::{description, key_context}`, `Command::dispatch_actions` | `command_palette.rs` |
 | Behavioural: single-line Up/Down propagate; settings keyboard nav; table auto-width/colspan; resizable proportional rescale | file panels, dialogs, settings, splitter |
 
 ---

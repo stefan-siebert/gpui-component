@@ -8,11 +8,13 @@ use crate::{Disableable, Icon};
 ///
 pub struct CommandItem {
     label: Option<SharedString>,
+    description: Option<SharedString>,
     keywords: Vec<SharedString>,
     /// Boxed: an [`Icon`] carries a whole `StyleRefinement`, which would make
     /// every item — and so the palette's item vector — kilobytes wide.
     pub(crate) icon: Option<Box<Icon>>,
     pub(crate) action: Option<Box<dyn Action>>,
+    pub(crate) key_context: Option<SharedString>,
     pub(crate) checked: bool,
     disabled: bool,
     pub(crate) content: Option<Rc<CommandItemContent>>,
@@ -22,9 +24,11 @@ impl Clone for CommandItem {
     fn clone(&self) -> Self {
         Self {
             label: self.label.clone(),
+            description: self.description.clone(),
             keywords: self.keywords.clone(),
             icon: self.icon.clone(),
             action: self.action.as_ref().map(|action| action.boxed_clone()),
+            key_context: self.key_context.clone(),
             checked: self.checked,
             disabled: self.disabled,
             content: self.content.clone(),
@@ -37,9 +41,11 @@ impl CommandItem {
     pub fn new() -> Self {
         Self {
             label: None,
+            description: None,
             keywords: Vec::new(),
             icon: None,
             action: None,
+            key_context: None,
             checked: false,
             disabled: false,
             content: None,
@@ -49,6 +55,13 @@ impl CommandItem {
     /// Set the label to display and search.
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// Set a second, muted line under the label, which the search matches as
+    /// well.
+    pub fn description(mut self, description: impl Into<SharedString>) -> Self {
+        self.description = Some(description.into());
         self
     }
 
@@ -63,6 +76,16 @@ impl CommandItem {
     /// The Action's active keybinding is also shown by the default row.
     pub fn action(mut self, action: Box<dyn Action>) -> Self {
         self.action = Some(action);
+        self
+    }
+
+    /// Look the Action's keybinding hint up in this key context instead of
+    /// on the palette's own focus path.
+    ///
+    /// For a palette whose Actions apply elsewhere — in the window behind it,
+    /// say — where the binding that matters is the one of that context.
+    pub fn key_context(mut self, context: impl Into<SharedString>) -> Self {
+        self.key_context = Some(context.into());
         self
     }
 
@@ -122,6 +145,10 @@ impl CommandItem {
             .as_ref()
             .is_some_and(|label| label.to_lowercase().contains(&query))
             || self
+                .description
+                .as_ref()
+                .is_some_and(|description| description.to_lowercase().contains(&query))
+            || self
                 .keywords
                 .iter()
                 .any(|keyword| keyword.to_lowercase().contains(&query))
@@ -129,6 +156,10 @@ impl CommandItem {
 
     pub(crate) fn label_text(&self) -> Option<&SharedString> {
         self.label.as_ref()
+    }
+
+    pub(crate) fn description_text(&self) -> Option<&SharedString> {
+        self.description.as_ref()
     }
 
     /// Whether `other` filters and measures exactly like this item, so a
@@ -142,6 +173,8 @@ impl CommandItem {
         self.content.is_none()
             && other.content.is_none()
             && self.label == other.label
+            && self.description == other.description
+            && self.key_context == other.key_context
             && self.keywords == other.keywords
             && match (&self.icon, &other.icon) {
                 (Some(icon), Some(other)) => icon.same_layout(other),
@@ -350,5 +383,16 @@ mod tests {
         assert!(item.matches("PRO"));
         assert!(item.matches("Account"));
         assert!(!item.matches("billing"));
+    }
+
+    #[test]
+    fn matches_the_description() {
+        let item = CommandItem::new()
+            .label("Profile")
+            .description("Name and avatar");
+
+        assert!(item.matches("avatar"));
+        assert!(!item.matches("billing"));
+        assert!(!item.same_layout(&CommandItem::new().label("Profile")));
     }
 }
