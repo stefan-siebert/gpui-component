@@ -116,6 +116,7 @@ Feature: `mcp = ["inspector", "dep:gpui-mcp-protocol", "dep:image"]`; deps `asyn
 | `e371a164`, `9220aa15` | Sandboxed macOS app binds in `~/Library/Caches/gpui-mcp` (`SANDBOX_SOCKET_DIR`, detects `APP_SANDBOX_CONTAINER_ID`); screenshots land there too. Doc comment lists the two temporary-exception entitlements required. |
 | `939cd7ac` | `drag` (a frame painted between every step) and `scroll` (mouse moved first); answers carry selected text before/after release. |
 | `c0040a36`, `d4098de7` | `send_key` `repeat` (hold a key): press, `delay_ms`, auto-repeats with `is_held` via gpui-fork `Window::dispatch_keystroke_repeat`, release; per-step `state_changes`. |
+| `2797ebd6` | `take_screenshot` flattens the frame onto the theme background (`flatten_onto`): the readback is premultiplied RGBA with the window's alpha, so a translucent window (macOS glass) showed washed-out grey in every PNG. |
 | `cefb81b2` | Windows: accept with WinSock `accept` and no peer address (under Wine the peer's family is not AF_UNIX and `uds_windows` refused every connection). |
 | `f3abb84a`, `d867c579`, `b2e46ae8`, `2b2dfca3` | Documentation. |
 
