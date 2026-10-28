@@ -255,13 +255,21 @@ impl RenderOnce for ListItem {
             )
             .when_some(self.suffix, |this, suffix| this.child(suffix(window, cx)))
             .when(is_selectable && self.selected, |this| {
-                let bg = if cx.theme().list.active_highlight {
-                    cx.theme().list_active
+                if cx.theme().list.active_highlight {
+                    // The theme caps `list_active` at 20 % alpha, too faint to
+                    // find on its own (on light themes nearly invisible); the
+                    // border is what marks the row, as on a table's active row.
+                    this.bg(cx.theme().list_active).child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .border_1()
+                            .border_color(cx.theme().list_active_border)
+                            .refine_style(&outline_style),
+                    )
                 } else {
-                    cx.theme().accent
-                };
-
-                this.bg(bg)
+                    this.bg(cx.theme().accent)
+                }
             })
             .when(is_selectable && self.secondary_selected, |this| {
                 this.child(
