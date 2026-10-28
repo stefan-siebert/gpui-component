@@ -3328,7 +3328,7 @@ mod tests {
         let state = view.read_with(cx, |view, _| view.0.clone());
         let header = state.read_with(cx, |state, _| state.col_groups[0].bounds);
         let wheel = |cx: &mut gpui::VisualTestContext, dy| {
-            cx.simulate_event(gpui::ScrollWheelEvent {
+            cx.simulate_event(gpui::ScrollEvent {
                 position: gpui::point(px(100.), px(100.)),
                 delta: gpui::ScrollDelta::Lines(gpui::point(0., dy)),
                 ..Default::default()
@@ -3338,7 +3338,7 @@ mod tests {
             (-10000., gpui::TouchPhase::Started),
             (0., gpui::TouchPhase::Ended),
         ] {
-            cx.simulate_event(gpui::ScrollWheelEvent {
+            cx.simulate_event(gpui::ScrollEvent {
                 position: gpui::point(px(100.), px(100.)),
                 delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(dy))),
                 touch_phase: phase,

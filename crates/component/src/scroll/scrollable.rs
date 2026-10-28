@@ -320,7 +320,7 @@ impl<E> ScrollableElement for gpui_base::test_support::Observed<E> where
 mod tests {
     use super::*;
     use gpui::{
-        Context, Render, ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point,
+        Context, Render, ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext, point,
         px,
     };
 
@@ -332,7 +332,7 @@ mod tests {
     }
 
     fn scroll(cx: &mut VisualTestContext, x: f32, y: f32, dx: f32, dy: f32) {
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(x), px(y)),
             delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
             ..Default::default()
@@ -585,7 +585,7 @@ mod tests {
                 .x
         };
         let initial_x = first_item_x(cx);
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(50.), px(10.)),
             delta: ScrollDelta::Lines(point(0., -1.)),
             ..Default::default()

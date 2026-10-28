@@ -1835,7 +1835,7 @@ mod tests {
             };
             let step = px(20.);
             let wheel_at = |cx: &mut VisualTestContext, y: Pixels| {
-                cx.simulate_event(gpui::ScrollWheelEvent {
+                cx.simulate_event(gpui::ScrollEvent {
                     position: point(px(20.), y),
                     delta: gpui::ScrollDelta::Pixels(point(px(0.), -step)),
                     ..Default::default()

@@ -481,7 +481,7 @@ impl<M: InputModeKind> TextElement<M> {
         window.on_mouse_event({
             let state = self.state.clone();
             let hitbox = hitbox.id;
-            move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+            move |event: &gpui::ScrollEvent, phase, window, cx| {
                 if phase.capture()
                     && hitbox.should_handle_scroll(window)
                     && state
@@ -3792,7 +3792,7 @@ mod tests {
             editor.update(cx, |state, cx| {
                 state.set_scroll_bounce(true, cx);
                 state.on_scroll_wheel(
-                    &gpui::ScrollWheelEvent {
+                    &gpui::ScrollEvent {
                         delta: gpui::ScrollDelta::Pixels(point(px(0.), px(60.))),
                         touch_phase: gpui::TouchPhase::Started,
                         ..Default::default()
@@ -3864,7 +3864,7 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let swipe = |cx: &mut VisualTestContext, y: f32| {
-            cx.simulate_event(gpui::ScrollWheelEvent {
+            cx.simulate_event(gpui::ScrollEvent {
                 position: point(px(100.), px(y)),
                 delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-40.))),
                 touch_phase: gpui::TouchPhase::Moved,

@@ -10,7 +10,7 @@ use gpui::{
     App, AppContext as _, Bounds, Context, Element, ElementId, Entity, EntityId, EventEmitter,
     Global, GlobalElementId, Half, Hitbox, HitboxBehavior, Hsla, InputEvent as _,
     InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollEvent, SharedString,
     Style, Subscription, TextLayout, TouchDragEvent, TouchPhase, WeakEntity, Window, point, px,
 };
 
@@ -2333,7 +2333,7 @@ impl WindowSelectionState {
             cx.defer(move |cx| {
                 _ = window.update(cx, |_, window, cx| {
                     window.dispatch_event(
-                        ScrollWheelEvent {
+                        ScrollEvent {
                             position,
                             delta: ScrollDelta::Pixels(point(px(0.), -delta)),
                             ..Default::default()
@@ -3055,7 +3055,7 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
     });
 
     let scroll_state = state.downgrade();
-    window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+    window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
         let Some(state) = scroll_state.upgrade() else {
             return;
         };

@@ -13,7 +13,7 @@
 use crate::{
     AnyWindowHandle, App, AppContext, ElementId, InputEvent, KeyDownEvent, KeyUpEvent, Keystroke,
     Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, ScrollDelta, ScrollWheelEvent, TestAppContext, Window, point, px,
+    Pixels, Point, ScrollDelta, ScrollEvent, TestAppContext, Window, point, px,
 };
 use std::time::Duration;
 
@@ -303,7 +303,7 @@ fn scroll_target(
     let position = target_position(window, scope, &id, None);
     move_pointer(window, position, None, window.modifiers(), cx);
     window.dispatch_event(
-        ScrollWheelEvent {
+        ScrollEvent {
             position,
             delta,
             modifiers: window.modifiers(),
