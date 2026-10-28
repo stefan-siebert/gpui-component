@@ -87,6 +87,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(windows)]
 use uds_windows::{UnixListener, UnixStream};
 
+use crate::theme::ActiveTheme as _;
 use futures::channel::oneshot;
 use gpui::{App, AsyncApp, Keystroke, MouseButton as GpuiMouseButton, Pixels, point, px};
 use gpui_mcp_protocol::protocol::*;
@@ -3440,6 +3441,33 @@ fn handle_get_element(
     Err(not_found_error(&params.element_id, candidates))
 }
 
+/// Lays a rendered frame onto an opaque backdrop, in place (fork).
+///
+/// The renderer blends onto a cleared target, so the frame comes back as
+/// premultiplied RGBA carrying the window's own alpha — what the window
+/// server composites over whatever lies behind the window. A translucent
+/// window (macOS glass, a rounded corner's gutter) then saved as a PNG,
+/// which stores straight alpha, showed washed-out grey wherever a viewer put
+/// it over a light page, though on screen the blurred desktop is behind it.
+/// The theme's background stands in for that backdrop: it is what the
+/// window looks like without glass.
+fn flatten_onto(image: &mut image::RgbaImage, backdrop: gpui::Hsla) {
+    let backdrop = backdrop.to_rgb();
+    let backdrop = [backdrop.r, backdrop.g, backdrop.b].map(|c| c.clamp(0., 1.) * 255.);
+    for pixel in image.pixels_mut() {
+        let [r, g, b, a] = pixel.0;
+        if a == u8::MAX {
+            continue;
+        }
+        let uncovered = 1. - f32::from(a) / 255.;
+        let mut out = [r, g, b, u8::MAX];
+        for (channel, back) in out.iter_mut().zip(backdrop) {
+            *channel = (f32::from(*channel) + back * uncovered).round().min(255.) as u8;
+        }
+        pixel.0 = out;
+    }
+}
+
 fn handle_take_screenshot(
     params: &serde_json::Value,
     cx: &mut App,
@@ -3450,9 +3478,10 @@ fn handle_take_screenshot(
     let crop_to = opts.element_id.as_deref().map(expand_ref).transpose()?;
 
     let (image, scale_factor) = handle
-        .update(cx, |_, window, _cx| {
+        .update(cx, |_, window, cx| {
             let scale = window.scale_factor();
-            let img = window.render_to_image()?;
+            let mut img = window.render_to_image()?;
+            flatten_onto(&mut img, cx.theme().background);
             Ok::<_, anyhow::Error>((img, scale))
         })
         .map_err(|e| format!("Failed to access window: {}", e))?
@@ -3826,6 +3855,25 @@ fn handle_get_focus_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flatten_onto_composites_premultiplied_pixels_over_the_backdrop() {
+        let mut image = image::RgbaImage::from_raw(
+            3,
+            1,
+            vec![
+                10, 20, 30, 255, // opaque: untouched
+                15, 16, 24, 128, // half covered, premultiplied
+                0, 0, 0, 0, // uncovered: the backdrop alone
+            ],
+        )
+        .unwrap();
+        flatten_onto(&mut image, gpui::rgb(0x646464).into());
+        let [opaque, half, empty] = [0, 1, 2].map(|x| image.get_pixel(x, 0).0);
+        assert_eq!(opaque, [10, 20, 30, 255]);
+        assert_eq!(half, [65, 66, 74, 255]);
+        assert_eq!(empty, [100, 100, 100, 255]);
+    }
 
     #[test]
     fn sanitize_passes_valid_chars_through() {
