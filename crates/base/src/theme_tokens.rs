@@ -213,7 +213,8 @@ fn text_style(size: f32, line_height: f32) -> TextStyleToken {
 }
 
 fn default_mono_font_family() -> SharedString {
-    if cfg!(target_os = "macos") {
+    // iOS and iPadOS ship Menlo as well (`System/Library/Fonts/CoreUI`).
+    if cfg!(target_vendor = "apple") {
         "Menlo".into()
     } else if cfg!(target_os = "windows") {
         "Consolas".into()

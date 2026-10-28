@@ -19,6 +19,9 @@ use std::sync::OnceLock;
 /// Monospace families tried, in order, when the platform default is missing.
 const MONO_FONT_ALTERNATES: &[&str] = if cfg!(target_os = "macos") {
     &["Monaco", "Courier New"]
+} else if cfg!(target_os = "ios") {
+    // Monaco is macOS only.
+    &["Courier New"]
 } else if cfg!(target_os = "windows") {
     &["Cascadia Mono", "Courier New"]
 } else {
