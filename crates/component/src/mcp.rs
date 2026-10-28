@@ -232,15 +232,25 @@ fn sanitize_app_name(name: &str) -> String {
 pub const SANDBOX_SOCKET_DIR: &str = "Library/Caches/gpui-mcp";
 
 /// The directory of [`SANDBOX_SOCKET_DIR`], created, if this process runs in
-/// the macOS app sandbox and may write there.
+/// the macOS app sandbox or the iOS simulator and may write there.
+///
+/// The iOS simulator shares the Mac's file system, but its temp directory
+/// lies deep in the device's data directory: a socket path there is longer
+/// than `sockaddr_un` allows ("path must be shorter than SUN_LEN"), and the
+/// server would not look there anyway.
 fn sandbox_socket_dir() -> Option<std::path::PathBuf> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
-    std::env::var_os("APP_SANDBOX_CONTAINER_ID")?;
-    // In the sandbox `HOME` is `<real home>/Library/Containers/<id>/Data`.
     let home = std::env::var("HOME").ok()?;
-    let (real_home, _) = home.split_once("/Library/Containers/")?;
+    let real_home = if cfg!(target_os = "macos") {
+        std::env::var_os("APP_SANDBOX_CONTAINER_ID")?;
+        // In the sandbox `HOME` is `<real home>/Library/Containers/<id>/Data`.
+        home.split_once("/Library/Containers/")?.0
+    } else if cfg!(target_os = "ios") {
+        // `<real home>/Library/Developer/CoreSimulator/Devices/<udid>/data/…`;
+        // on a device there is no such prefix and nothing to reach.
+        home.split_once("/Library/Developer/CoreSimulator/")?.0
+    } else {
+        return None;
+    };
     let dir = std::path::Path::new(real_home).join(SANDBOX_SOCKET_DIR);
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
