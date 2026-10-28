@@ -434,14 +434,17 @@ impl Render for TitleBarState {
 impl RenderOnce for TitleBar {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let is_macos = cfg!(target_os = "macos");
+        let native_controls = cfg!(target_vendor = "apple");
         let is_linux = cfg!(target_os = "linux");
 
         // Determine effective button layout for window controls placement.
-        // On macOS: native traffic lights, no custom controls needed.
+        // On macOS: native traffic lights, no custom controls needed; on
+        // iPadOS likewise, the system draws a window's close, minimize and
+        // full-screen buttons (`WindowInsets::window_controls` says where).
         // On Linux: follow DE configuration via XDG Desktop Portal.
         // On Windows: always right-side controls.
         let button_layout =
-            if is_macos {
+            if native_controls {
                 None
             } else if is_linux {
                 Some(self.button_layout.or_else(|| cx.button_layout()).unwrap_or(
@@ -661,8 +664,9 @@ impl RenderOnce for TitleBar {
                     }
                 })
             })
-            // Right-click context menu
-            .when(!is_macos, |this| {
+            // Right-click context menu: the window manager's, which Apple's
+            // systems do not have.
+            .when(!native_controls, |this| {
                 this.on_mouse_down(MouseButton::Right, move |ev, window, _| {
                     window.show_window_menu(ev.position)
                 })
