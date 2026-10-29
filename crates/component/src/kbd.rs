@@ -226,6 +226,14 @@ impl Kbd {
             "down" => keys.push('↓'),
             #[cfg(not(target_vendor = "apple"))]
             "down" => keys.push_str("Down"),
+            // The numpad's operator keys are named apart from the main row
+            // (`multiply`, not `*`) so both can be bound; a capitalised
+            // "Multiply" did not say which key that is.
+            "multiply" => keys.push_str("Num *"),
+            "add" => keys.push_str("Num +"),
+            "subtract" => keys.push_str("Num -"),
+            "divide" => keys.push_str("Num /"),
+            "decimal" => keys.push_str("Num ."),
             _ => {
                 if key_str.len() == 1 {
                     keys.push_str(&key_str.to_uppercase());
@@ -316,6 +324,24 @@ mod tests {
         // Other keys are formatted as before.
         let enter = Keystroke::parse("enter").expect("valid keystroke");
         assert_eq!(glyphs("enter"), Kbd::format(&enter));
+    }
+
+    #[test]
+    fn numpad_keys_are_named_as_numpad_keys() {
+        use super::Kbd;
+        use gpui::Keystroke;
+
+        let format = |text: &str| Kbd::format(&Keystroke::parse(text).expect("valid keystroke"));
+        assert_eq!(format("multiply"), "Num *");
+        assert_eq!(format("add"), "Num +");
+        assert_eq!(format("subtract"), "Num -");
+        assert_eq!(format("divide"), "Num /");
+        assert_eq!(format("decimal"), "Num .");
+        if cfg!(target_vendor = "apple") {
+            assert_eq!(format("ctrl-shift-add"), "⌃⇧Num +");
+        } else {
+            assert_eq!(format("ctrl-shift-add"), "Ctrl+Shift+Num +");
+        }
     }
 
     #[test]
