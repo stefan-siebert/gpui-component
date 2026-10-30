@@ -1401,6 +1401,54 @@ impl ButtonVariant {
     }
 }
 
+/// The look of a [`Button`] — its rounding, and its colours hovered and
+/// pressed — for an element that has to look like one without being one.
+///
+/// For rows laid out by hand at measured widths, such as a breadcrumb's
+/// crumbs, where a `Button`'s own padding and sizing would not land where
+/// the measurement put them. The colours come from the variant itself, so
+/// they follow the theme and the button as it changes; the element brings
+/// its own content, text colour at rest, focus and click handling. Taken
+/// once with [`ButtonVariant::look`], applied with
+/// [`ButtonLookExt::button_look`], so a row of such elements needs `cx` only
+/// once.
+#[derive(Clone, Copy)]
+pub struct ButtonLook {
+    pub radius: Pixels,
+    pub hover_bg: Background,
+    pub hover_fg: Hsla,
+    pub active_bg: Background,
+    pub active_fg: Hsla,
+}
+
+impl ButtonVariant {
+    /// How a non-outline `Button` of this variant rounds and colours itself
+    /// hovered and pressed.
+    pub fn look(&self, cx: &mut App) -> ButtonLook {
+        let hovered = self.hovered(false, cx);
+        let active = self.active(false, cx);
+        ButtonLook {
+            radius: cx.theme().radius,
+            hover_bg: hovered.bg,
+            hover_fg: hovered.fg,
+            active_bg: active.bg,
+            active_fg: active.fg,
+        }
+    }
+}
+
+/// Applies a [`ButtonLook`].
+pub trait ButtonLookExt: gpui::StatefulInteractiveElement + Styled + Sized {
+    /// Round like the button and take its hover and pressed colours.
+    fn button_look(self, look: ButtonLook) -> Self {
+        self.rounded(look.radius)
+            .hover(move |this| this.bg(look.hover_bg).text_color(look.hover_fg))
+            .active(move |this| this.bg(look.active_bg).text_color(look.active_fg))
+    }
+}
+
+impl<E: gpui::StatefulInteractiveElement + Styled> ButtonLookExt for E {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
