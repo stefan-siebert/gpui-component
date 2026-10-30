@@ -927,6 +927,11 @@ struct ButtonVariantStyle {
     shadow: bool,
 }
 
+/// A ghost button's hover and pressed fill in a dark theme: the foreground
+/// at this opacity.
+const GHOST_DARK_HOVER: f32 = 0.15;
+const GHOST_DARK_ACTIVE: f32 = 0.22;
+
 #[derive(Clone, Copy)]
 enum ButtonStyleState {
     Normal,
@@ -1203,12 +1208,17 @@ impl ButtonVariant {
                 }
             }
             Self::Custom(colors) => colors.hover.into(),
+            // Dark: the foreground at 15 % over whatever is beneath. The
+            // accent at 50 % it was before nearly vanished where the accent
+            // sits close to the background (Catppuccin Macchiato: 1.17:1
+            // against the bar, 1.07:1 under a translucent "glass" bar,
+            // measured 2026-10-30); the foreground stands apart from the
+            // background in every theme, glass or not (1.44:1 / 1.46:1).
             Self::Ghost => {
-                let accent: Background = cx.theme().tokens.accent.into();
                 if cx.theme().mode.is_dark() {
-                    accent.opacity(0.5)
+                    cx.theme().foreground.opacity(GHOST_DARK_HOVER).into()
                 } else {
-                    accent
+                    cx.theme().tokens.accent.into()
                 }
             }
             Self::Link => cx.theme().transparent.into(),
@@ -1257,6 +1267,10 @@ impl ButtonVariant {
                 } else {
                     cx.theme().tokens.button_secondary_active.into()
                 }
+            }
+            // A step above the hover, so a press never reads as dimming.
+            Self::Ghost if cx.theme().mode.is_dark() => {
+                cx.theme().foreground.opacity(GHOST_DARK_ACTIVE).into()
             }
             Self::Ghost => cx.theme().tokens.button_active.into(),
             Self::Danger => {
