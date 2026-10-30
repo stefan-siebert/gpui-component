@@ -8,6 +8,23 @@ use gpui_base::TestSupportExt as _;
 use smallvec::SmallVec;
 use std::collections::HashMap;
 
+/// A list row's hover fill in a dark theme: the foreground at this opacity.
+/// The theme's `list.hover` (by default `accent` at 60 %) measured 1.19:1
+/// against a glass popover in Catppuccin Macchiato, close to invisible; this
+/// measures about 1.33:1 there. Below the ghost button's 15 % on purpose: a
+/// row is wide, and its hover should stay quieter than the selected row's
+/// fill and border.
+const LIST_DARK_HOVER: f32 = 0.12;
+
+/// The fill under the pointer on a list row that is not selected.
+fn hover_background(cx: &App) -> gpui::Background {
+    if cx.theme().mode.is_dark() {
+        cx.theme().foreground.opacity(LIST_DARK_HOVER).into()
+    } else {
+        cx.theme().tokens.list_hover.into()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ListItemMode {
     #[default]
@@ -228,7 +245,7 @@ impl RenderOnce for ListItem {
                         if is_active {
                             this
                         } else {
-                            this.bg(cx.theme().tokens.list_hover)
+                            this.bg(hover_background(cx))
                         }
                     })
             })
@@ -295,6 +312,19 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
         }
+    }
+
+    #[gpui::test]
+    fn a_dark_theme_hovers_with_the_foreground(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::init(cx);
+            crate::Theme::change(crate::ThemeMode::Dark, None, cx);
+            let dark: gpui::Background = cx.theme().foreground.opacity(LIST_DARK_HOVER).into();
+            assert_eq!(hover_background(cx), dark);
+            crate::Theme::change(crate::ThemeMode::Light, None, cx);
+            let light: gpui::Background = cx.theme().tokens.list_hover.into();
+            assert_eq!(hover_background(cx), light);
+        });
     }
 
     #[gpui::test]
