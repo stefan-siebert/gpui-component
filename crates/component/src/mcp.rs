@@ -791,12 +791,21 @@ fn evaluate_wait(opts: &WaitForParams, cx: &mut App) -> Result<(bool, serde_json
             (_, None) => false,
             (None, Some(actual)) => !actual.is_null(),
         };
+        // Moved away from the value read before the action — nothing that
+        // resolves to nothing has moved anywhere.
+        let moved = match (&opts.app_state_not_equals, &found) {
+            (Some(before), Some(actual)) => before != actual,
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        let matches = matches && moved;
         checks.insert(
             "app_state".into(),
             json!({
                 "path": path,
                 "value": found,
                 "expected": opts.app_state_equals,
+                "not_expected": opts.app_state_not_equals,
                 "matches": matches,
             }),
         );
@@ -1817,6 +1826,8 @@ fn handle_get_app_state(cx: &mut App) -> Result<serde_json::Value, String> {
         "window_count": window_count,
         "active_window": active_window_id,
         "windows": windows,
+        // The framework's own state, apart from the app's.
+        "gpui": { "hot_reload": hot_reload_state(cx) },
     });
 
     // Merge app-specific semantic state if a provider is registered
@@ -1830,6 +1841,27 @@ fn handle_get_app_state(cx: &mut App) -> Result<serde_json::Value, String> {
     }
 
     Ok(result)
+}
+
+/// gpui's hot-reload client (`dx serve --hot-patch`), or `null` in a build
+/// without hot reloading. A tool reads `patches_received` before an edit and
+/// waits for it to move (`wait_for` with `app_state_not_equals`), then reads
+/// `last_error` to learn whether the patch applied.
+fn hot_reload_state(cx: &App) -> serde_json::Value {
+    let Some(status) = cx.hot_reload_status() else {
+        return serde_json::Value::Null;
+    };
+    let last_applied_ms = status
+        .last_applied_at
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_millis() as u64);
+    json!({
+        "connected": status.connected,
+        "patches_received": status.patches_received,
+        "patches_applied": status.patches_applied,
+        "last_applied_ms": last_applied_ms,
+        "last_error": status.last_error,
+    })
 }
 
 fn handle_get_logs() -> Result<serde_json::Value, String> {
@@ -4776,6 +4808,36 @@ mod tests {
             absent: true,
             ..Default::default()
         }));
+    }
+
+    /// `app_state_not_equals` holds once the value has moved away from the
+    /// one read before — and the framework's own state is reported beside
+    /// the app's, `null` where hot reloading is not compiled in.
+    #[gpui::test]
+    fn a_wait_can_ask_for_a_value_to_move_away(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::init);
+        let _window = cx.add_empty_window();
+        cx.update(|cx| {
+            let wait = |before: i64, cx: &mut App| {
+                let opts = WaitForParams {
+                    app_state_path: Some("/window_count".into()),
+                    app_state_not_equals: Some(json!(before)),
+                    ..Default::default()
+                };
+                evaluate_wait(&opts, cx).map(|(satisfied, _)| satisfied)
+            };
+            assert_eq!(wait(1, cx), Ok(false), "one window, as before");
+            assert_eq!(wait(0, cx), Ok(true), "moved from none to one");
+
+            let state = handle_get_app_state(cx).unwrap_or_default();
+            assert!(state.pointer("/gpui").is_some_and(|gpui| gpui.is_object()));
+            if cx.hot_reload_status().is_none() {
+                assert_eq!(
+                    state.pointer("/gpui/hot_reload"),
+                    Some(&serde_json::Value::Null)
+                );
+            }
+        });
     }
 
     /// `send_key` and `type_text` press *and release*: a focused `Button`
