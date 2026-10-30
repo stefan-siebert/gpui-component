@@ -676,8 +676,9 @@ impl RenderOnce for Button {
                 let height = self.size.button_height();
                 let pb = platform_control_px_boost();
 
-                if self.label.is_none() && children.is_empty() {
-                    // Icon Button
+                if self.label.is_none() && children.is_empty() && !self.dropdown_caret {
+                    // Icon Button. With a caret it is not one: squeezed into
+                    // the icon's square, the caret shrank to a dot beside it.
                     this.size(height)
                 } else {
                     // Normal Button
@@ -1892,6 +1893,49 @@ mod tests {
             .expect("application content must prepaint through the Base child seam");
         assert!(bounds.size.width > px(0.));
         assert!(bounds.size.height > px(0.));
+    }
+
+    #[gpui::test]
+    fn an_icon_with_a_caret_is_wider_than_the_icon_button(cx: &mut gpui::TestAppContext) {
+        use gpui::{Context, Render};
+
+        struct CaretHarness;
+
+        impl Render for CaretHarness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                // A row, so each wrapper is as wide as its button.
+                h_flex()
+                    .items_start()
+                    .child(
+                        h_flex()
+                            .debug_selector(|| "icon-only".into())
+                            .child(Button::new("icon-only").xsmall().icon(IconName::Plus)),
+                    )
+                    .child(
+                        h_flex().debug_selector(|| "icon-caret".into()).child(
+                            Button::new("icon-caret")
+                                .xsmall()
+                                .icon(IconName::Plus)
+                                .dropdown_caret(true),
+                        ),
+                    )
+            }
+        }
+
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(|_, _| CaretHarness);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let icon_only = cx.debug_bounds("icon-only").expect("icon button painted");
+        let icon_caret = cx.debug_bounds("icon-caret").expect("caret button painted");
+        assert_eq!(icon_only.size.width, icon_only.size.height);
+        assert_eq!(icon_caret.size.height, icon_only.size.height);
+        assert!(
+            icon_caret.size.width > icon_only.size.width,
+            "the caret needs room of its own: {:?} vs {:?}",
+            icon_caret.size,
+            icon_only.size
+        );
     }
 
     #[gpui::test]
