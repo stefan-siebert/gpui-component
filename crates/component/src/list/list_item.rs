@@ -17,7 +17,11 @@ use std::collections::HashMap;
 const LIST_DARK_HOVER: f32 = 0.12;
 
 /// The fill under the pointer on a list row that is not selected.
-fn hover_background(cx: &App) -> gpui::Background {
+///
+/// Public for rows that cannot be a `ListItem` — one whose height is set by
+/// something else, such as a hex view it lines up with — so they hover the
+/// same as every list instead of picking a colour of their own.
+pub fn row_hover_background(cx: &App) -> gpui::Background {
     if cx.theme().mode.is_dark() {
         cx.theme().foreground.opacity(LIST_DARK_HOVER).into()
     } else {
@@ -245,7 +249,7 @@ impl RenderOnce for ListItem {
                         if is_active {
                             this
                         } else {
-                            this.bg(hover_background(cx))
+                            this.bg(row_hover_background(cx))
                         }
                     })
             })
@@ -320,10 +324,10 @@ mod tests {
             crate::init(cx);
             crate::Theme::change(crate::ThemeMode::Dark, None, cx);
             let dark: gpui::Background = cx.theme().foreground.opacity(LIST_DARK_HOVER).into();
-            assert_eq!(hover_background(cx), dark);
+            assert_eq!(row_hover_background(cx), dark);
             crate::Theme::change(crate::ThemeMode::Light, None, cx);
             let light: gpui::Background = cx.theme().tokens.list_hover.into();
-            assert_eq!(hover_background(cx), light);
+            assert_eq!(row_hover_background(cx), light);
         });
     }
 
