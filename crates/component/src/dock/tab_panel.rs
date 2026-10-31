@@ -261,16 +261,18 @@ impl TabGroupSkin {
         };
 
         let area = self.shared.area().clone();
+        let label = SharedString::from(match is_open {
+            true => t!("Dock.Collapse"),
+            false => t!("Dock.Expand"),
+        });
         Some(
             Button::new(SharedString::from(format!("toggle-dock:{:?}", placement)))
                 .icon(icon)
                 .xsmall()
                 .ghost()
                 .tab_stop(false)
-                .tooltip(match is_open {
-                    true => t!("Dock.Collapse"),
-                    false => t!("Dock.Expand"),
-                })
+                .tooltip(label.clone())
+                .accessibility_label(label)
                 .debug_selector(move || format!("{DOCK_TOGGLE_SELECTOR}-{placement:?}"))
                 .on_click(move |_, window, cx| {
                     _ = area.update(cx, |area, cx| {
@@ -341,6 +343,7 @@ impl TabGroupSkin {
             .child(
                 Button::new("menu")
                     .icon(IconName::Ellipsis)
+                    .accessibility_label(t!("DropdownButton.more_options"))
                     .xsmall()
                     .ghost()
                     .tab_stop(false)
@@ -511,7 +514,9 @@ impl TabGroupSkin {
                             .debug_selector(move || format!("{TAB_SELECTOR}-{ix}"))
                             .tab_bar_prefix(has_leading)
                             .map(|this| match handle.and_then(|handle| handle.tab_name(cx)) {
-                                Some(tab_name) => this.child(tab_name),
+                                // The title is an element, so only a tab name
+                                // can tell assistive technology what this is.
+                                Some(tab_name) => this.aria_label(tab_name.clone()).child(tab_name),
                                 None => this.child(panel_title(panel, window, cx)),
                             })
                             // Per-tab close (X) button. The gate mirrors
