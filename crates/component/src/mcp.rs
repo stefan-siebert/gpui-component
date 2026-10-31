@@ -2400,6 +2400,7 @@ const INTERACTIVE_ROLES: &[&str] = &[
     "menuitem",
     "radio",
     "rating",
+    "row",
     "slider",
     "spinbutton",
     "switch",
@@ -2583,6 +2584,7 @@ const A11Y_ROLES: &[(&str, &str)] = &[
     ("MenuItem", "menuitem"),
     ("MultilineTextInput", "textbox"),
     ("RadioButton", "radio"),
+    ("Row", "row"),
     ("SearchInput", "textbox"),
     ("Slider", "slider"),
     ("Switch", "switch"),
@@ -2745,7 +2747,35 @@ fn snapshot_nodes(
         }
     }
 
-    nodes
+    merge_shared_ids(nodes)
+}
+
+/// Fold lines that name the same element into one.
+///
+/// gpui reports an element that has no id of its own under its parent's, with
+/// the same instance and the same accessibility node: a tab and the row inside
+/// it that paints its label arrive as two elements with one identity. Printed
+/// apart they read as two tabs, one of them nameless, and `@ref`s to either
+/// click the same thing — so they are one line, named by whichever painted.
+fn merge_shared_ids(nodes: Vec<SnapshotNode>) -> Vec<SnapshotNode> {
+    let mut merged: Vec<SnapshotNode> = Vec::with_capacity(nodes.len());
+
+    for node in nodes {
+        let Some(first) = merged.iter_mut().find(|kept| kept.full_id == node.full_id) else {
+            merged.push(node);
+            continue;
+        };
+        first.role = first.role.or(node.role);
+        first.name = first.name.take().or(node.name);
+        first.test_id = first.test_id.take().or(node.test_id);
+        if first.state.is_empty() {
+            first.state = node.state;
+        }
+        first.announced |= node.announced;
+        first.children.extend(node.children);
+    }
+
+    merged
 }
 
 /// Keep matching nodes and the ancestors that lead to them.
@@ -4191,6 +4221,44 @@ mod tests {
 
         let rendered = render(&snapshot_nodes(&[element], false, &a11y));
         assert!(rendered.contains("- button "), "{rendered}");
+    }
+
+    /// A tab's label is painted by an id-less row inside it, which gpui
+    /// reports under the tab's own id and node. That is one tab, not a
+    /// nameless one followed by a named one.
+    #[test]
+    fn elements_sharing_an_id_print_as_one_line() {
+        let (tab, mut a11y) = annotated(
+            "W/a.tabs.Tab.1[0]",
+            14,
+            json!({ "role": "Tab", "selected": false }),
+        );
+        let mut label = ui_element(
+            "W/a.tabs.Tab.1[0]",
+            Some("crates/ui/src/styled.rs:39:5"),
+            &["Imports"],
+            vec![],
+        );
+        label.accesskit_node_id = 14;
+        a11y.insert(14, a11y_node_of(&json!({ "role": "Tab", "selected": false })));
+        let tabs = ui_element("W/a.tabs[0]", None, &[], vec![tab, label]);
+
+        let rendered = render(&snapshot_nodes(&[tabs], true, &a11y));
+        assert_eq!(rendered, "- tab \"Imports\" @e1 unselected ✓\n");
+    }
+
+    /// A table row is clickable, so asking for what can be acted on has to
+    /// list it.
+    #[test]
+    fn a_declared_row_counts_as_interactive() {
+        let mut row = ui_element("W/a.table.row-3[0]", None, &["0x10", "main", "42"], vec![]);
+        row.accesskit_node_id = 15;
+        let mut a11y = A11yNodes::new();
+        a11y.insert(15, a11y_node_of(&json!({ "role": "Row", "selected": true })));
+        let table = ui_element("W/a.table[0]", None, &[], vec![row]);
+
+        let rendered = render(&snapshot_nodes(&[table], true, &a11y));
+        assert_eq!(rendered, "- row \"0x10 main 42\" #row-3 @e1 selected ✓\n");
     }
 
     /// With no tree — nothing annotated, or accessibility never switched on —

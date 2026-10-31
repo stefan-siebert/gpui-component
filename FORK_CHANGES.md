@@ -93,7 +93,7 @@ into the gpui fork *first* (the same order `d21ef144` recorded: "Must follow the
 
 ## 1. MCP inspector server (`crates/component/src/mcp.rs`, feature `mcp`) — the fork's reason to exist
 
-New file, +4,726 lines, 51 tests. Fork-only; needs gpui-fork inspector APIs. App side of
+New file, +4,726 lines, 56 tests. Fork-only; needs gpui-fork inspector APIs. App side of
 [stefan-siebert/gpui-mcp](https://github.com/stefan-siebert/gpui-mcp); wire types from `gpui-mcp-protocol`.
 Feature: `mcp = ["inspector", "dep:gpui-mcp-protocol", "dep:image"]`; deps `async-channel`, `futures`
 (unconditional), `image` (png, `opt-level = 3` in dev — screenshots), Windows: `uds_windows = "1.1"` +
@@ -118,6 +118,7 @@ Feature: `mcp = ["inspector", "dep:gpui-mcp-protocol", "dep:image"]`; deps `asyn
 | `c0040a36`, `d4098de7` | `send_key` `repeat` (hold a key): press, `delay_ms`, auto-repeats with `is_held` via gpui-fork `Window::dispatch_keystroke_repeat`, release; per-step `state_changes`. |
 | `2797ebd6` | `take_screenshot` flattens the frame onto the theme background (`flatten_onto`): the readback is premultiplied RGBA with the window's alpha, so a translucent window (macOS glass) showed washed-out grey in every PNG. |
 | `cefb81b2` | Windows: accept with WinSock `accept` and no peer address (under Wine the peer's family is not AF_UNIX and `uds_windows` refused every connection). |
+| (this commit) | `ui_snapshot`: AccessKit `Row` reads as `row` and counts as interactive (table rows were missing from `interactive_only`); lines with the same full id merge into one (`merge_shared_ids`) — gpui reports an id-less child under its parent's id and node, so every tab printed twice, once nameless. |
 | `f3abb84a`, `d867c579`, `b2e46ae8`, `2b2dfca3` | Documentation. |
 
 Public API (Elane uses `init_mcp` in `src/services/inspector.rs` and `mcp_set_app_state_provider` in
@@ -136,7 +137,7 @@ Public API (Elane uses `init_mcp` in `src/services/inspector.rs` and `mcp_set_ap
 - `ROLES` maps *file names* to roles: upstream's new widget files (e.g. `diff`, `speech`, syntect
   views, anything moved between `component` and `base`) need entries, and renames silently drop roles.
 - Windows accept path without peer address (`cefb81b2`).
-- Tests: the 51 in `mcp.rs` (`socket_path_contains_app_and_pid`, `held_key_state_changes_show_a_flicker`,
+- Tests: the 56 in `mcp.rs` (`socket_path_contains_app_and_pid`, `held_key_state_changes_show_a_flicker`,
   `the_hash_a_snapshot_prints_is_accepted`, `send_key_and_type_text_activate_a_focused_button`, …).
 
 ---
