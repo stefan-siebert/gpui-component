@@ -832,6 +832,20 @@ where
         changed
     }
 
+    /// Fork: the sideways offset the header and the rows are drawn at, kept
+    /// within what the header's scroll container measured last frame. The
+    /// wheel's mask sets it unclamped and the header clamps only in its own
+    /// prepaint — after the rows have been laid out with it.
+    fn clamp_horizontal_offset(&self) {
+        let max = self.horizontal_scroll_handle.max_offset().x.max(px(0.));
+        let mut offset = self.horizontal_scroll_handle.offset();
+        let clamped = offset.x.clamp(-max, px(0.));
+        if clamped != offset.x {
+            offset.x = clamped;
+            self.horizontal_scroll_handle.set_offset(offset);
+        }
+    }
+
     fn has_auto_width_cols(&self) -> bool {
         self.col_groups.iter().any(|c| c.column.auto_width)
     }
@@ -2413,13 +2427,22 @@ where
             })
             .child(
                 // Columns
-                // overflow_hidden (not overflow_scroll): clips columns that
-                // extend past the container when one is resized wider, and lets
-                // the auto column's first-frame remaining-space fill work.
+                // Fork: a sideways scroller again (47ec024e had made it
+                // `overflow_hidden`, and nothing scrolled since). Its row is
+                // `size_full`, so the auto column still fills the viewport and
+                // only what stays wider than that — the auto column at its
+                // minimum, or a column dragged wider — overflows and scrolls.
+                // The rows follow its offset (`render_table_row`).
                 h_flex()
                     .id("table-head")
                     .size_full()
-                    .overflow_hidden()
+                    .overflow_x_scroll()
+                    .overflow_y_hidden()
+                    // A vertical wheel over the header scrolls the rows, not
+                    // the columns: without this gpui turns it sideways for a
+                    // scroller that cannot move vertically.
+                    .restrict_scroll_to_axis()
+                    .track_scroll(&self.horizontal_scroll_handle)
                     .relative()
                     .bg(cx.theme().table_head)
                     .map(|this| {
@@ -2523,9 +2546,15 @@ where
                             // (`fill_room`).
                             let view = cx.entity();
                             this.child(
+                                // Fork: at least the scroller's width, and as
+                                // wide as the columns when they need more — the
+                                // scroller measures its scroll range from this
+                                // row's bounds, not from what overflows it.
                                 h_flex()
                                     .relative()
-                                    .size_full()
+                                    .h_full()
+                                    .min_w_full()
+                                    .flex_shrink_0()
                                     .children(
                                         self.header_col_spans(left_columns_count..total_cols)
                                             .into_iter()
@@ -2732,96 +2761,122 @@ where
                             .children(self.render_fixed_cols_border(cx)),
                     )
                 })
-                .children({
-                    // Render scrollable columns directly in this h_flex (no
-                    // horizontal virtual_list). This is the jitter fix: it avoids
-                    // the virtual_list's 1-frame column-width lag during resize.
-                    // Auto columns size via their computed width (see
-                    // render_cell_inner), so they stay in sync with the header.
-                    let mut cells = Vec::with_capacity(columns_count - left_columns_count);
+                // Fork: the scrollable columns sit in a clip as wide as the
+                // header's scroller and move with its offset, so header and
+                // rows scroll sideways together (`clamp_horizontal_offset`).
+                .child({
+                    let cells = {
+                        // Render scrollable columns directly in this h_flex (no
+                        // horizontal virtual_list). This is the jitter fix: it avoids
+                        // the virtual_list's 1-frame column-width lag during resize.
+                        // Auto columns size via their computed width (see
+                        // render_cell_inner), so they stay in sync with the header.
+                        let mut cells = Vec::with_capacity(columns_count - left_columns_count);
 
-                    (left_columns_count..columns_count).for_each(|col_ix| {
-                        let is_cell_selected = self.selected_cell() == Some((row_ix, col_ix));
-                        let is_cell_right_clicked =
-                            self.right_clicked_cell == Some((row_ix, col_ix));
-                        let is_auto = self
-                            .col_groups
-                            .get(col_ix)
-                            .map(|c| c.column.auto_width)
-                            .unwrap_or(false);
-                        // The row WRAPPER must flex whenever the inner cell does,
-                        // otherwise the non-flex wrapper content-sizes around the
-                        // flexing cell and the column grows to the widest filename.
-                        // So: flex live when idle (lag-free window/pane resize),
-                        // pin to the computed pixel width only during an active
-                        // column drag (stable drag, no neighbour "mirroring").
-                        let auto_flex =
-                            is_auto && (self.auto_columns_flex() || !self.auto_widths_ready());
-                        let col_min_w = self
-                            .col_groups
-                            .get(col_ix)
-                            .map(|c| c.column.min_width)
-                            .unwrap_or(px(0.));
+                        (left_columns_count..columns_count).for_each(|col_ix| {
+                            let is_cell_selected = self.selected_cell() == Some((row_ix, col_ix));
+                            let is_cell_right_clicked =
+                                self.right_clicked_cell == Some((row_ix, col_ix));
+                            let is_auto = self
+                                .col_groups
+                                .get(col_ix)
+                                .map(|c| c.column.auto_width)
+                                .unwrap_or(false);
+                            // The row WRAPPER must flex whenever the inner cell does,
+                            // otherwise the non-flex wrapper content-sizes around the
+                            // flexing cell and the column grows to the widest filename.
+                            // So: flex live when idle (lag-free window/pane resize),
+                            // pin to the computed pixel width only during an active
+                            // column drag (stable drag, no neighbour "mirroring").
+                            let auto_flex =
+                                is_auto && (self.auto_columns_flex() || !self.auto_widths_ready());
+                            let col_min_w = self
+                                .col_groups
+                                .get(col_ix)
+                                .map(|c| c.column.min_width)
+                                .unwrap_or(px(0.));
 
-                        let el = self
-                            .render_col_wrap(Some(row_ix), col_ix, window, cx)
-                            // Before measurement: fill remaining row space via flex.
-                            .when(auto_flex, |this| {
-                                this.flex_1().min_w(col_min_w).overflow_hidden()
-                            })
-                            .child(
-                                self.render_cell_flex(col_ix)
-                                    .id(format!("table-cell-{}:{}", row_ix, col_ix))
-                                    .relative()
-                                    .child(self.measure_render_td(row_ix, col_ix, window, cx))
-                                    .when(is_cell_selected, |this| {
-                                        this.child(
-                                            div()
-                                                .absolute()
-                                                .inset_0()
-                                                .bg(cx.theme().table_active)
-                                                .border_1()
-                                                .border_color(cx.theme().table_active_border),
-                                        )
-                                    })
-                                    .when(is_cell_right_clicked && !is_cell_selected, |this| {
-                                        this.child(
-                                            div().absolute().inset_0().border_1().border_color(
-                                                cx.theme().table_active_border.opacity(0.5),
-                                            ),
-                                        )
-                                    })
-                                    .when(self.cell_selectable, |this| {
-                                        this.on_click(cx.listener(move |table, e, window, cx| {
-                                            cx.stop_propagation();
-                                            table.on_cell_click(e, row_ix, col_ix, window, cx);
-                                        }))
-                                        .on_mouse_down(
-                                            MouseButton::Right,
-                                            cx.listener(move |table, e, window, cx| {
-                                                table.on_cell_right_click(
-                                                    e, row_ix, col_ix, window, cx,
-                                                );
-                                            }),
-                                        )
-                                    }),
-                            );
+                            let el = self
+                                .render_col_wrap(Some(row_ix), col_ix, window, cx)
+                                // Before measurement: fill remaining row space via flex.
+                                .when(auto_flex, |this| {
+                                    this.flex_1().min_w(col_min_w).overflow_hidden()
+                                })
+                                .child(
+                                    self.render_cell_flex(col_ix)
+                                        .id(format!("table-cell-{}:{}", row_ix, col_ix))
+                                        .relative()
+                                        .child(self.measure_render_td(row_ix, col_ix, window, cx))
+                                        .when(is_cell_selected, |this| {
+                                            this.child(
+                                                div()
+                                                    .absolute()
+                                                    .inset_0()
+                                                    .bg(cx.theme().table_active)
+                                                    .border_1()
+                                                    .border_color(cx.theme().table_active_border),
+                                            )
+                                        })
+                                        .when(is_cell_right_clicked && !is_cell_selected, |this| {
+                                            this.child(
+                                                div().absolute().inset_0().border_1().border_color(
+                                                    cx.theme().table_active_border.opacity(0.5),
+                                                ),
+                                            )
+                                        })
+                                        .when(self.cell_selectable, |this| {
+                                            this.on_click(cx.listener(
+                                                move |table, e, window, cx| {
+                                                    cx.stop_propagation();
+                                                    table.on_cell_click(
+                                                        e, row_ix, col_ix, window, cx,
+                                                    );
+                                                },
+                                            ))
+                                            .on_mouse_down(
+                                                MouseButton::Right,
+                                                cx.listener(move |table, e, window, cx| {
+                                                    table.on_cell_right_click(
+                                                        e, row_ix, col_ix, window, cx,
+                                                    );
+                                                }),
+                                            )
+                                        }),
+                                );
 
-                        cells.push(el);
-                    });
+                            cells.push(el);
+                        });
 
-                    cells
-                })
-                // Fork: the header's trailing empty column and slack, so that
-                // an auto column flexes to the header's width in the rows too.
-                .when(self.keeps_fill_slack(), |this| {
-                    this.child(
-                        div()
-                            .h_full()
-                            .flex_shrink_0()
-                            .w(self.last_empty_col_width)
-                            .ml(self.trailing_margin()),
-                    )
+                        cells
+                    };
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .overflow_hidden()
+                        .child(
+                            // As wide as the clip, never as its content: a
+                            // long name in the auto column would widen the row
+                            // and the column with it. What does not fit
+                            // overflows to the right and is scrolled to.
+                            h_flex()
+                                .w_full()
+                                .h_full()
+                                .ml(self.horizontal_scroll_handle.offset().x)
+                                .children(cells)
+                                // Fork: the header's trailing empty column and
+                                // slack, so that an auto column flexes to the
+                                // header's width in the rows too.
+                                .when(self.keeps_fill_slack(), |this| {
+                                    this.child(
+                                        div()
+                                            .h_full()
+                                            .flex_shrink_0()
+                                            .w(self.last_empty_col_width)
+                                            .ml(self.trailing_margin()),
+                                    )
+                                }),
+                        )
                 })
                 // Row selected / right-clicked style.
                 //
@@ -3038,6 +3093,7 @@ where
         if self.update_auto_widths() {
             self.update_header_layout(cx);
         }
+        self.clamp_horizontal_offset();
 
         let columns_count = self.delegate.columns_count(cx);
         let left_columns_count = self
@@ -3498,14 +3554,18 @@ mod tests {
             _: &mut Context<TableState<Self>>,
         ) -> impl IntoElement {
             let cells = self.cells.clone();
-            div()
-                .size_full()
-                .child(row.to_string())
-                .when(row == 0, |this| {
-                    this.on_prepaint(move |bounds, _, _| {
-                        cells.borrow_mut().insert(col_ix, bounds);
-                    })
+            // The measured row's name is far wider than its column, as a
+            // long file name is: it must not widen the column.
+            let text = if row == 0 && col_ix == 1 {
+                "a file name much wider than its column ".repeat(8)
+            } else {
+                row.to_string()
+            };
+            div().size_full().child(text).when(row == 0, |this| {
+                this.on_prepaint(move |bounds, _, _| {
+                    cells.borrow_mut().insert(col_ix, bounds);
                 })
+            })
         }
     }
 
@@ -3741,6 +3801,56 @@ mod tests {
         // A drag after the resize still starts where the edges are shown.
         let ((moved, first), _, _) = drag_edge(&state, &cells, 3, 12., cx);
         assert_pushed(&before, &first, 3, moved);
+    }
+
+    /// Columns that no longer fit once the fill column is at its minimum
+    /// can be scrolled to: a sideways wheel moves header and rows together
+    /// until the last column's right edge is in view, and no further.
+    #[gpui::test]
+    fn columns_past_the_fill_minimum_scroll_into_view(cx: &mut TestAppContext) {
+        let (view, state, cells, cx) = fill_table(cx, false);
+        view.update(cx, |view, cx| {
+            view.width = px(300.);
+            cx.notify();
+        });
+        draw(cx);
+        let before = edges(&cells);
+        assert!(before[5] > px(300.), "the last column starts out of view");
+        // A mouse wheel over the header leaves the columns where they are.
+        let header = state.read_with(cx, |state, _| state.col_groups[1].bounds.center());
+        cx.simulate_event(gpui::ScrollEvent {
+            position: header,
+            delta: gpui::ScrollDelta::Lines(gpui::point(0., -3.)),
+            ..Default::default()
+        });
+        draw(cx);
+        assert_eq!(edges(&cells), before);
+        let wheel = |cx: &mut gpui::VisualTestContext, dx: f32| {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: gpui::point(px(150.), px(100.)),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(dx), px(0.))),
+                ..Default::default()
+            });
+            draw(cx);
+        };
+        wheel(cx, -100.);
+        let after = edges(&cells);
+        assert!(
+            (before[5] - after[5] - px(100.)).abs() < px(0.5),
+            "scrolled by 100: {:?} -> {:?}",
+            before[5],
+            after[5]
+        );
+        assert_rows_follow_header(&state, &cells, cx);
+        wheel(cx, -10000.);
+        let end = edges(&cells);
+        let table_right = state.read_with(cx, |state, _| state.bounds.right());
+        assert!(
+            end[5] <= table_right && end[5] > table_right - px(40.),
+            "the last column ends in view: {:?}, table ends at {table_right:?}",
+            end[5]
+        );
+        assert_rows_follow_header(&state, &cells, cx);
     }
 
     /// A double-click on the fill column's edge closes the gap that shrinking
