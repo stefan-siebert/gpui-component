@@ -19,7 +19,22 @@ use gpui::{
 };
 use rust_i18n::t;
 
-const STACKED_LAYOUT_MAX_WIDTH: Pixels = px(480.);
+/// Fork: the content pane stacks its items (label above control) at or
+/// below this width, in rems. Upstream compared against a fixed 480 px, so a
+/// smaller font, whose host window shrinks with it, crossed the line and a
+/// larger one never did: at a 8 px font Elane's 540 px settings window
+/// showed every control under its label. 30 rem is 480 px at the 16 px
+/// default.
+const STACKED_LAYOUT_MAX_WIDTH_REMS: f32 = 30.;
+
+/// The item layout for a content pane `width` wide at `rem_size`.
+fn content_layout(width: Pixels, rem_size: Pixels) -> Axis {
+    if width <= rem_size * STACKED_LAYOUT_MAX_WIDTH_REMS {
+        Axis::Vertical
+    } else {
+        Axis::Horizontal
+    }
+}
 
 /// Key context of the navigation list, active while an entry has focus.
 const NAV_CONTEXT: &str = "SettingsNav";
@@ -892,13 +907,8 @@ impl RenderOnce for Settings {
                             .track_focus(&content_focus.tab_index(0).tab_stop(false))
                             .size_full()
                             .child(container_query(move |size, window, cx| {
-                                let options = options.with_layout(
-                                    if size.width <= STACKED_LAYOUT_MAX_WIDTH {
-                                        Axis::Vertical
-                                    } else {
-                                        Axis::Horizontal
-                                    },
-                                );
+                                let options = options
+                                    .with_layout(content_layout(size.width, window.rem_size()));
                                 self.render_active_page(&state, &filter, &options, window, cx)
                             })),
                     ),
@@ -909,6 +919,23 @@ impl RenderOnce for Settings {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn the_stacked_layout_follows_the_font_not_the_pixels() {
+        // Upstream's line, at the default font.
+        assert_eq!(content_layout(px(480.), px(16.)), Axis::Vertical);
+        assert_eq!(content_layout(px(481.), px(16.)), Axis::Horizontal);
+        // Elane at font 8: a 540 px window leaves ~415 px of content,
+        // the same proportion as 830 px at 16 — side by side.
+        assert_eq!(content_layout(px(415.), px(8.)), Axis::Horizontal);
+        // At font 28 the same 830 px content is too narrow for two columns.
+        assert_eq!(content_layout(px(830.), px(28.)), Axis::Vertical);
+    }
+}
 
 #[cfg(test)]
 mod nav_tests {
