@@ -13,114 +13,133 @@ Attachment:
 Calendar:
   week.0:
     en: Su
+    de: So
     zh-CN: 日
     zh-HK: 日
     zh-TW: 日
     it: Do
   week.1:
     en: Mo
+    de: Mo
     zh-CN: 一
     zh-HK: 一
     zh-TW: 一
     it: Lu
   week.2:
     en: Tu
+    de: Di
     zh-CN: 二
     zh-HK: 二
     zh-TW: 二
     it: Ma
   week.3:
     en: We
+    de: Mi
     zh-CN: 三
     zh-HK: 三
     zh-TW: 三
     it: Me
   week.4:
     en: Th
+    de: Do
     zh-CN: 四
     zh-HK: 四
     zh-TW: 四
     it: Gi
   week.5:
     en: Fr
+    de: Fr
     zh-CN: 五
     zh-HK: 五
     zh-TW: 五
     it: Ve
   week.6:
     en: Sa
+    de: Sa
     zh-CN: 六
     zh-HK: 六
     zh-TW: 六
     it: Sa
   month.January:
     en: January
+    de: Januar
     zh-CN: 一月
     zh-HK: 一月
     zh-TW: 一月
     it: Gennaio
   month.February:
     en: February
+    de: Februar
     zh-CN: 二月
     zh-HK: 二月
     zh-TW: 二月
     it: Febbraio
   month.March:
     en: March
+    de: März
     zh-CN: 三月
     zh-HK: 三月
     zh-TW: 三月
     it: Marzo
   month.April:
     en: April
+    de: April
     zh-CN: 四月
     zh-HK: 四月
     zh-TW: 四月
     it: Aprile
   month.May:
     en: May
+    de: Mai
     zh-CN: 五月
     zh-HK: 五月
     zh-TW: 五月
     it: Maggio
   month.June:
     en: June
+    de: Juni
     zh-CN: 六月
     zh-HK: 六月
     zh-TW: 六月
     it: Giugno
   month.July:
     en: July
+    de: Juli
     zh-CN: 七月
     zh-HK: 七月
     zh-TW: 七月
     it: Luglio
   month.August:
     en: August
+    de: August
     zh-CN: 八月
     zh-HK: 八月
     zh-TW: 八月
     it: Agosto
   month.September:
     en: September
+    de: September
     zh-CN: 九月
     zh-HK: 九月
     zh-TW: 九月
     it: Settembre
   month.October:
     en: October
+    de: Oktober
     zh-CN: 十月
     zh-HK: 十月
     zh-TW: 十月
     it: Ottobre
   month.November:
     en: November
+    de: November
     zh-CN: 十一月
     zh-HK: 十一月
     zh-TW: 十一月
     it: Novembre
   month.December:
     en: December
+    de: Dezember
     zh-CN: 十二月
     zh-HK: 十二月
     zh-TW: 十二月
@@ -128,12 +147,14 @@ Calendar:
 DatePicker:
   placeholder:
     en: "Select date"
+    de: "Datum auswählen"
     zh-CN: 选择日期
     zh-HK: 選擇日期
     zh-TW: 選取日期
     it: "Seleziona data"
   time:
     en: Time
+    de: Uhrzeit
     zh-CN: 时间
     zh-HK: 時間
 Select:
