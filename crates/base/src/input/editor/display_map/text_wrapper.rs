@@ -27,6 +27,10 @@ pub enum WrappingIndent {
     Same,
 }
 
+/// Text measured into one layout cache before the wrapper starts a fresh one
+/// (see [`TextWrapper::update`]).
+const MEASURE_CACHE_BYTES: usize = 256 * 1024;
+
 /// Choose Unicode line-break opportunities using the same shaped widths as
 /// painting. Oversized words fall back to complete graphemes, never UTF-8 bytes.
 fn measured_wrap_boundaries(
@@ -55,32 +59,63 @@ fn measured_wrap_boundaries(
     let mut result = Vec::new();
     let mut first = 0;
     let mut start = 0;
+    // Graphemes the previous row took. Rows of one line are mostly alike, so
+    // the search starts there: a monospaced row then costs two measurements
+    // (this many fit, one more does not) instead of a probe series from one
+    // grapheme up — for a 10 MiB line that is the difference between shaping
+    // the text twice and shaping it some twenty times over.
+    let mut previous_fit = 0;
     while first < ends.len() {
         let available = if start == 0 {
             width
         } else {
             width - indent_width
         };
-        // Find the fitting prefix locally. Exponential probing avoids shaping
-        // the entire remaining logical line for every visual row of a long paste.
         let remaining = ends.len() - first;
-        let mut low = 0;
-        let mut high = 1;
-        while measure(&text[start..ends[first + high - 1]]) <= available {
-            low = high;
-            if high == remaining {
-                break;
+        let mut fits = |count: usize| measure(&text[start..ends[first + count - 1]]) <= available;
+        // Find the fitting prefix locally: gallop away from the guess until
+        // the answer is bracketed (`low` fits, `high` does not or is past the
+        // end), then bisect. Never shapes the whole remaining line.
+        let guess = previous_fit.clamp(1, remaining);
+        let mut low;
+        let mut high;
+        if fits(guess) {
+            low = guess;
+            high = remaining + 1;
+            let mut step = 1;
+            while low < remaining {
+                let probe = (low + step).min(remaining);
+                if fits(probe) {
+                    low = probe;
+                    step *= 2;
+                } else {
+                    high = probe;
+                    break;
+                }
             }
-            high = (high * 2).min(remaining);
+        } else {
+            low = 0;
+            high = guess;
+            let mut step = 1;
+            while high > 1 {
+                let probe = high.saturating_sub(step).max(1);
+                if fits(probe) {
+                    low = probe;
+                    break;
+                }
+                high = probe;
+                step *= 2;
+            }
         }
         while low + 1 < high {
             let mid = (low + high) / 2;
-            if measure(&text[start..ends[first + mid - 1]]) <= available {
+            if fits(mid) {
                 low = mid;
             } else {
                 high = mid;
             }
         }
+        previous_fit = low;
         // An indivisible grapheme wider than the viewport still consumes a row.
         let fitting_end = ends[first + low.max(1) - 1];
         if fitting_end == text.len() {
@@ -373,7 +408,9 @@ impl TextWrapper {
             .text_system()
             .line_wrapper(self.font.clone(), self.font_size);
         let metrics = self.inline_metrics.clone();
-        let text_system = gpui::WindowTextSystem::new(cx.text_system().clone());
+        let shared_text_system = cx.text_system().clone();
+        let mut text_system = gpui::WindowTextSystem::new(shared_text_system.clone());
+        let mut cached_bytes = 0;
         let font = self.font.clone();
         let font_size = self.font_size;
         let wrapping_indent = self.wrapping_indent;
@@ -410,6 +447,17 @@ impl TextWrapper {
                         wrap_width,
                         wrapping_indent,
                         |text| {
+                            // Every measured layout stays in the text system's
+                            // frame cache until it is dropped. Wrapping a
+                            // 10 MiB line measured gigabytes into it (10 GB
+                            // footprint, 2026-11-04), so start a fresh cache
+                            // once it holds `MEASURE_CACHE_BYTES` of text.
+                            cached_bytes += text.len();
+                            if cached_bytes > MEASURE_CACHE_BYTES {
+                                text_system =
+                                    gpui::WindowTextSystem::new(shared_text_system.clone());
+                                cached_bytes = text.len();
+                            }
                             text_system
                                 .layout_line(
                                     text,
@@ -1227,6 +1275,57 @@ mod tests {
             assert_eq!(cursor.row, usize::from(value.ends_with('s')));
             previous = text;
         }
+    }
+
+    /// A long line is measured about twice per row, not from one grapheme
+    /// up for every row — the cost that made wrapping a 10 MiB line in the
+    /// editor run for minutes.
+    #[test]
+    fn measured_wrap_of_a_long_line_measures_each_row_about_twice() {
+        let text = "abcdefghij".repeat(10_000);
+        let mut measured = 0;
+        let boundaries = measured_wrap_boundaries(&text, px(37.), WrappingIndent::None, |s| {
+            measured += 1;
+            px(s.len() as f32)
+        });
+        let rows = text.len().div_ceil(37);
+        assert_eq!(boundaries.len(), rows - 1);
+        assert!(
+            boundaries
+                .iter()
+                .enumerate()
+                .all(|(row, b)| b.ix == (row + 1) * 37)
+        );
+        assert!(
+            measured <= 3 * rows,
+            "{measured} measurements for {rows} rows"
+        );
+    }
+
+    /// Starting each row's search from the previous row's count still finds
+    /// the longest prefix that fits, when rows of one line differ in length.
+    #[test]
+    fn measured_wrap_fills_rows_of_uneven_widths() {
+        // No break opportunities between letters; capitals are twice as wide.
+        let text: String = (0..3_000)
+            .map(|i| if i % 7 < 3 { 'W' } else { 'i' })
+            .chain((0..500).map(|_| 'W'))
+            .chain((0..500).map(|_| 'i'))
+            .collect();
+        let measure = |s: &str| {
+            px(s.chars()
+                .map(|c| if c.is_uppercase() { 2. } else { 1. })
+                .sum())
+        };
+        let width = px(23.);
+        let boundaries = measured_wrap_boundaries(&text, width, WrappingIndent::None, measure);
+        let mut start = 0;
+        for boundary in &boundaries {
+            assert!(measure(&text[start..boundary.ix]) <= width);
+            assert!(measure(&text[start..boundary.ix + 1]) > width);
+            start = boundary.ix;
+        }
+        assert!(measure(&text[start..]) <= width);
     }
 
     #[test]

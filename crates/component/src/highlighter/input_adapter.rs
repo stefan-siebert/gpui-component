@@ -15,9 +15,9 @@ use gpui_base::input::{
     InputHighlighterFactory,
 };
 use ropey::Rope;
-use tree_sitter::{InputEdit, ParseOptions, Point};
+use tree_sitter::{InputEdit, Point};
 
-use super::{LanguageRegistry, SyntaxHighlighter, highlighter::parse_input_bytes};
+use super::{LanguageRegistry, SyntaxHighlighter};
 
 pub(crate) fn input_highlighter_factory() -> InputHighlighterFactory {
     Rc::new(|language| {
@@ -45,11 +45,10 @@ impl TreeSitterInputHighlighter {
     }
 
     /// Settle after the edits reached the tree: drop a pending background
-    /// parse when the synchronous one `completed`, or schedule one for `text`.
+    /// parse when the synchronous one `completed`, or schedule one for the text it now holds.
     fn finish_update(
         &mut self,
         completed: bool,
-        text: &Rope,
         folding: bool,
         window: &mut gpui::Window,
         cx: &mut gpui::Context<EditorState>,
@@ -61,11 +60,10 @@ impl TreeSitterInputHighlighter {
 
         let highlighter = self.inner.clone();
         let parse_task = self.parse_task.clone();
-        let language = highlighter.borrow().language().clone();
-        let old_tree = highlighter.borrow().tree().cloned();
-        let injection_data = highlighter.borrow().injection_parse_data();
-        let text = text.clone();
-        let text_for_apply = text.clone();
+        let Some(pending) = highlighter.borrow().pending_parse() else {
+            parse_task.borrow_mut().take();
+            return;
+        };
         let cancel = Arc::new(AtomicBool::new(false));
 
         let task = cx.spawn_in(window, async move |entity, cx| {
@@ -78,45 +76,21 @@ impl TreeSitterInputHighlighter {
             let _cancel_guard = CancelOnDrop(cancel.clone());
             cx.background_executor().timer(PARSE_DEBOUNCE).await;
 
-            let parse_cancel = cancel.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let (mut parser, grammar) =
-                        LanguageRegistry::singleton().parser(&language).ok()?;
-                    parser.set_language(&grammar).ok()?;
-                    let mut progress = |_: &tree_sitter::ParseState| {
-                        if parse_cancel.load(Ordering::Relaxed) {
-                            std::ops::ControlFlow::Break(())
-                        } else {
-                            std::ops::ControlFlow::Continue(())
-                        }
-                    };
-                    let options = ParseOptions::new().progress_callback(&mut progress);
-                    let tree = parser.parse_with_options(
-                        &mut |offset, _| parse_input_bytes(&text, offset),
-                        old_tree.as_ref(),
-                        Some(options),
-                    )?;
-                    if parse_cancel.load(Ordering::Relaxed) {
-                        return None;
-                    }
-                    let injections = injection_data.map_or_else(Default::default, |data| {
-                        SyntaxHighlighter::compute_injection_layers(data, &tree, &text)
-                    });
+                    let parsed = pending.run(&cancel)?;
                     let folds = if folding {
-                        extract_fold_ranges(&tree)
+                        extract_fold_ranges(parsed.tree())
                     } else {
                         Vec::new()
                     };
-                    Some((tree, injections, folds))
+                    Some((parsed, folds))
                 })
                 .await;
 
-            if let Some((tree, injections, folds)) = result {
-                highlighter
-                    .borrow_mut()
-                    .apply_background_tree(tree, &text_for_apply, injections);
+            if let Some((parsed, folds)) = result {
+                highlighter.borrow_mut().apply_parse(parsed);
                 let _ = entity.update(cx, |state, cx| {
                     state.apply_highlighter_fold_candidates(folds, cx);
                 });
@@ -160,7 +134,7 @@ impl InputHighlighter for TreeSitterInputHighlighter {
                 highlighter.update(edit, text, Some(SYNC_PARSE_TIMEOUT))
             }
         };
-        self.finish_update(completed, text, folding, window, cx);
+        self.finish_update(completed, folding, window, cx);
     }
 
     fn update_batch(
@@ -188,7 +162,7 @@ impl InputHighlighter for TreeSitterInputHighlighter {
                 highlighter.update_edits(&edits, text, Some(SYNC_PARSE_TIMEOUT))
             }
         };
-        self.finish_update(completed, text, folding, window, cx);
+        self.finish_update(completed, folding, window, cx);
     }
 
     fn styles(

@@ -7,6 +7,7 @@ use gpui::{HighlightStyle, SharedString};
 use gpui_base::input::RopeExt as _;
 use ropey::{ChunkCursor, Rope};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -372,6 +373,65 @@ impl<'a> sum_tree::Dimension<'a, HighlightSummary> for Range<usize> {
     fn add_summary(&mut self, summary: &'a HighlightSummary, _: &()) {
         self.start = summary.start;
         self.end = summary.end;
+    }
+}
+
+/// A parse taken from [`SyntaxHighlighter::pending_parse`]. It owns
+/// everything it needs, so it can run on any thread.
+pub struct PendingParse {
+    language: SharedString,
+    old_tree: Option<Tree>,
+    injection_data: Option<InjectionParseData>,
+    text: Rope,
+}
+
+impl PendingParse {
+    /// Parse the text, injections included. Returns `None` when `cancel` was
+    /// set meanwhile — it is checked while tree-sitter works, so a large
+    /// parse stops soon after — or when the grammar cannot be loaded.
+    pub fn run(self, cancel: &AtomicBool) -> Option<FinishedParse> {
+        let (mut parser, grammar) = LanguageRegistry::singleton().parser(&self.language).ok()?;
+        parser.set_language(&grammar).ok()?;
+        let mut progress = |_: &tree_sitter::ParseState| {
+            if cancel.load(Ordering::Relaxed) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        };
+        let options = ParseOptions::new().progress_callback(&mut progress);
+        let text = &self.text;
+        let tree = parser.parse_with_options(
+            &mut |offset, _| parse_input_bytes(text, offset),
+            self.old_tree.as_ref(),
+            Some(options),
+        )?;
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let injection_layers = self.injection_data.map_or_else(Vec::new, |data| {
+            SyntaxHighlighter::compute_injection_layers(data, &tree, &self.text)
+        });
+        Some(FinishedParse {
+            tree,
+            injection_layers,
+            text: self.text,
+        })
+    }
+}
+
+/// The result of [`PendingParse::run`], for [`SyntaxHighlighter::apply_parse`].
+pub struct FinishedParse {
+    tree: Tree,
+    injection_layers: Vec<InjectionLayer>,
+    text: Rope,
+}
+
+impl FinishedParse {
+    /// The parsed syntax tree, for work that should stay off the UI thread
+    /// too (folding ranges, say).
+    pub fn tree(&self) -> &Tree {
+        &self.tree
     }
 }
 
@@ -984,23 +1044,32 @@ impl SyntaxHighlighter {
         })
     }
 
-    /// Apply a tree that was parsed on a background thread.
+    /// The parse of the current text, to run on another thread: what
+    /// [`Self::update`] does, without blocking the caller. Take the text first
+    /// with [`Self::edit_tree`] (or an `update` that ran out of time), run the
+    /// returned parse anywhere, and hand its result to [`Self::apply_parse`].
     ///
-    /// `injection_layers` must also be pre-computed in the background via
-    /// [`compute_injection_layers`] to avoid blocking the main thread.
-    pub(crate) fn apply_background_tree(
-        &mut self,
-        tree: Tree,
-        text: &Rope,
-        injection_layers: Vec<InjectionLayer>,
-    ) {
-        // Only apply if the text still matches what was parsed.
-        if !self.text.eq(text) {
-            return;
+    /// `None` when the language has no grammar — there is nothing to parse.
+    pub fn pending_parse(&self) -> Option<PendingParse> {
+        self.parser.language()?;
+        Some(PendingParse {
+            language: self.language.clone(),
+            old_tree: self.tree.clone(),
+            injection_data: self.injection_parse_data(),
+            text: self.text.clone(),
+        })
+    }
+
+    /// Take a parse that [`PendingParse::run`] finished. Returns `false`, and
+    /// changes nothing, when the text has moved on since [`Self::pending_parse`].
+    pub fn apply_parse(&mut self, parse: FinishedParse) -> bool {
+        if !self.text.eq(&parse.text) {
+            return false;
         }
 
-        self.tree = Some(tree);
-        self.injection_layers = injection_layers;
+        self.tree = Some(parse.tree);
+        self.injection_layers = parse.injection_layers;
+        true
     }
 
     /// Parse injection layers after the main tree is updated.
@@ -1471,6 +1540,58 @@ mod tests {
                 "style range {range:?} is not on char boundaries of the current text"
             );
         }
+    }
+
+    /// A parse run through `pending_parse` → `run` → `apply_parse` colours
+    /// the text exactly as a synchronous `update` does.
+    #[cfg(feature = "tree-sitter-languages")]
+    #[test]
+    fn test_pending_parse_matches_update() {
+        let rope = Rope::from("fn main() {\n    let s = \"你好\";\n}\n");
+        let theme = HighlightTheme::default_dark();
+
+        let mut synchronous = SyntaxHighlighter::new("rust");
+        assert!(synchronous.update(None, &rope, None));
+
+        let mut background = SyntaxHighlighter::new("rust");
+        background.edit_tree(None, &rope);
+        assert!(background.tree().is_none());
+        let pending = background.pending_parse().expect("rust has a grammar");
+        let parsed = std::thread::spawn(move || pending.run(&AtomicBool::new(false)))
+            .join()
+            .expect("the parse thread does not panic")
+            .expect("an uncancelled parse finishes");
+        assert!(background.apply_parse(parsed));
+
+        let range = 0..rope.len();
+        assert_eq!(
+            background.styles(&range, theme.as_ref()),
+            synchronous.styles(&range, theme.as_ref())
+        );
+    }
+
+    /// A cancelled parse yields nothing, and a parse of text that has since
+    /// been replaced is refused instead of colouring the new text.
+    #[cfg(feature = "tree-sitter-languages")]
+    #[test]
+    fn test_pending_parse_cancelled_or_stale() {
+        let old = Rope::from("fn a() {}\n");
+        let mut highlighter = SyntaxHighlighter::new("rust");
+        highlighter.edit_tree(None, &old);
+
+        let pending = highlighter.pending_parse().expect("rust has a grammar");
+        assert!(pending.run(&AtomicBool::new(true)).is_none());
+
+        let pending = highlighter.pending_parse().expect("rust has a grammar");
+        let parsed = pending
+            .run(&AtomicBool::new(false))
+            .expect("an uncancelled parse finishes");
+        highlighter.edit_tree(None, &Rope::from("fn b() {}\n"));
+        assert!(!highlighter.apply_parse(parsed));
+        assert!(highlighter.tree().is_none());
+
+        // No grammar, nothing to parse.
+        assert!(SyntaxHighlighter::new("text").pending_parse().is_none());
     }
 
     #[cfg(feature = "tree-sitter-languages")]
