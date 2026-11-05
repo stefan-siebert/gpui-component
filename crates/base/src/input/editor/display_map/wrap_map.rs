@@ -163,9 +163,12 @@ impl WrapMap {
 
     /// Calculate how many wrap rows of a buffer line are visible (not folded)
     pub(super) fn visible_wrap_row_count_for_line(&self, line: usize, fold_map: &FoldMap) -> usize {
+        // A fold hides whole buffer lines: the first row stands for all of them.
         let wrap_range = self.buffer_line_to_wrap_row_range(line);
-        wrap_range
-            .filter(|&wr| fold_map.wrap_row_to_display_row(wr).is_some())
-            .count()
+        if fold_map.wrap_row_to_display_row(wrap_range.start).is_some() {
+            wrap_range.len()
+        } else {
+            0
+        }
     }
 }

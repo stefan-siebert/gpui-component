@@ -700,9 +700,14 @@ impl TextWrapper {
         };
 
         let local_offset = offset.saturating_sub(start);
-        for (ix, range) in line.wrapped_lines.iter().enumerate() {
-            // With affinity the boundary offset closes the current row instead of opening the
-            // next one, so the range is matched inclusively.
+        // The rows are consecutive, so the first one that ends after the offset holds it —
+        // a search, not a walk: a long line has a great many rows. With affinity the boundary
+        // offset closes the current row instead of opening the next one, so a row ending at
+        // the offset holds it too.
+        let ix = line.wrapped_lines.partition_point(|range| {
+            range.end < local_offset || (!line_end_affinity && range.end == local_offset)
+        });
+        if let Some(range) = line.wrapped_lines.get(ix) {
             let matches =
                 range.contains(&local_offset) || (line_end_affinity && local_offset == range.end);
             if matches {
@@ -781,18 +786,31 @@ impl WrapDisplayPoint {
     }
 }
 
-/// The layout info of a line with soft wrapped lines.
+/// The layout of one buffer line: its soft wrapped rows, or the window of them that was shaped.
+///
+/// A long line wraps into many rows, and shaping all of them every frame costs the whole line
+/// however little of it is on screen. So a layout may hold only a window of consecutive rows,
+/// `first_row..first_row + wrapped_lines.len()`, starting at byte `start` of the line, while it
+/// still knows the length and the row count of the whole line. Positions stay relative to the
+/// top of the whole line, as if every row were there; an offset in a row outside the window has
+/// no position.
 pub(crate) struct LineLayout {
     /// Total bytes length of this line.
     len: usize,
-    /// The soft wrapped lines of this line (Include the first line).
+    /// How many soft wrapped rows the whole line has.
+    row_count: usize,
+    /// The row of the line that `wrapped_lines[0]` is.
+    first_row: usize,
+    /// The byte of the line that `wrapped_lines[0]` starts at.
+    start: usize,
+    /// The shaped soft wrapped rows: rows `first_row..` of this line.
     pub(crate) wrapped_lines: SmallVec<[InputLine; 1]>,
     /// Extra left offset applied to continuation wrapped lines, used to reserve the first line's
     /// indentation when [`WrappingIndent::Same`] is used.
     pub(crate) wrap_indent: Pixels,
     pub(crate) longest_width: Pixels,
     pub(crate) whitespace_indicators: Option<WhitespaceIndicators>,
-    /// Whitespace indicators: (line_index, x_position, is_tab)
+    /// Whitespace indicators: (index into `wrapped_lines`, x_position, is_tab)
     pub(crate) whitespace_chars: Vec<(usize, Pixels, bool)>,
     /// Whether any run of this line carries a background color, so [`Self::paint_background`]
     /// can skip the glyph walk for the common case of a line without highlights.
@@ -803,6 +821,9 @@ impl LineLayout {
     pub(crate) fn new() -> Self {
         Self {
             len: 0,
+            row_count: 0,
+            first_row: 0,
+            start: 0,
             longest_width: px(0.),
             wrapped_lines: SmallVec::new(),
             wrap_indent: px(0.),
@@ -824,15 +845,11 @@ impl LineLayout {
         self
     }
 
-    /// The pixel indent applied to the given visual line, relative to the line's
-    /// leading text. Only continuation lines (index > 0) are indented.
+    /// The pixel indent applied to the given row of the line, relative to the line's
+    /// leading text. Only continuation rows (row > 0) are indented.
     #[inline]
-    fn line_indent(&self, line_index: usize) -> Pixels {
-        if line_index == 0 {
-            px(0.)
-        } else {
-            self.wrap_indent
-        }
+    fn line_indent(&self, row: usize) -> Pixels {
+        if row == 0 { px(0.) } else { self.wrap_indent }
     }
 
     pub(crate) fn lines(mut self, wrapped_lines: SmallVec<[ShapedLine; 1]>) -> Self {
@@ -840,6 +857,7 @@ impl LineLayout {
         self
     }
 
+    /// Set the rows of the whole line.
     pub(crate) fn set_wrapped_lines(&mut self, wrapped_lines: SmallVec<[ShapedLine; 1]>) {
         self.len = wrapped_lines.iter().map(|l| l.len).sum();
         let width = wrapped_lines
@@ -849,6 +867,9 @@ impl LineLayout {
             .unwrap_or_default();
         self.longest_width = width;
         self.wrapped_lines = wrapped_lines.into_iter().map(InputLine::from).collect();
+        self.row_count = self.wrapped_lines.len();
+        self.first_row = 0;
+        self.start = 0;
     }
 
     pub(crate) fn inline_lines(mut self, lines: SmallVec<[InputLine; 1]>) -> Self {
@@ -859,6 +880,28 @@ impl LineLayout {
             .max()
             .unwrap_or_default();
         self.wrapped_lines = lines;
+        self.row_count = self.wrapped_lines.len();
+        self.first_row = 0;
+        self.start = 0;
+        self
+    }
+
+    /// Mark the rows set by [`Self::lines`] as a window of a longer line: rows
+    /// `first_row..` of a line of `row_count` rows and `len` bytes, starting at its byte
+    /// `start`.
+    pub(crate) fn window(
+        mut self,
+        first_row: usize,
+        start: usize,
+        row_count: usize,
+        len: usize,
+    ) -> Self {
+        debug_assert!(first_row + self.wrapped_lines.len() <= row_count);
+        debug_assert!(start + self.end() - self.start <= len);
+        self.first_row = first_row;
+        self.start = start;
+        self.row_count = row_count;
+        self.len = len;
         self
     }
 
@@ -890,9 +933,51 @@ impl LineLayout {
         self
     }
 
+    /// The byte length of the whole line.
     #[inline]
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+
+    /// How many soft wrapped rows the whole line has, shaped or not.
+    #[inline]
+    pub(crate) fn row_count(&self) -> usize {
+        self.row_count
+    }
+
+    /// The byte of the line the shaped rows start at.
+    #[inline]
+    pub(crate) fn start(&self) -> usize {
+        self.start
+    }
+
+    /// The byte of the line the shaped rows end at.
+    pub(crate) fn end(&self) -> usize {
+        self.start
+            + self
+                .wrapped_lines
+                .iter()
+                .map(|line| line.len)
+                .sum::<usize>()
+    }
+
+    /// Each shaped row, with its row in the whole line and the byte of the line it starts at.
+    pub(crate) fn rows(&self) -> impl Iterator<Item = (usize, usize, &InputLine)> {
+        let mut start = self.start;
+        self.wrapped_lines
+            .iter()
+            .enumerate()
+            .map(move |(index, line)| {
+                let row_start = start;
+                start += line.len;
+                (self.first_row + index, row_start, line)
+            })
+    }
+
+    /// Whether `row` is the last row of the whole line.
+    #[inline]
+    pub(crate) fn is_last_row(&self, row: usize) -> bool {
+        row + 1 == self.row_count
     }
 
     /// Get the position (x, y) for the given index in this line layout.
@@ -901,19 +986,23 @@ impl LineLayout {
     /// - When `line_end_affinity` is true, an offset at a soft wrap boundary is placed at
     ///   the end of the current visual line rather than the start of the next one.
     /// - The return value is relative to the top-left corner of this line layout, start from (0, 0)
+    /// - An offset in a row that was not shaped has no position.
     pub(crate) fn position_for_index(
         &self,
         offset: usize,
         last_layout: &LastLayout,
         line_end_affinity: bool,
     ) -> Option<Point<Pixels>> {
-        let mut acc_len = 0;
-        let mut offset_y = px(0.);
+        // At the window's first byte, the affinity names the end of the row before it.
+        if offset < self.start || (line_end_affinity && offset == self.start && self.first_row > 0)
+        {
+            return None;
+        }
 
         let x_offset = last_layout.alignment_offset(self.longest_width);
 
-        for (i, line) in self.wrapped_lines.iter().enumerate() {
-            let is_last = i + 1 == self.wrapped_lines.len();
+        for (row, acc_len, line) in self.rows() {
+            let is_last = self.is_last_row(row);
 
             let matches = if line.len == 0 {
                 // Empty visual lines still own their boundary offset.
@@ -929,14 +1018,9 @@ impl LineLayout {
             if matches {
                 let x = line.x_for_index(offset.saturating_sub(acc_len))
                     + x_offset
-                    + self.line_indent(i);
-                return Some(point(x, offset_y));
+                    + self.line_indent(row);
+                return Some(point(x, last_layout.line_height * row));
             }
-
-            // Always advance by actual line length. The last line gets +1 so the
-            // cursor can be placed after the final character.
-            acc_len += if is_last { line.len + 1 } else { line.len };
-            offset_y += last_layout.line_height;
         }
 
         None
@@ -948,45 +1032,54 @@ impl LineLayout {
     /// visual line. Wrapped layouts must use [`Self::closest_index_for_position`], which also
     /// reports the caret affinity that a wrap boundary needs.
     pub(crate) fn closest_index_for_x(&self, x: Pixels, last_layout: &LastLayout) -> usize {
-        let mut acc_len = 0;
         let x_offset = last_layout.alignment_offset(self.longest_width);
         let x = x - x_offset;
 
-        for (i, line) in self.wrapped_lines.iter().enumerate() {
-            let line_indent = self.line_indent(i);
+        for (row, acc_len, line) in self.rows() {
+            let line_indent = self.line_indent(row);
             if x <= line_indent + line.width {
                 return acc_len + line.closest_index_for_x(x - line_indent);
             }
-            acc_len += line.len;
         }
 
-        acc_len
+        self.end()
     }
 
-    /// Resolve `pos` to the wrapped sub-line under it.
+    /// Resolve `pos` to the shaped row under it.
     ///
-    /// Returns the sub-line index, the byte offset that sub-line starts at within this line
-    /// layout, and `pos.x` translated into that sub-line's own coordinate space.
+    /// A position in a row of the line that was not shaped resolves to the nearest shaped
+    /// row; one above or below the whole line to none.
+    ///
+    /// Returns the index into `wrapped_lines`, the byte offset that row starts at within this
+    /// line layout, and `pos.x` translated into that row's own coordinate space.
     fn wrapped_line_at(
         &self,
         pos: Point<Pixels>,
         last_layout: &LastLayout,
     ) -> Option<(usize, usize, Pixels)> {
-        let mut offset = 0;
-        let mut line_top = px(0.);
-        let x_offset = last_layout.alignment_offset(self.longest_width);
-
-        for (i, line) in self.wrapped_lines.iter().enumerate() {
-            let line_bottom = line_top + last_layout.line_height;
-            if pos.y >= line_top && pos.y < line_bottom {
-                return Some((i, offset, pos.x - x_offset - self.line_indent(i)));
-            }
-
-            offset += line.len;
-            line_top = line_bottom;
+        let line_height = f32::from(last_layout.line_height);
+        if self.wrapped_lines.is_empty() || pos.y < px(0.) || line_height <= 0. {
+            return None;
+        }
+        let row = (f32::from(pos.y) / line_height).floor() as usize;
+        if row >= self.row_count {
+            return None;
         }
 
-        None
+        let index = row
+            .saturating_sub(self.first_row)
+            .min(self.wrapped_lines.len() - 1);
+        let offset = self.start
+            + self.wrapped_lines[..index]
+                .iter()
+                .map(|line| line.len)
+                .sum::<usize>();
+        let x_offset = last_layout.alignment_offset(self.longest_width);
+        Some((
+            index,
+            offset,
+            pos.x - x_offset - self.line_indent(self.first_row + index),
+        ))
     }
 
     /// Get the index for the given position (x, y) in this line layout.
@@ -1007,7 +1100,7 @@ impl LineLayout {
         let (i, offset, x) = self.wrapped_line_at(pos, last_layout)?;
         let line = &self.wrapped_lines[i];
         let ix = line.closest_index_for_x(x);
-        let line_end_affinity = i + 1 < self.wrapped_lines.len() && ix == line.len;
+        let line_end_affinity = !self.is_last_row(self.first_row + i) && ix == line.len;
 
         Some((offset + ix, line_end_affinity))
     }
@@ -1031,7 +1124,7 @@ impl LineLayout {
             return 0;
         };
 
-        if i + 1 < self.wrapped_lines.len() || last_layout.space_width <= px(0.) {
+        if !self.is_last_row(self.first_row + i) || last_layout.space_width <= px(0.) {
             return 0;
         }
 
@@ -1053,15 +1146,14 @@ impl LineLayout {
         Some(offset + self.wrapped_lines[i].index_for_x(x)?)
     }
 
+    /// The size of the whole line: the widest shaped row, and every row's height.
     pub(crate) fn size(&self, line_height: Pixels) -> Size<Pixels> {
         let width = self
-            .wrapped_lines
-            .iter()
-            .enumerate()
-            .map(|(ix, line)| line.width + self.line_indent(ix))
+            .rows()
+            .map(|(row, _, line)| line.width + self.line_indent(row))
             .max()
             .unwrap_or(self.longest_width);
-        size(width, self.wrapped_lines.len() * line_height)
+        size(width, self.row_count * line_height)
     }
 
     /// Paint only the glyph background quads of this line.
@@ -1083,9 +1175,9 @@ impl LineLayout {
             return;
         }
 
-        for (ix, line) in self.wrapped_lines.iter().enumerate() {
+        for (row, _, line) in self.rows() {
             _ = line.paint_background(
-                pos + point(self.line_indent(ix), ix * line_height),
+                pos + point(self.line_indent(row), row * line_height),
                 line_height,
                 text_align,
                 align_width,
@@ -1104,9 +1196,9 @@ impl LineLayout {
         window: &mut Window,
         cx: &mut App,
     ) {
-        for (ix, line) in self.wrapped_lines.iter().enumerate() {
+        for (row, _, line) in self.rows() {
             _ = line.paint(
-                pos + point(self.line_indent(ix), ix * line_height),
+                pos + point(self.line_indent(row), row * line_height),
                 line_height,
                 text_align,
                 align_width,
@@ -1124,9 +1216,10 @@ impl LineLayout {
                     indicators.space.clone()
                 };
 
+                let row = self.first_row + *line_index;
                 let origin = point(
-                    pos.x + *x_position + self.line_indent(*line_index),
-                    pos.y + *line_index as f32 * line_height,
+                    pos.x + *x_position + self.line_indent(row),
+                    pos.y + row as f32 * line_height,
                 );
 
                 _ = invisible.paint(origin, line_height, text_align, align_width, window, cx);
@@ -1703,6 +1796,7 @@ mod tests {
             visible_line_byte_offsets: vec![0],
             visible_top: px(0.),
             visible_range_offset: 0..0,
+            visible_line_rows: Vec::new(),
             lines: Rc::new(vec![]),
             line_height,
             wrap_width: None,
@@ -1769,6 +1863,54 @@ mod tests {
             .unwrap();
         assert_eq!(ix, 15);
         assert!(!line_end_affinity);
+    }
+
+    #[test]
+    fn a_window_of_rows_keeps_the_geometry_of_the_whole_line() {
+        // Rows 3 and 4 of a line of ten rows of ten bytes: bytes 30..50.
+        let line_layout = LineLayout::new()
+            .lines(smallvec::smallvec![
+                ShapedLine::default().with_len(10),
+                ShapedLine::default().with_len(10),
+            ])
+            .window(3, 30, 10, 100);
+        let last_layout = test_last_layout(px(20.));
+
+        assert_eq!(line_layout.len(), 100);
+        assert_eq!(line_layout.row_count(), 10);
+        assert_eq!((line_layout.start(), line_layout.end()), (30, 50));
+        assert_eq!(line_layout.size(px(20.)).height, px(200.));
+        assert_eq!(
+            line_layout
+                .rows()
+                .map(|(row, start, _)| (row, start))
+                .collect::<Vec<_>>(),
+            vec![(3, 30), (4, 40)]
+        );
+
+        // An offset in a shaped row sits on that row of the whole line.
+        let y = |offset, affinity| {
+            line_layout
+                .position_for_index(offset, &last_layout, affinity)
+                .map(|pos| pos.y)
+        };
+        assert_eq!(y(35, false), Some(px(60.)));
+        assert_eq!(y(45, false), Some(px(80.)));
+        // The end of the window opens row 5, which is not shaped, unless the caret closes row 4.
+        assert_eq!(y(50, false), None);
+        assert_eq!(y(50, true), Some(px(80.)));
+        // The start of the window with affinity is the end of row 2, which is not shaped.
+        assert_eq!(y(30, true), None);
+        assert_eq!(y(5, false), None);
+        assert_eq!(y(95, false), None);
+
+        // A pointer over a row that was not shaped lands on the nearest shaped row; one
+        // below the whole line on none.
+        let hit = |x, y| line_layout.closest_index_for_position(point(px(x), px(y)), &last_layout);
+        assert_eq!(hit(999., 65.), Some((40, true)));
+        assert_eq!(hit(999., 5.), Some((40, true)));
+        assert_eq!(hit(999., 199.), Some((50, true)));
+        assert_eq!(hit(0., 200.), None);
     }
 
     #[test]
@@ -2004,6 +2146,7 @@ mod tests {
             visible_line_byte_offsets: vec![0],
             visible_top: px(0.),
             visible_range_offset: 0..0,
+            visible_line_rows: Vec::new(),
             lines: Rc::new(vec![]),
             line_height: px(20.0),
             wrap_width: Some(px(10.)),

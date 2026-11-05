@@ -90,24 +90,13 @@ impl DisplayMap {
         // Buffer line → Wrap row range
         let wrap_row_range = self.wrap_map.buffer_line_to_wrap_row_range(line);
 
-        // Find first and last visible display rows in this range
-        let mut first_display_row = None;
-        let mut last_display_row = None;
-
-        for wrap_row in wrap_row_range {
-            if let Some(display_row) = self.fold_map.wrap_row_to_display_row(wrap_row) {
-                if first_display_row.is_none() {
-                    first_display_row = Some(display_row);
-                }
-                last_display_row = Some(display_row);
-            }
-        }
-
-        if let (Some(start), Some(end)) = (first_display_row, last_display_row) {
-            Some(start..end + 1)
-        } else {
-            None // Completely folded
-        }
+        // A fold hides whole buffer lines, so a line's wrap rows are all shown or all
+        // hidden, and the shown ones are consecutive display rows. Asking for the first
+        // one is enough — walking every row would cost a long line its row count.
+        let start = self
+            .fold_map
+            .wrap_row_to_display_row(wrap_row_range.start)?;
+        Some(start..start + wrap_row_range.len())
     }
 
     /// Check if a buffer line is completely hidden

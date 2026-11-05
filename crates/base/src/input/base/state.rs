@@ -3623,7 +3623,7 @@ impl<M: InputModeKind> InputBaseState<M> {
                 let last_row_top = (line_layout.size(line_height).height - line_height).max(px(0.));
                 let pos = point(pos.x, last_row_top);
                 (
-                    self.resolve_index(line_start + line_layout.len()),
+                    self.resolve_index(line_start + line_layout.end()),
                     false,
                     line_layout.columns_past_line_end(pos, last_layout),
                 )
