@@ -9,6 +9,13 @@
 /// `use gpui_kit::*;` alone is GPUI, so a file needs nothing else for it.
 mod glob_is_gpui {
     use gpui_kit::*;
+    // GPUI's derive macros expand to `gpui::…` paths. In an application built on
+    // the Kit that name is only the Kit's hidden `gpui` re-export, which the glob
+    // brings in; this test crate also sees the GPUI crate itself under that name
+    // (a dependency of the Kit), and a macro-expanded path that a glob and the
+    // extern prelude both answer is ambiguous (E0659). Naming the import picks the
+    // one an application has.
+    use gpui_kit::gpui;
 
     type Element = Div;
     type Window_ = Window;

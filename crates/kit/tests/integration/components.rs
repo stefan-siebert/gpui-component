@@ -354,21 +354,28 @@ fn title_bar_and_window_controls_are_observable(cx: &mut TestAppContext) {
     cx.update_window(handle.into(), |_, window, cx| {
         window.draw(cx).clear(cx);
         assert!(window.find("title-bar").visible());
-        // Windows draws the caption buttons in the title bar. macOS and the web
-        // leave them to the system, and so does Linux under the server-side
-        // decorations of the test window.
+        // This fork places the caption buttons by the platform's button layout, in
+        // `window-controls-left` and `window-controls-right`. Windows draws them on
+        // the right. Linux follows the desktop's layout, but draws none under the
+        // server-side decorations of the test window. Apple platforms leave them to
+        // the system and render no controls at all.
         #[cfg(target_os = "windows")]
         {
-            let controls = window.find("window-controls");
+            let controls = window.find("window-controls-right");
             for id in ["minimize", "maximize", "close"] {
-                let button = window.within("window-controls").find(id);
+                let button = window.within("window-controls-right").find(id);
                 assert!(button.visible(), "{id} should be visible");
                 assert!(controls.bounds().contains(&button.bounds().center()));
             }
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         {
-            assert!(window.try_find("window-controls").is_some());
+            assert!(window.try_find("window-controls-right").is_some());
+            assert!(window.try_find("close").is_none());
+        }
+        #[cfg(target_vendor = "apple")]
+        {
+            assert!(window.try_find("window-controls-right").is_none());
             assert!(window.try_find("close").is_none());
         }
     })

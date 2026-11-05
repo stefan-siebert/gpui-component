@@ -724,6 +724,7 @@ impl RenderOnce for TitleBar {
                     })
                 },
             )
+            .test_support()
     }
 }
 

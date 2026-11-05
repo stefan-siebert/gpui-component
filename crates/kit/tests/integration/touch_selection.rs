@@ -12,8 +12,8 @@ use gpui_kit::test::{TestSupportExt as _, TestWindowExt};
 use gpui_kit::{
     AppContext, Context, DispatchPhase, Entity, InputEvent as _, LongPressEvent, Modifiers,
     MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollEvent,
-    StyleRefinement, TestAppContext, TouchDragEvent, TouchPhase, Window, WindowHandle, canvas, div,
-    prelude::*, px,
+    ScrollSource, StyleRefinement, TestAppContext, TouchDragEvent, TouchPhase, Window,
+    WindowHandle, canvas, div, prelude::*, px,
 };
 
 struct Screen {
@@ -755,6 +755,7 @@ fn the_menu_comes_back_after_a_scroll_the_container_swallowed(cx: &mut TestAppCo
                     delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
                     modifiers: Modifiers::default(),
                     touch_phase,
+                    source: ScrollSource::Touch,
                 }
                 .to_platform_input(),
                 cx,

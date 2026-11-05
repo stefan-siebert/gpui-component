@@ -3147,6 +3147,19 @@ where
             None
         };
 
+        // The rows render every scrollable column (no horizontal virtual list, see
+        // `render_table_row`), so no list reports which are in view. They are the ones
+        // the header renders: report those, relative to the scrollable columns.
+        let (visible_cols, _) = self.calculate_visible_leaf_col_range(left_columns_count);
+        self.update_visible_range_if_need(
+            visible_cols.start.saturating_sub(left_columns_count)
+                ..visible_cols.end.saturating_sub(left_columns_count),
+            columns_count.saturating_sub(left_columns_count),
+            Axis::Horizontal,
+            window,
+            cx,
+        );
+
         let inner_table = v_flex()
             .id("table-inner")
             .size_full()
