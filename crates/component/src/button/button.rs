@@ -933,6 +933,21 @@ struct ButtonVariantStyle {
 const GHOST_DARK_HOVER: f32 = 0.15;
 const GHOST_DARK_ACTIVE: f32 = 0.22;
 
+/// A default outline button's border: the foreground at this opacity, in
+/// every theme. Its own fill is transparent, and in a dark theme its hover
+/// and pressed fills are the ghost button's (`GHOST_DARK_*`).
+///
+/// Before, border and fills came from `input`, which a dark theme sets close
+/// to a list row's active and hover fills: in Tokyo Night the border stood
+/// at 1.27:1 against the background, 1.02:1 on a selected `ListItem` and
+/// 1.03:1 on a hovered one, the hover fill at 1.01:1 — an Undo button on a
+/// list row showed only its label (Elane's Operations Center, 2026-11-05).
+/// With the foreground at 30 % the border holds about 2:1 on all three
+/// (2.15 / 2.07 / 2.05), the hover fill about 1.4:1, computed from the
+/// theme's values; an opacity, not a colour, so it stands apart from
+/// whatever the button sits on.
+const OUTLINE_BORDER_OPACITY: f32 = 0.3;
+
 #[derive(Clone, Copy)]
 enum ButtonStyleState {
     Normal,
@@ -943,12 +958,20 @@ enum ButtonStyleState {
 impl ButtonVariant {
     fn outline_background(&self, state: ButtonStyleState, cx: &mut App) -> Background {
         match (self, state) {
-            (Self::Default, ButtonStyleState::Normal) => cx.theme().input_background().into(),
+            // No fill of its own: what it sits on — a dialog, a selected or
+            // hovered list row — shows through (`OUTLINE_BORDER_OPACITY`).
+            (Self::Default, ButtonStyleState::Normal) => cx.theme().transparent.into(),
+            (Self::Default, ButtonStyleState::Hovered) if cx.theme().mode.is_dark() => {
+                cx.theme().foreground.opacity(GHOST_DARK_HOVER).into()
+            }
             (Self::Default, ButtonStyleState::Hovered) => cx
                 .theme()
                 .input
                 .mix_oklab(cx.theme().transparent, 0.5)
                 .into(),
+            (Self::Default, ButtonStyleState::Active) if cx.theme().mode.is_dark() => {
+                cx.theme().foreground.opacity(GHOST_DARK_ACTIVE).into()
+            }
             (Self::Default, ButtonStyleState::Active) => cx
                 .theme()
                 .input
@@ -1085,6 +1108,7 @@ impl ButtonVariant {
 
     fn border_color(&self, outline: bool, cx: &mut App) -> Hsla {
         match self {
+            Self::Default if outline => cx.theme().foreground.opacity(OUTLINE_BORDER_OPACITY),
             Self::Default => cx.theme().input,
             Self::Secondary => cx.theme().border,
             Self::Primary => cx.theme().primary,
@@ -1491,6 +1515,34 @@ mod tests {
             Some("Save"),
             "and must not change what is drawn"
         );
+    }
+
+    /// A default outline button has no fill of its own and a border from the
+    /// foreground, so it stays a button on any row fill; in a dark theme it
+    /// hovers and presses like a ghost button.
+    #[gpui::test]
+    fn an_outline_button_takes_its_border_from_the_foreground(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::init(cx);
+            for mode in [crate::ThemeMode::Dark, crate::ThemeMode::Light] {
+                crate::Theme::change(mode, None, cx);
+                let normal = ButtonVariant::Default.normal(true, cx);
+                assert_eq!(
+                    normal.border,
+                    cx.theme().foreground.opacity(OUTLINE_BORDER_OPACITY),
+                    "{mode:?}"
+                );
+                let transparent: Background = cx.theme().transparent.into();
+                assert_eq!(normal.bg, transparent, "{mode:?}");
+            }
+            crate::Theme::change(crate::ThemeMode::Dark, None, cx);
+            let hover: Background = cx.theme().foreground.opacity(GHOST_DARK_HOVER).into();
+            assert_eq!(ButtonVariant::Default.hovered(true, cx).bg, hover);
+            let pressed: Background = cx.theme().foreground.opacity(GHOST_DARK_ACTIVE).into();
+            assert_eq!(ButtonVariant::Default.active(true, cx).bg, pressed);
+            // A filled default button keeps the theme's input border.
+            assert_eq!(ButtonVariant::Default.normal(false, cx).border, cx.theme().input);
+        });
     }
 
     #[gpui::test]
