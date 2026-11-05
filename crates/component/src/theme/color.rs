@@ -653,6 +653,51 @@ pub fn white() -> Hsla {
     DEFAULT_COLORS.white.hsla
 }
 
+/// WCAG 2 relative luminance of an opaque color, 0.0 (black) to 1.0 (white).
+pub fn relative_luminance(color: Hsla) -> f32 {
+    fn channel(value: f32) -> f32 {
+        if value <= 0.039_28 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    let rgb: gpui::Rgba = color.into();
+    0.2126 * channel(rgb.r) + 0.7152 * channel(rgb.g) + 0.0722 * channel(rgb.b)
+}
+
+/// WCAG 2 contrast ratio of two opaque colors, 1.0 to 21.0. Text wants 4.5
+/// (AA), large text and graphics 3.0.
+pub fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
+    let (a, b) = (relative_luminance(a), relative_luminance(b));
+    let (lighter, darker) = if a > b { (a, b) } else { (b, a) };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+/// `color` as text on `background`: unchanged when it already reaches
+/// `min_contrast`, else mixed toward `toward` (the theme's foreground) in
+/// small steps, in Oklab so the hue holds, until it does. A signal color
+/// made for fills — a light theme's bright green — reads as text only
+/// darkened; a dark theme's is usually light enough already.
+///
+/// A translucent `color` is flattened onto `background` first, which is
+/// how it would be seen.
+pub fn readable_on(color: Hsla, background: Hsla, toward: Hsla, min_contrast: f32) -> Hsla {
+    let color = background.blend(color);
+    if contrast_ratio(color, background) >= min_contrast {
+        return color;
+    }
+    const STEPS: u8 = 20;
+    for step in 1..=STEPS {
+        // `mix_oklab`'s factor weighs the first color.
+        let candidate = color.mix_oklab(toward, 1.0 - f32::from(step) / f32::from(STEPS));
+        if contrast_ratio(candidate, background) >= min_contrast {
+            return candidate;
+        }
+    }
+    toward
+}
+
 color_methods!(slate);
 color_methods!(gray);
 color_methods!(zinc);
@@ -1133,5 +1178,47 @@ mod tests {
                 gpui::linear_color_stop(crate::blue_600(), 0.75)
             )
         );
+    }
+
+    #[test]
+    fn contrast_ratio_spans_one_to_twenty_one() {
+        assert!((contrast_ratio(black(), white()) - 21.0).abs() < 0.01);
+        assert!((contrast_ratio(white(), white()) - 1.0).abs() < 0.001);
+    }
+
+    /// The case that asked for it: Molokai Light's success green as a status
+    /// word in the Operations Center, 1.91:1 on its background.
+    #[test]
+    fn a_fill_color_too_light_for_text_is_darkened_until_it_reads() {
+        let background: Hsla = rgb(0xFEFAF9).into();
+        let foreground: Hsla = rgb(0x272822).into();
+        let green: Hsla = rgb(0x82CC0A).into();
+        assert!(contrast_ratio(green, background) < 2.0);
+
+        let text = readable_on(green, background, foreground, 4.5);
+
+        assert!(contrast_ratio(text, background) >= 4.5);
+        // Still a green, not the foreground: the hue held.
+        assert!((text.h - green.h).abs() < 0.05, "hue drifted: {text:?}");
+        assert!(text.l < green.l);
+    }
+
+    #[test]
+    fn a_color_that_already_reads_is_left_alone() {
+        let background: Hsla = rgb(0x1E1E1E).into();
+        let foreground: Hsla = rgb(0xD4D4D4).into();
+        let green: Hsla = rgb(0x6A9955).into();
+        assert!(contrast_ratio(green, background) >= 4.5);
+        assert_eq!(readable_on(green, background, foreground, 4.5), green);
+    }
+
+    #[test]
+    fn a_translucent_color_is_judged_as_it_is_seen() {
+        let background: Hsla = rgb(0xFFFFFF).into();
+        let foreground: Hsla = rgb(0x000000).into();
+        let faint: Hsla = rgba(0x00000020).into();
+        let text = readable_on(faint, background, foreground, 4.5);
+        assert_eq!(text.a, 1.0);
+        assert!(contrast_ratio(text, background) >= 4.5);
     }
 }

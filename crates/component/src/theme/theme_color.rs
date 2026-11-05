@@ -554,4 +554,37 @@ impl ThemeColor {
     pub fn dark() -> Arc<Self> {
         DEFAULT_THEME_COLORS[&ThemeMode::Dark].0.clone()
     }
+
+    /// `color` as body text on [`Self::background`]: the color itself where
+    /// it reaches WCAG AA (4.5:1), else moved toward [`Self::foreground`]
+    /// until it does (see [`crate::readable_on`]).
+    ///
+    /// The signal colors are made for fills — a badge, a progress bar, a
+    /// button — and a theme picks them for that; written as text they can
+    /// vanish (Molokai Light's `success`, `#82cc0a` on `#FEFAF9`: 1.91:1).
+    /// Derived rather than stored, so every theme gets it without a key of
+    /// its own.
+    pub fn readable_text(&self, color: Hsla) -> Hsla {
+        crate::readable_on(color, self.background, self.foreground, 4.5)
+    }
+
+    /// [`Self::success`] as text — a status word, a "done".
+    pub fn success_text(&self) -> Hsla {
+        self.readable_text(self.success)
+    }
+
+    /// [`Self::warning`] as text.
+    pub fn warning_text(&self) -> Hsla {
+        self.readable_text(self.warning)
+    }
+
+    /// [`Self::danger`] as text — an error message.
+    pub fn danger_text(&self) -> Hsla {
+        self.readable_text(self.danger)
+    }
+
+    /// [`Self::info`] as text.
+    pub fn info_text(&self) -> Hsla {
+        self.readable_text(self.info)
+    }
 }
