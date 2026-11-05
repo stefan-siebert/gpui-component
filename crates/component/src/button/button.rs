@@ -766,11 +766,15 @@ impl RenderOnce for Button {
             .refine_style(&instance_style);
 
         // The explicit name wins: it exists precisely for the cases where the
-        // visible content is not what a listener needs to hear.
+        // visible content is not what a listener needs to hear. A button that
+        // shows no text says with its tooltip what it does, so that is its
+        // name next — otherwise an icon button is announced as "button" and
+        // nothing else, and a script has nothing to match it by.
         let accessibility_label = self
             .accessibility_label
             .clone()
-            .or_else(|| self.label.clone());
+            .or_else(|| self.label.clone())
+            .or_else(|| self.tooltip.as_ref().map(|(tooltip, _)| tooltip.clone()));
         let content = h_flex()
             .id("label")
             .size_full()
@@ -1542,6 +1546,50 @@ mod tests {
             assert_eq!(ButtonVariant::Default.active(true, cx).bg, pressed);
             // A filled default button keeps the theme's input border.
             assert_eq!(ButtonVariant::Default.normal(false, cx).border, cx.theme().input);
+        });
+    }
+
+    /// A button that shows no text is announced by its tooltip; a visible
+    /// label or an explicit name still wins (found by Elane's a11y audit,
+    /// 2026-11-04: nine icon buttons announced as "button" and nothing else).
+    #[gpui::test]
+    fn an_icon_button_is_named_by_its_tooltip(cx: &mut gpui::TestAppContext) {
+        use gpui::{Context, Render};
+
+        struct Harness;
+
+        impl Render for Harness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                h_flex()
+                    .child(
+                        Button::new("icon-only")
+                            .icon(IconName::ChevronLeft)
+                            .tooltip("Go back"),
+                    )
+                    .child(Button::new("labelled").label("Save").tooltip("Ctrl+S"))
+                    .child(
+                        Button::new("named")
+                            .icon(IconName::ChevronLeft)
+                            .tooltip("Go back")
+                            .accessibility_label("Back to the previous folder"),
+                    )
+            }
+        }
+
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(|_, _| Harness);
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let label = |id: &'static str| {
+                gpui_base::test_support::find(window, &[], &id.into())
+                    .and_then(|snapshot| snapshot.label().map(str::to_string))
+            };
+            assert_eq!(label("icon-only").as_deref(), Some("Go back"));
+            assert_eq!(label("labelled").as_deref(), Some("Save"));
+            assert_eq!(
+                label("named").as_deref(),
+                Some("Back to the previous folder")
+            );
         });
     }
 

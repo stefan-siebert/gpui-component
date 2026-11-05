@@ -1,7 +1,8 @@
 use gpui::Corners;
 use gpui::{
     Anchor, App, Context, Edges, ElementId, InteractiveElement as _, IntoElement, ParentElement,
-    RenderOnce, SharedString, StyleRefinement, Styled, Window, div, prelude::FluentBuilder,
+    RenderOnce, SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled, Window,
+    div, prelude::FluentBuilder,
 };
 use rust_i18n::t;
 
@@ -177,6 +178,10 @@ impl RenderOnce for DropdownButton {
 
         div()
             .id(self.id)
+            // A group of the two buttons, not a control of its own: left to
+            // inference the wrapper read as a button with no name and no
+            // accessibility node (Elane's a11y audit, 2026-11-04).
+            .role(gpui::Role::Group)
             .when(is_ghost, |this| this.group(HALVES_GROUP))
             .h_flex()
             .refine_style(&self.style)

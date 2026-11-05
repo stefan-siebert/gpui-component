@@ -2575,6 +2575,10 @@ const A11Y_ROLES: &[(&str, &str)] = &[
     ("CheckBox", "checkbox"),
     ("ComboBox", "combobox"),
     ("Dialog", "dialog"),
+    // A container that says it is one: without it a declared group fell back
+    // to the role its source file suggests (`dropdown_button` → button), and
+    // the audit reported a button with no name.
+    ("Group", "group"),
     ("Link", "link"),
     ("List", "list"),
     ("ListBox", "listbox"),
