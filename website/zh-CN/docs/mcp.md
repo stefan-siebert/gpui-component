@@ -109,7 +109,8 @@ GPUI 主线程上处理，因此能看到一致的状态，也能派发真实输
 | `get_logs` | `mcp_log` 缓冲区 |
 | `set_viewport` | 把窗口调整到确定的内容尺寸，使布局可复现 |
 | `reset_app` | 通过 `mcp_set_reset_hook` 把应用恢复到已知的初始状态 |
-| `replay_script` | 回放录制好的会话 —— 既可用于恢复到某个状态，也可作为测试 |
+| `replay_script` | 回放录制好的会话 —— 既可用于恢复到某个状态，也可作为测试；`vars` 填入 `${name}` |
+| `start_recording`, `stop_recording` | 从此刻起把会话写成脚本，以及停止录制；`vars` 把夹具路径写成 `${name}` |
 | `expect_screenshot` | 把窗口与脚本旁边存放的基准截图（golden）对比；设置 `GPUI_MCP_UPDATE_GOLDENS=1` 可接受新的外观 |
 
 ## 助手看到的内容
@@ -166,10 +167,15 @@ AI 助手：
 | 检查项 | 严重程度 | 含义 |
 |---|---|---|
 | `unnamed-control` | serious | 交互元素没有绘制任何文本 —— 无法朗读，也无法按名称定位 |
-| `duplicate-id` | 控件为 serious，其他为 warning | 一个 id 指向多个元素；后缀匹配只会取第一个 |
+| `duplicate-id` | 控件为 serious，其他为 warning | 一个 id 指向多个元素，且没有作用域能区分它们；后缀匹配只会取第一个 |
 | `target-too-small` | warning | 边长小于 24px（WCAG 2.2 的最小值）|
 | `zero-size-control` | serious | 交互元素完全没有面积 |
 | `unstable-id` | warning | id 以每次启动都会重新生成的数字结尾，例如 `#input-4294967299` —— 看起来像名字，其实不是 |
+
+同一个组件显示两次（例如两个文件面板）时，其中的每个 id 都会重复。给每个副本的根元素一个 id
+（`panel-left`、`panel-right`），副本就能通过作用域区分：快照打印 `#panel-left>>back`，
+所有工具都接受 `panel-left >> back`，审计也不再报告它们。一次没有检查到任何元素的审计
+（窗口尚未绘制、显示器休眠）结果为 `ok: false`。
 
 首次运行时最常见的结果，是纯图标按钮以及列表行共用同一个 id —— 任何应用都是如此，
 这只是「还没有人有理由为它们命名」的正常状态。

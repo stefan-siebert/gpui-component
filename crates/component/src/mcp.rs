@@ -913,7 +913,15 @@ fn with_window_default(params: &serde_json::Value, window_id: Option<&str>) -> s
 /// still attached. Refusing those would punish an agent for using the cheap
 /// output format this server recommends, and "element not found" for an id
 /// this very server just printed is the most confusing answer available.
+///
+/// A scoped query, `panel-left >> back`, is the fourth form: an element whose
+/// id ends in the segment(s) `back` and has `panel-left` among its ancestors.
+/// See [`scoped_id_matches`].
 fn id_matches(full_id: &str, global_id: &str, query: &str) -> bool {
+    if query.contains(SCOPE_SEPARATOR) {
+        return scoped_id_parts(query)
+            .is_some_and(|parts| scoped_id_matches(strip_id_decoration(global_id), &parts));
+    }
     if full_id == query || global_id == query || global_id.ends_with(query) {
         return true;
     }
@@ -924,6 +932,132 @@ fn id_matches(full_id: &str, global_id: &str, query: &str) -> bool {
     let path = strip_id_decoration(query);
     let shortened = shorten_element_id(global_id);
     global_id == path || global_id.ends_with(path) || shortened == path || shortened.ends_with(path)
+}
+
+/// The segments of an element id as a scope compares them: decoration
+/// dropped, each segment shortened the way compact output prints it.
+fn id_segments(id: &str) -> Vec<String> {
+    shorten_element_id(strip_id_decoration(id))
+        .split('.')
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether `global_id` is the element a scoped id names: its last segments
+/// are the last part exactly (`back`, or a dotted `toolbar.back`), and every
+/// earlier part is a run of its ancestors' segments, in order, outermost
+/// first. Exact segments rather than the suffix match a bare id gets: a
+/// scope is the form an agent reaches for because a suffix was not enough.
+fn scoped_id_matches(global_id: &str, parts: &[&str]) -> bool {
+    let Some((target, scopes)) = parts.split_last() else {
+        return false;
+    };
+    let segments = id_segments(global_id);
+    let target: Vec<&str> = target.split('.').collect();
+    let Some(ancestors_end) = segments.len().checked_sub(target.len()) else {
+        return false;
+    };
+    let (mut ancestors, tail) = segments.split_at(ancestors_end);
+    if tail.iter().map(String::as_str).ne(target.iter().copied()) {
+        return false;
+    }
+    for scope in scopes {
+        let scope: Vec<&str> = scope.split('.').collect();
+        let Some(at) = ancestors
+            .windows(scope.len())
+            .position(|window| window.iter().map(String::as_str).eq(scope.iter().copied()))
+        else {
+            return false;
+        };
+        ancestors = ancestors.get(at + scope.len()..).unwrap_or_default();
+    }
+    true
+}
+
+/// The scoped name each element should be printed with where its bare id is
+/// not unique: element id → `panel-left>>back`.
+///
+/// A window that shows one component twice has every id inside it twice.
+/// For each such group, every member is given its nearest ancestor that no
+/// other member has — an id somebody wrote, not a view number — and the
+/// group is scoped only when every member got one: a bare id left on one of
+/// them would still match whichever comes first. Members that share their
+/// whole path (list rows that differ only by instance) cannot be told apart
+/// by any scope, and stay bare for the audit to report.
+///
+/// Computed over the whole window, because that is what a query resolves
+/// against, even when the snapshot shows only a part of it.
+fn scoped_test_ids(elements: &[UiElement]) -> std::collections::HashMap<String, String> {
+    fn collect<'a>(elements: &'a [UiElement], out: &mut Vec<&'a UiElement>) {
+        for element in elements {
+            out.push(element);
+            collect(&element.children, out);
+        }
+    }
+    let mut flat = Vec::new();
+    collect(elements, &mut flat);
+
+    // test id → path → the element ids painted at it.
+    let mut groups: std::collections::BTreeMap<
+        &str,
+        std::collections::BTreeMap<String, Vec<&str>>,
+    > = std::collections::BTreeMap::new();
+    for element in &flat {
+        let Some(test_id) = test_id_of(strip_id_decoration(&element.id)) else {
+            continue;
+        };
+        let path = strip_id_decoration(&element.id).to_string();
+        let ids = groups.entry(test_id).or_default().entry(path).or_default();
+        if !ids.contains(&element.id.as_str()) {
+            ids.push(&element.id);
+        }
+    }
+
+    let mut scoped = std::collections::HashMap::new();
+    for (test_id, paths) in groups {
+        if paths.len() < 2 || paths.values().any(|ids| ids.len() > 1) {
+            continue;
+        }
+        let ancestors: Vec<(Vec<String>, &str)> = paths
+            .iter()
+            .map(|(path, ids)| {
+                let mut segments = id_segments(path);
+                segments.pop();
+                (segments, ids[0])
+            })
+            .collect();
+        let scopes: Option<Vec<(&str, &String)>> = ancestors
+            .iter()
+            .map(|(segments, element_id)| {
+                segments
+                    .iter()
+                    .rev()
+                    .filter(|segment| is_test_id_segment(segment) && !id_looks_generated(segment))
+                    .find(|segment| {
+                        ancestors
+                            .iter()
+                            .filter(|(others, _)| others.contains(segment))
+                            .count()
+                            == 1
+                    })
+                    .map(|scope| (*element_id, scope))
+            })
+            .collect();
+        for (element_id, scope) in scopes.into_iter().flatten() {
+            scoped.insert(element_id.to_string(), scoped_id(&[scope, test_id]));
+        }
+    }
+    scoped
+}
+
+/// Print the scoped name on the lines [`scoped_test_ids`] found one for.
+fn apply_scopes(nodes: &mut [SnapshotNode], scoped: &std::collections::HashMap<String, String>) {
+    for node in nodes {
+        if let Some(name) = scoped.get(&node.full_id) {
+            node.test_id = Some(name.clone());
+        }
+        apply_scopes(&mut node.children, scoped);
+    }
 }
 
 /// Drop a leading `WindowId(..)/` and a trailing `[instance]` from an id, so
@@ -2438,19 +2572,7 @@ fn is_interactive(role: Option<&str>) -> bool {
 /// kind worth printing and worth telling an agent to target.
 fn test_id_of(global_id: &str) -> Option<&str> {
     let segment = global_id.rsplit('.').next()?;
-
-    if segment.starts_with("view-") {
-        return None;
-    }
-    let written = segment
-        .chars()
-        .next()
-        .is_some_and(|first| first.is_ascii_lowercase())
-        && segment
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
-
-    written.then_some(segment)
+    is_test_id_segment(segment).then_some(segment)
 }
 
 /// The text painted inside an element, short enough to read in a list.
@@ -2882,6 +3004,7 @@ fn handle_ui_snapshot(
         })
         .map_err(|e| e.to_string())?;
     let painted = count_elements(&elements);
+    let scoped = scoped_test_ids(&elements);
 
     if let Some(root) = &opts.root_element_id {
         let root = expand_ref(root)?;
@@ -2896,6 +3019,7 @@ fn handle_ui_snapshot(
 
     let a11y = a11y_nodes(opts.window_id.as_deref(), cx);
     let mut nodes = snapshot_nodes(&elements, opts.interactive_only, &a11y);
+    apply_scopes(&mut nodes, &scoped);
     if let Some(filter) = &opts.filter {
         filter_snapshot(&mut nodes, &filter.to_lowercase());
     }
@@ -3021,6 +3145,7 @@ fn handle_a11y_audit(
             build_element_tree(&window_id, window.inspector_elements())
         })
         .map_err(|e| e.to_string())?;
+    let scoped = scoped_test_ids(&elements);
 
     if let Some(root) = &opts.root_element_id {
         let root = expand_ref(root)?;
@@ -3034,7 +3159,8 @@ fn handle_a11y_audit(
     }
 
     let a11y = a11y_nodes(opts.window_id.as_deref(), cx);
-    let nodes = snapshot_nodes(&elements, false, &a11y);
+    let mut nodes = snapshot_nodes(&elements, false, &a11y);
+    apply_scopes(&mut nodes, &scoped);
     let mut flat = Vec::new();
     flatten_snapshot(&nodes, &mut flat);
 
@@ -3061,7 +3187,9 @@ fn handle_a11y_audit(
             "fail_on must be \"serious\", \"warning\" or \"none\", not \"{fail_on}\""
         ));
     }
-    let ok = audit_passes(&findings, fail_on);
+    // An audit of nothing found nothing wrong, and saying `ok` about it is
+    // how a window that was asleep, hidden or not drawn yet passes a gate.
+    let ok = audit_passes(&findings, fail_on) && !flat.is_empty();
 
     let limit = opts.max_findings.unwrap_or(DEFAULT_MAX_FINDINGS).max(1);
     let truncated = findings.len() > limit;
@@ -3083,7 +3211,7 @@ fn handle_a11y_audit(
     // number says the same thing in one line and cannot be tuned out.
     let announced = flat.iter().filter(|node| node.announced).count();
 
-    Ok(json!({
+    let mut answer = json!({
         "ok": ok,
         "window_id": window_id,
         "checked": flat.len(),
@@ -3093,7 +3221,15 @@ fn handle_a11y_audit(
         "warnings": warnings,
         "truncated": truncated,
         "findings": listed,
-    }))
+    });
+    if flat.is_empty() {
+        answer["detail"] = json!(
+            "No element was checked: the window painted nothing the audit can see. A display \
+             that is asleep, a hidden or minimised window, a frame not drawn yet, or a \
+             root_element_id with nothing inside it — an audit of nothing is not a pass."
+        );
+    }
+    Ok(answer)
 }
 
 /// Make sure the window is building its accessibility tree, and wait for the
@@ -3391,7 +3527,9 @@ fn audit_ids(nodes: &[&SnapshotNode]) -> Vec<Finding> {
                 message: format!(
                     "#{test_id} names {} elements in this window. A suffix match takes the \
                      first, so anything targeting it — a click, a wait, a recorded script — \
-                     may act on the wrong one. Give them ids of their own.",
+                     may act on the wrong one. Give them ids of their own, or give each \
+                     copy of the component they sit in an id of its own (`panel-left`), \
+                     which scopes them: `panel-left >> {test_id}`.",
                     group.len()
                 ),
                 role: first.role,
@@ -4244,7 +4382,10 @@ mod tests {
             vec![],
         );
         label.accesskit_node_id = 14;
-        a11y.insert(14, a11y_node_of(&json!({ "role": "Tab", "selected": false })));
+        a11y.insert(
+            14,
+            a11y_node_of(&json!({ "role": "Tab", "selected": false })),
+        );
         let tabs = ui_element("W/a.tabs[0]", None, &[], vec![tab, label]);
 
         let rendered = render(&snapshot_nodes(&[tabs], true, &a11y));
@@ -4258,7 +4399,10 @@ mod tests {
         let mut row = ui_element("W/a.table.row-3[0]", None, &["0x10", "main", "42"], vec![]);
         row.accesskit_node_id = 15;
         let mut a11y = A11yNodes::new();
-        a11y.insert(15, a11y_node_of(&json!({ "role": "Row", "selected": true })));
+        a11y.insert(
+            15,
+            a11y_node_of(&json!({ "role": "Row", "selected": true })),
+        );
         let table = ui_element("W/a.table[0]", None, &[], vec![row]);
 
         let rendered = render(&snapshot_nodes(&[table], true, &a11y));
@@ -4335,6 +4479,140 @@ mod tests {
         assert_eq!(test_id_of("root.view-4294967734"), None);
         assert_eq!(test_id_of("root.1-0-0"), None);
         assert_eq!(test_id_of("root.ResizablePanelGroup"), None);
+        assert_eq!(test_id_of("root.gpui_component::input::Input"), None);
+
+        // An id that carries a file name carries its characters.
+        assert_eq!(
+            test_id_of("view-1.panel-left.entry:read%2Eme"),
+            Some("entry:read%2Eme")
+        );
+    }
+
+    #[test]
+    fn a_scoped_id_names_the_element_inside_its_scope() {
+        let left = "view-1.root.panel-left.toolbar.history-back";
+        let full = format!("WindowId(1)/{left}[0]");
+
+        assert!(id_matches(&full, left, "panel-left >> history-back"));
+        assert!(id_matches(&full, left, "#panel-left>>#history-back"));
+        assert!(id_matches(
+            &full,
+            left,
+            "panel-left >> toolbar.history-back"
+        ));
+        assert!(id_matches(
+            &full,
+            left,
+            "root >> panel-left >> history-back"
+        ));
+        assert!(!id_matches(
+            &full,
+            left,
+            "panel-left >> root >> history-back"
+        ));
+        assert!(!id_matches(&full, left, "panel-right >> history-back"));
+        // Exact segments, not a suffix: a scope is asked for precision.
+        assert!(!id_matches(&full, left, "panel-left >> back"));
+        // The element itself is not its own scope.
+        assert!(!id_matches(&full, left, "history-back >> history-back"));
+        assert!(!id_matches(&full, left, "panel-left >>"));
+        // A type name is a segment like any other.
+        let typed = "view-1.elane::ui::FilePanel.panel-left.history-back";
+        assert!(id_matches(typed, typed, "FilePanel >> history-back"));
+    }
+
+    fn two_panels() -> Vec<UiElement> {
+        let panel = |side: &str| {
+            ui_element(
+                &format!("W/view-1.panel-{side}[0]"),
+                Some("src/file_panel.rs:1:1"),
+                &[],
+                vec![ui_element(
+                    &format!("W/view-1.panel-{side}.toolbar[0]"),
+                    Some("src/toolbar.rs:1:1"),
+                    &[],
+                    vec![button(
+                        &format!("W/view-1.panel-{side}.toolbar.history-back[0]"),
+                        &["Back"],
+                    )],
+                )],
+            )
+        };
+        vec![panel("left"), panel("right")]
+    }
+
+    /// The panel shown twice: each id inside it is printed with the scope that
+    /// tells the copies apart, and nothing is left for the audit to report.
+    #[test]
+    fn a_component_shown_twice_gets_scoped_ids() {
+        let tree = two_panels();
+        let scoped = scoped_test_ids(&tree);
+        assert_eq!(
+            scoped
+                .get("W/view-1.panel-left.toolbar.history-back[0]")
+                .map(String::as_str),
+            Some("panel-left>>history-back"),
+            "the nearest ancestor that tells them apart, not the shared toolbar"
+        );
+        assert_eq!(
+            scoped
+                .get("W/view-1.panel-right.toolbar.history-back[0]")
+                .map(String::as_str),
+            Some("panel-right>>history-back")
+        );
+
+        let mut nodes = snapshot_nodes(&tree, true, &A11yNodes::new());
+        apply_scopes(&mut nodes, &scoped);
+        assert_eq!(
+            render(&nodes),
+            "- button \"Back\" #panel-left>>history-back @e1\n\
+             - button \"Back\" #panel-right>>history-back @e2\n"
+        );
+
+        let findings = audit(&tree, 1.0);
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.check == "duplicate-id"),
+            "{:?}",
+            findings
+                .iter()
+                .map(|finding| &finding.message)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A scope is handed out only when it settles the whole group: a bare id
+    /// left on one member would still match whichever comes first.
+    #[test]
+    fn a_group_no_scope_can_settle_stays_bare() {
+        let mut tree = two_panels();
+        // A third back button outside both panels: nothing scopes it.
+        tree.push(button("W/view-1.history-back[0]", &["Back"]));
+        let scoped = scoped_test_ids(&tree);
+        assert!(
+            !scoped.values().any(|name| name.ends_with(">>history-back")),
+            "{scoped:?}"
+        );
+        // The toolbars around them are still told apart.
+        assert_eq!(
+            scoped
+                .get("W/view-1.panel-left.toolbar[0]")
+                .map(String::as_str),
+            Some("panel-left>>toolbar")
+        );
+        assert!(
+            audit(&tree, 1.0)
+                .iter()
+                .any(|finding| finding.check == "duplicate-id")
+        );
+
+        // Rows that differ only by instance share their whole path.
+        let rows = vec![
+            button("W/a.item[0]", &["One"]),
+            button("W/a.item[1]", &["Two"]),
+        ];
+        assert!(scoped_test_ids(&rows).is_empty());
     }
 
     #[test]
@@ -4587,7 +4865,8 @@ mod tests {
     }
 
     fn audit(tree: &[UiElement], min_target: f32) -> Vec<Finding> {
-        let nodes = snapshot_nodes(tree, false, &A11yNodes::new());
+        let mut nodes = snapshot_nodes(tree, false, &A11yNodes::new());
+        apply_scopes(&mut nodes, &scoped_test_ids(tree));
         let mut flat = Vec::new();
         flatten_snapshot(&nodes, &mut flat);
         let mut findings = audit_controls(&flat, min_target);

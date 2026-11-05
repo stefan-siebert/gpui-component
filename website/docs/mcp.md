@@ -113,7 +113,8 @@ server binary and registering it with an agent is described in the
 | `get_logs` | the `mcp_log` buffer |
 | `set_viewport` | resize a window to an exact content size, so layout is reproducible |
 | `reset_app` | put the app back into a known starting state, via `mcp_set_reset_hook` |
-| `replay_script` | replay a recorded session — to reach a state, or as a test |
+| `replay_script` | replay a recorded session — to reach a state, or as a test; `vars` fills in `${name}` |
+| `start_recording`, `stop_recording` | write the session to a script from here on, and stop; `vars` writes a fixture's path as `${name}` |
 | `expect_screenshot` | compare the window against a golden image stored beside the script; `GPUI_MCP_UPDATE_GOLDENS=1` accepts a change |
 
 ## What the agent sees
@@ -176,10 +177,16 @@ to be the ones that hurt a screen-reader user and an agent equally:
 | check | severity | what it means |
 |---|---|---|
 | `unnamed-control` | serious | an interactive element painting no text — nothing to announce, nothing to target by name |
-| `duplicate-id` | serious on a control, else warning | one id naming several elements; a suffix match takes the first |
+| `duplicate-id` | serious on a control, else warning | one id naming several elements that no scope tells apart; a suffix match takes the first |
 | `target-too-small` | warning | a side under 24 px (WCAG 2.2's minimum) |
 | `zero-size-control` | serious | an interactive element with no area at all |
 | `unstable-id` | warning | an id ending in a number generated fresh on every start, like `#input-4294967299` — it reads like a name and is not one |
+
+A component shown twice — two file panels — repeats every id inside it. Give
+each copy's root an id (`panel-left`, `panel-right`) and the copies are told
+apart by scope: the snapshot prints `#panel-left>>back`, every tool accepts
+`panel-left >> back`, and the audit does not report them. An audit that
+checked no element (a window not drawn, a display asleep) is `ok: false`.
 
 Icon-only buttons and repeated list-row ids are what a first run usually turns
 up, in any application — they are the normal state of a UI that nobody has had
