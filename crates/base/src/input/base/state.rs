@@ -398,6 +398,36 @@ impl PrepaintCaretGeometry {
     pub fn scroll_offset(&self) -> Point<Pixels> {
         self.scroll_offset
     }
+
+    /// Whether the caret lies wholly inside the viewport once `scroll_offset` applies.
+    pub(super) fn caret_in_view(&self, scroll_offset: Point<Pixels>) -> bool {
+        let caret = self.cursor_bounds;
+        let viewport = self.input_bounds;
+        let top = caret.top() + scroll_offset.y;
+        // Cached x already contains its painted scroll; account only
+        // for a wheel offset change since that geometry was produced.
+        let left = caret.left() + scroll_offset.x - self.scroll_offset.x;
+        top >= viewport.top()
+            && top + caret.size.height <= viewport.bottom()
+            && left >= viewport.left()
+            && left + caret.size.width <= viewport.right()
+    }
+}
+
+/// The place in the text that stays put while soft wrap is switched on or off.
+///
+/// Switching rewraps every line, so a scroll offset means another place after it. This
+/// is the caret when it is in view — kept at the same height and brought into view
+/// sideways — and otherwise the text at the top-left corner of the view, kept there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct WrapAnchor {
+    pub(super) offset: usize,
+    /// The caret's line-end affinity; false for the corner.
+    pub(super) affinity: bool,
+    /// How far below the top of the viewport the anchor's row starts (negative when the
+    /// top row is partly scrolled out).
+    pub(super) row_top: Pixels,
+    pub(super) caret: bool,
 }
 
 /// The shared text-editing engine behind [`crate::input::InputState`],
@@ -465,6 +495,9 @@ pub struct InputBaseState<M: InputModeKind> {
     /// input's prepaint but before its paint, so they read this instead of
     /// the previous frame's `last_layout`.
     pub(crate) prepaint_caret_geometry: Option<PrepaintCaretGeometry>,
+    /// Set by [`Self::set_soft_wrap`], put back by the next prepaint once the text is
+    /// rewrapped at its real width.
+    pub(super) pending_wrap_anchor: Option<WrapAnchor>,
     pub(super) last_cursor: Option<usize>,
     /// The input container bounds
     pub(super) input_bounds: Bounds<Pixels>,
@@ -981,6 +1014,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             mode: LayoutMode::default(),
             last_layout: None,
             prepaint_caret_geometry: None,
+            pending_wrap_anchor: None,
             last_bounds: None,
             last_selected_range: None,
             column_select_start: None,
@@ -1156,6 +1190,21 @@ impl<M: InputModeKind> InputBaseState<M> {
     ) {
         self.placeholder = placeholder.into();
         cx.notify();
+    }
+
+    /// Scroll the row of the pending [`WrapAnchor`] back to where it was, now that the
+    /// text is wrapped anew. Its column is put back by the caret layout, which has the
+    /// row shaped.
+    pub(super) fn restore_wrap_anchor_row(&mut self, line_height: Pixels) {
+        let Some(anchor) = self.pending_wrap_anchor else {
+            return;
+        };
+        let row = self
+            .display_map
+            .offset_to_display_row(anchor.offset, anchor.affinity);
+        let mut offset = self.scroll_handle.offset();
+        offset.y = (anchor.row_top - line_height * row).min(px(0.));
+        self.scroll_handle.set_offset(offset);
     }
 
     /// Find which line and sub-line the given offset belongs to, along with the position within that sub-line.
@@ -12086,25 +12135,74 @@ impl<M: crate::input::MultiLineMode> InputBaseState<M> {
     }
 
     /// Update the soft wrap mode, default is true.
-    pub fn set_soft_wrap(&mut self, wrap: bool, _: &mut Window, cx: &mut Context<Self>) {
+    ///
+    /// The caret stays where it is on screen when it is in view, else the text at the
+    /// top-left corner of the view stays there; see [`WrapAnchor`]. The text is rewrapped
+    /// by the next layout, at the width it really has.
+    pub fn set_soft_wrap(&mut self, wrap: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if wrap != self.soft_wrap {
+            self.pending_wrap_anchor = self.wrap_anchor(window);
+        }
         self.soft_wrap = wrap;
         if wrap {
-            let wrap_width = self
-                .last_layout
-                .as_ref()
-                .and_then(|b| b.wrap_width)
-                .unwrap_or(self.input_bounds.size.width);
-
-            self.display_map.on_layout_changed(Some(wrap_width), cx);
-
             // Reset scroll to left 0
             let mut offset = self.scroll_handle.offset();
             offset.x = px(0.);
             self.scroll_handle.set_offset(offset);
-        } else {
-            self.display_map.on_layout_changed(None, cx);
         }
         cx.notify();
+    }
+
+    /// What to keep in place while soft wrap is switched, from the last layout.
+    fn wrap_anchor(&self, window: &Window) -> Option<WrapAnchor> {
+        if self.is_single_line() || self.masked {
+            return None;
+        }
+        let last_layout = self.last_layout.as_ref()?;
+        let line_height = last_layout.line_height;
+        let scroll = self.scroll_handle.offset();
+
+        let caret_in_view = self.focus_handle.is_focused(window)
+            && self
+                .prepaint_caret_geometry
+                .is_some_and(|geometry| geometry.caret_in_view(scroll));
+        if caret_in_view {
+            let offset = self.cursor();
+            let affinity = self.cursor_line_end_affinity;
+            let row = self.display_map.offset_to_display_row(offset, affinity);
+            return Some(WrapAnchor {
+                offset,
+                affinity,
+                row_top: line_height * row + scroll.y,
+                caret: true,
+            });
+        }
+
+        // The text at the top-left corner: the start of the top row, or, scrolled
+        // sideways, the byte under the left edge.
+        let top = (-scroll.y).max(px(0.));
+        let row = (f32::from(top) / f32::from(line_height)).floor() as usize;
+        let row = row.min(self.display_map.display_row_count().saturating_sub(1));
+        let mut offset = self.display_map.display_row_column_to_offset(row, 0);
+        if scroll.x < px(0.) {
+            let buffer_line = self.display_map.display_row_to_buffer_line(row);
+            let line_start = self.text.line_start_offset(buffer_line);
+            let line_top = self.display_map.buffer_line_to_display_row(buffer_line);
+            if let Some((index, _)) = last_layout.line(buffer_line).and_then(|line| {
+                line.closest_index_for_position(
+                    point(-scroll.x, line_height * row.saturating_sub(line_top)),
+                    last_layout,
+                )
+            }) {
+                offset = line_start + index;
+            }
+        }
+        Some(WrapAnchor {
+            offset,
+            affinity: false,
+            row_top: line_height * row + scroll.y,
+            caret: false,
+        })
     }
 
     /// Set how soft-wrapped continuation lines are indented, default is [`WrappingIndent::Same`]

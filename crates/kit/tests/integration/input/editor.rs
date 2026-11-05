@@ -1161,6 +1161,106 @@ fn word_deletion_at_multiple_cursors_restores_ranges_on_undo(cx: &mut TestAppCon
     .unwrap();
 }
 
+/// Thirty short lines, one that wraps into many rows, thirty more.
+fn long_line_document() -> (String, usize, usize) {
+    let short = "line\n".repeat(30);
+    let long = "word ".repeat(2000);
+    let value = format!("{short}{long}\n{short}last");
+    (value, short.len(), long.len())
+}
+
+/// Where the caret's row sits in the viewport, and the caret's bounds on screen.
+fn caret_on_screen(
+    state: &Entity<EditorState>,
+    cx: &gpui_kit::App,
+) -> (gpui_kit::Pixels, gpui_kit::Bounds<gpui_kit::Pixels>) {
+    let state = state.read(cx);
+    let caret = state.cursor_layout().unwrap().0;
+    (caret.top() + state.scroll_offset().y, caret)
+}
+
+/// Switching soft wrap keeps a caret in view where it is: at the same height, and in
+/// view sideways when its line no longer wraps.
+#[gpui_kit::test]
+fn switching_soft_wrap_keeps_the_caret_in_place(cx: &mut TestAppContext) {
+    let (handle, state) = editor(cx, "plaintext", "");
+    let (value, long_start, long_len) = long_line_document();
+    let caret = long_start + long_len / 2;
+    cx.update_window(handle.into(), |_, window, cx| {
+        state.update(cx, |state, cx| {
+            state.set_soft_wrap(true, window, cx);
+            state.set_value(value.clone(), window, cx);
+        });
+        window.render_frame(cx);
+        window.click(("input", state.entity_id()), cx);
+        state.update(cx, |state, cx| state.set_selected_range(caret..caret, cx));
+        window.render_frame(cx);
+        let viewport = state.read(cx).input_bounds();
+        let (top, _) = caret_on_screen(&state, cx);
+        assert!(state.read(cx).scroll_offset().y < px(0.));
+        assert!(top >= viewport.top() && top < viewport.bottom());
+
+        state.update(cx, |state, cx| state.set_soft_wrap(false, window, cx));
+        window.render_frame(cx);
+        let (unwrapped_top, unwrapped) = caret_on_screen(&state, cx);
+        assert_eq!(state.read(cx).cursor(), caret);
+        assert_eq!(unwrapped_top, top, "the caret keeps its height");
+        assert!(state.read(cx).scroll_offset().x < px(0.));
+        assert!(
+            unwrapped.left() >= viewport.left() && unwrapped.right() <= viewport.right(),
+            "the caret is in view sideways: {unwrapped:?} in {viewport:?}"
+        );
+
+        state.update(cx, |state, cx| state.set_soft_wrap(true, window, cx));
+        window.render_frame(cx);
+        let (wrapped_top, _) = caret_on_screen(&state, cx);
+        assert_eq!(wrapped_top, top, "and keeps it on the way back");
+        assert_eq!(state.read(cx).scroll_offset().x, px(0.));
+        assert_eq!(state.read(cx).value(), value);
+    })
+    .unwrap();
+}
+
+/// With the caret out of view, switching soft wrap keeps the text at the top-left
+/// corner there — so switching it off and on again lands on the same rows.
+#[gpui_kit::test]
+fn switching_soft_wrap_keeps_the_top_left_text_without_the_caret(cx: &mut TestAppContext) {
+    let (handle, state) = editor(cx, "plaintext", "");
+    let (value, _, _) = long_line_document();
+    cx.update_window(handle.into(), |_, window, cx| {
+        state.update(cx, |state, cx| {
+            state.set_soft_wrap(true, window, cx);
+            state.set_value(value.clone(), window, cx);
+        });
+        window.render_frame(cx);
+        let line_height = state.read(cx).line_height().unwrap();
+        // Forty rows into the long line, which starts at row 30; the caret stays at 0.
+        state.update(cx, |state, cx| {
+            state.set_scroll_offset(point(px(0.), -line_height * 70.), cx)
+        });
+        window.render_frame(cx);
+        window.render_frame(cx);
+        let wrapped = state.read(cx).scroll_offset();
+        assert_eq!(wrapped.y, -line_height * 70.);
+
+        state.update(cx, |state, cx| state.set_soft_wrap(false, window, cx));
+        window.render_frame(cx);
+        let unwrapped = state.read(cx).scroll_offset();
+        assert_eq!(
+            unwrapped.y,
+            -line_height * 30.,
+            "the long line is the top line"
+        );
+        assert!(unwrapped.x < px(0.), "scrolled sideways to the corner text");
+
+        state.update(cx, |state, cx| state.set_soft_wrap(true, window, cx));
+        window.render_frame(cx);
+        assert_eq!(state.read(cx).scroll_offset(), wrapped);
+        assert_eq!(state.read(cx).cursor(), 0);
+    })
+    .unwrap();
+}
+
 #[gpui_kit::test]
 fn unwrapped_editor_scrolls_horizontally_and_navigates_logical_lines(cx: &mut TestAppContext) {
     let (handle, state) = editor(cx, "plaintext", "");

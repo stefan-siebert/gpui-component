@@ -608,16 +608,7 @@ impl<M: InputModeKind> TextElement<M> {
                 if old.resize_reveal_owned {
                     return old.scroll_offset() == scroll_offset;
                 }
-                let caret = old.cursor_bounds();
-                let viewport = old.input_bounds();
-                let top = caret.top() + scroll_offset.y;
-                // Cached x already contains its painted scroll; account only
-                // for a wheel offset change since that geometry was produced.
-                let left = caret.left() + scroll_offset.x - old.scroll_offset().x;
-                top >= viewport.top()
-                    && top + caret.size.height <= viewport.bottom()
-                    && left >= viewport.left()
-                    && left + caret.size.width <= viewport.right()
+                old.caret_in_view(scroll_offset)
             });
 
         // Resolve a cursor or selection endpoint to a content-space position.
@@ -760,6 +751,30 @@ impl<M: InputModeKind> TextElement<M> {
                 ),
                 is_active,
             });
+        }
+
+        // Soft wrap was switched: its row is back in view and shaped, so its column can
+        // be put back too — the caret brought into view, the corner text to the left edge.
+        if let Some(anchor) = state.pending_wrap_anchor {
+            let row = state.text.offset_to_point(anchor.offset).row;
+            let x = caret_for(row, anchor.offset, anchor.affinity).x;
+            scroll_offset.x = if anchor.caret {
+                let safety_margin = match last_layout.text_align {
+                    TextAlign::Left => RIGHT_MARGIN,
+                    TextAlign::Right => px(0.),
+                    TextAlign::Center => CURSOR_WIDTH,
+                };
+                let width = bounds.size.width - line_number_width - safety_margin;
+                if scroll_offset.x + x > width {
+                    width - x
+                } else if scroll_offset.x + x < px(0.) {
+                    -x
+                } else {
+                    scroll_offset.x
+                }
+            } else {
+                -x
+            };
         }
 
         if let Some(deferred_scroll_offset) = state.deferred_scroll_offset {
@@ -2785,6 +2800,10 @@ impl<M: InputModeKind> Element for TextElement<M> {
         }
 
         let line_height = window.line_height();
+        // Soft wrap was switched: the text is wrapped at its real width now, so the row
+        // the view kept can be found again.
+        self.state
+            .update(cx, |state, _| state.restore_wrap_anchor_row(line_height));
         let token_elements = self.measure_tokens(
             (bounds.size.width - line_number_width - RIGHT_MARGIN).max(px(1.)),
             line_height,
@@ -3137,6 +3156,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         });
         self.state.update(cx, |state, _| {
             state.prepaint_caret_geometry = caret_geometry;
+            state.pending_wrap_anchor = None;
         });
 
         let search_match_paths = self.layout_search_matches(&last_layout, &mut bounds, cx);
