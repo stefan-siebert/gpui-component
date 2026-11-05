@@ -13,7 +13,10 @@ use rust_i18n::t;
 use crate::{
     ActiveTheme as _, ElementExt as _, Icon, IconName, IndexPath, StyledExt as _,
     VirtualListScrollHandle,
-    actions::{Cancel, Confirm, SelectDown, SelectUp},
+    actions::{
+        Cancel, Confirm, SelectDown, SelectFirst, SelectLast, SelectPageDown, SelectPageUp,
+        SelectUp,
+    },
     command::{
         command::CommandOptions,
         item::{CommandEntry, CommandItem},
@@ -69,6 +72,22 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("up", SelectUp, context),
         KeyBinding::new("down", SelectDown, context),
     ]);
+
+    // Home, End and the page keys move the highlight, in the query field
+    // too. That field is one line: Page Up/Down mean nothing there (and
+    // the input swallows them), and Home/End only jump the caret over a
+    // few characters. A binding at the input's own depth is needed, as its
+    // `home`/`end` would otherwise win as the deeper match. The caret keeps
+    // Ctrl+Home/End (Cmd+Left/Right on macOS) and Shift+Home/End selects.
+    let in_query: Option<&str> = Some("Command > Input");
+    for context in [context, in_query] {
+        cx.bind_keys([
+            KeyBinding::new("home", SelectFirst, context),
+            KeyBinding::new("end", SelectLast, context),
+            KeyBinding::new("pageup", SelectPageUp, context),
+            KeyBinding::new("pagedown", SelectPageDown, context),
+        ]);
+    }
 }
 
 /// One rendered line of the list.
@@ -124,6 +143,9 @@ pub struct CommandState {
     rows: Vec<CommandRow>,
     row_sizes: Rc<Vec<Size<Pixels>>>,
     list_measurement_key: Option<ListMeasurementKey>,
+    /// The height the rows had to show in at the last paint: one page for
+    /// Page Up/Down.
+    list_viewport_height: Pixels,
     needs_measure: bool,
     /// The keybinding hint each matched item showed when the rows were last
     /// measured. Hints are looked up on every render, so a keymap change can
@@ -159,6 +181,7 @@ impl CommandState {
             rows: Vec::new(),
             row_sizes: Rc::new(Vec::new()),
             list_measurement_key: None,
+            list_viewport_height: px(0.),
             needs_measure: true,
             measured_bindings: Vec::new(),
             matched: Vec::new(),
@@ -580,6 +603,118 @@ impl CommandState {
         }
     }
 
+    /// Highlight an item and scroll it into view, as keyboard navigation does.
+    fn navigate_to(&mut self, matched_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_scroll = self.matched.get(matched_ix).map(|matched| matched.row_ix);
+        self.select(matched_ix, window, cx);
+        // Already highlighted, the item may still have been scrolled away.
+        cx.notify();
+    }
+
+    /// Highlight the first (`first`) or the last item that can be confirmed.
+    fn select_edge(&mut self, first: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let mut enabled = self
+            .matched
+            .iter()
+            .enumerate()
+            .filter(|(_, matched)| !matched.disabled)
+            .map(|(matched_ix, _)| matched_ix);
+        let target = if first {
+            enabled.next()
+        } else {
+            enabled.last()
+        };
+        if let Some(target) = target {
+            self.navigate_to(target, window, cx);
+        }
+    }
+
+    /// Move the highlight one page — the height the list shows at once —
+    /// down (`forward`) or up: to the farthest item that is no more than a
+    /// page away, at least one item, skipping the disabled ones. It stops
+    /// at the ends instead of wrapping, like a list box.
+    fn select_page(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(start_row) = self
+            .selected_index
+            .and_then(|selected_index| self.matched.get(selected_index))
+            .map(|matched| matched.row_ix)
+        else {
+            // Nothing highlighted yet: the page begins at the near end.
+            self.select_edge(forward, window, cx);
+            return;
+        };
+
+        let mut target = None;
+        let mut travelled = px(0.);
+        let mut row_ix = start_row;
+        loop {
+            let next_row = if forward {
+                row_ix.checked_add(1).filter(|&next| next < self.rows.len())
+            } else {
+                row_ix.checked_sub(1)
+            };
+            let Some(next_row) = next_row else {
+                break;
+            };
+            travelled += self
+                .row_sizes
+                .get(next_row)
+                .map_or(px(0.), |row_size| row_size.height);
+            if travelled > self.list_viewport_height && target.is_some() {
+                break;
+            }
+            row_ix = next_row;
+            if let Some(&CommandRow::Item(matched_ix)) = self.rows.get(next_row)
+                && self
+                    .matched
+                    .get(matched_ix)
+                    .is_some_and(|matched| !matched.disabled)
+            {
+                target = Some(matched_ix);
+            }
+        }
+
+        if let Some(target) = target {
+            self.navigate_to(target, window, cx);
+        }
+    }
+
+    fn on_action_select_first(
+        &mut self,
+        _: &SelectFirst,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_edge(true, window, cx);
+    }
+
+    fn on_action_select_last(
+        &mut self,
+        _: &SelectLast,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_edge(false, window, cx);
+    }
+
+    fn on_action_select_page_up(
+        &mut self,
+        _: &SelectPageUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_page(false, window, cx);
+    }
+
+    fn on_action_select_page_down(
+        &mut self,
+        _: &SelectPageDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_page(true, window, cx);
+    }
+
     fn on_action_select_up(&mut self, _: &SelectUp, window: &mut Window, cx: &mut Context<Self>) {
         self.select_by(-1, window, cx);
     }
@@ -951,6 +1086,10 @@ impl Render for CommandState {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_action_select_up))
             .on_action(cx.listener(Self::on_action_select_down))
+            .on_action(cx.listener(Self::on_action_select_first))
+            .on_action(cx.listener(Self::on_action_select_last))
+            .on_action(cx.listener(Self::on_action_select_page_up))
+            .on_action(cx.listener(Self::on_action_select_page_down))
             .on_action(cx.listener(Self::on_action_confirm))
             .on_action(cx.listener(Self::on_action_cancel))
             .w_full()
@@ -999,6 +1138,11 @@ impl Render for CommandState {
                         let measure_state = command_state.clone();
                         move |bounds, window, cx| {
                             measure_state.update(cx, |state, cx| {
+                                // What the rows get of it, inside the list's
+                                // padding. Read by the page keys only, so no
+                                // redraw.
+                                state.list_viewport_height =
+                                    (bounds.size.height - window.rem_size() * 0.5).max(px(0.));
                                 // The list's `p_1` is one quarter rem on each
                                 // side. Its rem-dependent padding and inherited
                                 // layout-relevant text style participate in
@@ -2858,6 +3002,81 @@ mod tests {
             state.read_with(cx, |state, _| state.scroll_handle.base_handle().offset().y) < px(0.),
             "selecting the last row should have scrolled the list",
         );
+    }
+
+    /// A drawn 50-item command with its query field focused.
+    fn focused_fifty_items(
+        cx: &mut TestAppContext,
+    ) -> (Entity<CommandState>, &mut gpui::VisualTestContext) {
+        cx.update(crate::init);
+        let (harness, cx) = cx.add_window_view(|window, cx| Harness {
+            state: cx.new(|cx| CommandState::new(window, cx)),
+            command: Rc::new(|state| {
+                Command::new(state)
+                    .items((0..50).map(|ix| CommandItem::new().label(format!("Item {ix}"))))
+            }),
+        });
+        let state = cx.update(|_, cx| harness.read(cx).state.clone());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            state.update(cx, |state, cx| state.focus(window, cx));
+            _ = window.draw(cx);
+        });
+        (state, cx)
+    }
+
+    fn selected_row(state: &Entity<CommandState>, cx: &mut gpui::VisualTestContext) -> usize {
+        state.read_with(cx, |state, _| state.selected_index().unwrap().row)
+    }
+
+    #[gpui::test]
+    fn home_and_end_in_the_query_jump_to_the_ends_of_the_list(cx: &mut TestAppContext) {
+        let (state, cx) = focused_fifty_items(cx);
+
+        cx.simulate_keystrokes("end");
+        assert_eq!(selected_row(&state, cx), 49);
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(
+            state.read_with(cx, |state, _| state.scroll_handle.base_handle().offset().y) < px(0.),
+            "End should bring the last row into view",
+        );
+
+        cx.simulate_keystrokes("home");
+        assert_eq!(selected_row(&state, cx), 0);
+
+        // The caret still moves: Shift+Home selects the typed query.
+        cx.simulate_input("Item");
+        cx.simulate_keystrokes("shift-home backspace");
+        assert_eq!(state.read_with(cx, |state, cx| state.query(cx)), "");
+    }
+
+    #[gpui::test]
+    fn page_keys_move_the_highlight_by_what_the_list_shows(cx: &mut TestAppContext) {
+        let (state, cx) = focused_fifty_items(cx);
+        let (row_height, viewport) = state.read_with(cx, |state, _| {
+            (state.row_sizes[0].height, state.list_viewport_height)
+        });
+        assert!(viewport > row_height * 2.);
+        let page = (viewport / row_height).floor() as usize;
+
+        cx.simulate_keystrokes("pagedown");
+        assert_eq!(selected_row(&state, cx), page);
+        cx.simulate_keystrokes("pagedown");
+        assert_eq!(selected_row(&state, cx), page * 2);
+
+        cx.simulate_keystrokes("pageup");
+        assert_eq!(selected_row(&state, cx), page);
+
+        // The page keys stop at the ends rather than wrapping.
+        for _ in 0..10 {
+            cx.simulate_keystrokes("pagedown");
+        }
+        assert_eq!(selected_row(&state, cx), 49);
+        for _ in 0..10 {
+            cx.simulate_keystrokes("pageup");
+        }
+        assert_eq!(selected_row(&state, cx), 0);
     }
 
     #[gpui::test]
