@@ -174,6 +174,28 @@ impl TableDelegate for LargeDataDelegate {
 }
 ```
 
+### Windowed Rows for Millions of Rows
+
+The body is a `uniform_list`, which scrolls in `f32` pixels over every row:
+at 32 px a row, `f32` stops counting whole pixels past about half a million
+rows, and further down a trackpad's small steps round away. For tables that
+long — a log, a CSV export — make the state windowed:
+
+```rust
+let state = cx.new(|cx| TableState::new(delegate, window, cx).windowed(true));
+```
+
+A windowed table keeps the top row as an index and renders only the rows that
+fit. The wheel moves it by the exact distance, the keyboard and
+`scroll_to_row` place a row as before, and the vertical scrollbar maps its
+travel onto the rows by fraction. Read the position through
+`state.row_window()` (`top_row()`, `row_offset()`, `fraction()`). Header,
+fixed columns, horizontal scrolling, selection, resizing and sorting are
+unchanged.
+
+Every row is `Size::table_row_height` tall — a height set in `render_tr` is
+not measured — and `scroll_bounce` does not apply.
+
 ### Sorting Implementation
 
 Implement sorting in your delegate:
@@ -727,6 +749,8 @@ impl TableDelegate for MyTableDelegate {
 - `selected_col()` - Get the selected column; `None` unless a column itself is selected
 - `clear_selection(cx)` - Clear all selections
 - `scroll_to_row(row_ix, cx)` - Scroll to specific row
+- `windowed(bool)` - Render the rows from a top row index, for tables of millions of rows
+- `row_window()` - The rows' position of a windowed table (`top_row`, `row_offset`, `fraction`)
 - `scroll_to_col(col_ix, cx)` - Scroll to specific column
 - `col_width(col_ix)` - Get the width a column is drawn at now
 - `fit_col(col_ix, window, cx)` - Fit a column to its content

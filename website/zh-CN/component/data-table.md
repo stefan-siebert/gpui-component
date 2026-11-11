@@ -262,6 +262,18 @@ let state = cx.new(|cx| {
 });
 ```
 
+### 百万行级表格的窗口化渲染
+
+表格主体是一个 `uniform_list`，它以 `f32` 像素记录所有行的滚动偏移：每行 32 px 时，超过约 50 万行后 `f32` 已无法精确到整像素，再往下触控板的细小滚动会被舍入掉。对于日志、CSV 导出这类超长表格，可以开启窗口化：
+
+```rust
+let state = cx.new(|cx| TableState::new(delegate, window, cx).windowed(true));
+```
+
+窗口化的表格以行索引记录顶部行，只渲染可见的行。滚轮按精确距离滚动，键盘和 `scroll_to_row` 定位行的方式不变，垂直滚动条按比例把拖动行程映射到所有行。通过 `state.row_window()` 读取位置（`top_row()`、`row_offset()`、`fraction()`）。表头、固定列、水平滚动、选择、列宽调整和排序都不受影响。
+
+每行高度固定为 `Size::table_row_height`，不会测量 `render_tr` 中设置的高度；`scroll_bounce` 也不生效。
+
 ### 单元格选择
 
 启用 `cell_selectable(true)` 后：
@@ -442,6 +454,8 @@ DataTable::new(&state)
 - `selected_col()` - 仅在列本身被选中时有值
 - `clear_selection(cx)`
 - `scroll_to_row(row_ix, cx)`
+- `windowed(bool)` - 以顶部行索引渲染行，适用于百万行级表格
+- `row_window()` - 窗口化表格的行位置（`top_row`、`row_offset`、`fraction`）
 - `scroll_to_col(col_ix, cx)`
 - `col_width(col_ix)` - 返回列当前的绘制宽度
 - `fit_col(col_ix, window, cx)` - 把列调整为其内容的宽度，等同于双击列宽调整手柄

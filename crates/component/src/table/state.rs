@@ -275,6 +275,9 @@ pub struct TableState<D: TableDelegate> {
 
     pub vertical_scroll_handle: UniformListScrollHandle,
     pub horizontal_scroll_handle: VirtualListScrollHandle,
+    /// Fork: the rows' position when the table is [`Self::windowed`]; the
+    /// `vertical_scroll_handle` is unused then.
+    row_window: Option<RowWindowHandle>,
 
     selected_row: Option<usize>,
     selection_mode: SelectionMode,
@@ -341,6 +344,7 @@ where
             header_layout: Vec::new(),
             horizontal_scroll_handle: VirtualListScrollHandle::new(),
             vertical_scroll_handle: UniformListScrollHandle::new(),
+            row_window: None,
             selection_mode: SelectionMode::Row,
             selected_row: None,
             right_clicked_row: None,
@@ -462,6 +466,40 @@ where
         self
     }
 
+    /// Fork: render the rows from a top row index instead of a `uniform_list`,
+    /// default is false.
+    ///
+    /// A `uniform_list` scrolls in `f32` pixels over every row, which stops
+    /// counting whole pixels past about half a million rows; a windowed table
+    /// keeps the top row as an index and draws only the rows that fit, so a
+    /// table of any length scrolls as precisely at its end as at its start.
+    /// The wheel, the keyboard, [`Self::scroll_to_row`] and the vertical
+    /// scrollbar (which maps its travel onto the rows by fraction) move the
+    /// rows; read the position through [`Self::row_window`].
+    ///
+    /// Every row is [`Size::table_row_height`] tall — a height set in
+    /// [`TableDelegate::render_tr`] is not measured — and the scroll bounce
+    /// does not apply.
+    ///
+    /// [`Size::table_row_height`]: crate::Size::table_row_height
+    pub fn windowed(mut self, windowed: bool) -> Self {
+        self.row_window = windowed.then(RowWindowHandle::default);
+        self
+    }
+
+    /// Fork: the rows' position of a [`Self::windowed`] table, `None` otherwise.
+    pub fn row_window(&self) -> Option<&RowWindowHandle> {
+        self.row_window.as_ref()
+    }
+
+    /// Scrolls `row_ix` into view by the body's own means.
+    fn scroll_row_into_view(&self, row_ix: usize, strategy: ScrollStrategy) {
+        match &self.row_window {
+            Some(row_window) => row_window.scroll_to_row(row_ix, strategy),
+            None => self.vertical_scroll_handle.scroll_to_item(row_ix, strategy),
+        }
+    }
+
     /// When we update columns or rows, we need to refresh the table.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.prepare_col_groups(cx);
@@ -469,8 +507,7 @@ where
 
     /// Scroll to the row at the given index.
     pub fn scroll_to_row(&mut self, row_ix: usize, cx: &mut Context<Self>) {
-        self.vertical_scroll_handle
-            .scroll_to_item(row_ix, ScrollStrategy::Top);
+        self.scroll_row_into_view(row_ix, ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -567,7 +604,7 @@ where
         self.right_clicked_row = None;
         self.selected_row = Some(row_ix);
         if let Some(row_ix) = self.selected_row {
-            self.vertical_scroll_handle.scroll_to_item(
+            self.scroll_row_into_view(
                 row_ix,
                 if is_down {
                     ScrollStrategy::Bottom
@@ -663,8 +700,7 @@ where
         self.right_clicked_cell = None;
 
         // Scroll to the cell
-        self.vertical_scroll_handle
-            .scroll_to_item(row_ix, ScrollStrategy::Center);
+        self.scroll_row_into_view(row_ix, ScrollStrategy::Center);
         self.scroll_to_col(col_ix, cx);
 
         cx.emit(TableEvent::SelectCell(row_ix, col_ix));
@@ -2979,6 +3015,91 @@ where
         }
     }
 
+    /// Fork: the body of a [`Self::windowed`] table — the rows from the top
+    /// row that fit, in a plain column moved up by the part of the top row
+    /// scrolled out.
+    // The arguments are `render_table_row`'s, which this passes on per row.
+    #[allow(clippy::too_many_arguments)]
+    fn render_windowed_rows(
+        &mut self,
+        row_window: &RowWindowHandle,
+        rows_count: usize,
+        left_columns_count: usize,
+        columns_count: usize,
+        body_height: Pixels,
+        is_filled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row_height = self.options.size.table_row_height();
+        let top_row = row_window.top_row();
+        let row_offset = row_window.row_offset();
+        // Every row at least partly in view.
+        let fitting = ((body_height + row_offset) / row_height).ceil().max(1.) as usize;
+        let visible_end = top_row.saturating_add(fitting).min(rows_count);
+        // Stripe filler rows below the last row, as the `uniform_list` draws.
+        let render_end = if self.options.stripe {
+            top_row.saturating_add(fitting)
+        } else {
+            visible_end
+        };
+        let visible_range = top_row.min(visible_end)..visible_end;
+
+        self.load_more_if_need(rows_count, visible_range.end, window, cx);
+        self.update_visible_range_if_need(
+            visible_range.clone(),
+            rows_count,
+            Axis::Vertical,
+            window,
+            cx,
+        );
+        self.delegate_mut()
+            .visible_rows_rendered(visible_range, window, cx);
+
+        let rows: Vec<AnyElement> = (top_row..render_end)
+            .map(|row_ix| {
+                self.render_table_row(
+                    row_ix,
+                    rows_count,
+                    left_columns_count,
+                    columns_count,
+                    is_filled,
+                    window,
+                    cx,
+                )
+            })
+            .collect();
+
+        div()
+            .id("table-row-window")
+            .relative()
+            .flex_grow_1()
+            .size_full()
+            .overflow_hidden()
+            .on_prepaint({
+                let row_window = row_window.clone();
+                let state = cx.entity();
+                move |bounds, _, cx| {
+                    // A new height wants another number of rows, next frame.
+                    if row_window.set_viewport(bounds) {
+                        state.update(cx, |_, cx| cx.notify());
+                    }
+                }
+            })
+            // Out of the flow, so the rows give the body no height of their
+            // own: in flow they would hold it at their full height, past the
+            // table's bottom edge by the header's height.
+            .child(
+                v_flex()
+                    .absolute()
+                    .top(-row_offset)
+                    .left_0()
+                    .right_0()
+                    .children(rows),
+            )
+            .into_any_element()
+    }
+
     /// Calculate the extra rows needed to fill the table empty space when `stripe` is true.
     fn calculate_extra_rows_needed(
         &self,
@@ -3052,9 +3173,12 @@ where
                 .bottom_0()
                 .w(Scrollbar::width())
                 .child(
-                    Scrollbar::vertical(&self.vertical_scroll_handle)
-                        .viewport_from_layout()
-                        .max_fps(60),
+                    match &self.row_window {
+                        Some(row_window) => Scrollbar::vertical(row_window),
+                        None => Scrollbar::vertical(&self.vertical_scroll_handle),
+                    }
+                    .viewport_from_layout()
+                    .max_fps(60),
                 ),
         )
     }
@@ -3105,14 +3229,24 @@ where
         let loading = self.delegate.loading(cx);
 
         let row_height = self.options.size.table_row_height();
-        let total_height = self
-            .vertical_scroll_handle
-            .0
-            .borrow()
-            .base_handle
-            .bounds()
-            .size
-            .height;
+        let total_height = match &self.row_window {
+            Some(row_window) => {
+                row_window.lay_out(rows_count, row_height);
+                // Before the first layout, enough rows for the whole window.
+                row_window
+                    .viewport_height()
+                    .unwrap_or_else(|| window.viewport_size().height)
+            }
+            None => {
+                self.vertical_scroll_handle
+                    .0
+                    .borrow()
+                    .base_handle
+                    .bounds()
+                    .size
+                    .height
+            }
+        };
         let actual_height = row_height * rows_count as f32;
         let extra_rows_count =
             self.calculate_extra_rows_needed(total_height, actual_height, row_height);
@@ -3160,6 +3294,20 @@ where
             cx,
         );
 
+        let windowed_rows = match self.row_window.clone() {
+            Some(row_window) if rows_count > 0 => Some(self.render_windowed_rows(
+                &row_window,
+                rows_count,
+                left_columns_count,
+                columns_count,
+                total_height,
+                is_filled,
+                window,
+                cx,
+            )),
+            _ => None,
+        };
+
         let inner_table = v_flex()
             .id("table-inner")
             .size_full()
@@ -3174,6 +3322,15 @@ where
             .map(|this| {
                 if rows_count == 0 {
                     this.children(empty_view)
+                } else if let Some(windowed_rows) = windowed_rows {
+                    this.child(
+                        h_flex()
+                            .id("table-body")
+                            .flex_grow_1()
+                            .h_full()
+                            .min_w_full()
+                            .child(windowed_rows),
+                    )
                 } else {
                     this.child(
                         // min_w_full() ensures the table body fills its parent
@@ -3306,11 +3463,14 @@ where
                     // ancestor scroller. Skipped when the table is empty:
                     // the `uniform_list` is not rendered then, so the
                     // handle's offset and `max_offset` are stale.
-                    .when(rows_count > 0, |this| {
-                        this.child(ScrollableMask::new(
+                    .when(rows_count > 0, |this| match &self.row_window {
+                        Some(row_window) => {
+                            this.child(ScrollableMask::new(Axis::Vertical, &row_window.wheel()))
+                        }
+                        None => this.child(ScrollableMask::new(
                             Axis::Vertical,
                             &self.vertical_scroll_handle.0.borrow().base_handle,
-                        ))
+                        )),
                     })
                     .when(has_right_click, |this| {
                         this.on_mouse_down_out(cx.listener(|this, e, window, cx| {
@@ -3894,7 +4054,10 @@ mod tests {
         draw(cx);
 
         let filled = edges(&cells);
-        assert!((filled[5] - start[5]).abs() < px(0.5), "{start:?} {filled:?}");
+        assert!(
+            (filled[5] - start[5]).abs() < px(0.5),
+            "{start:?} {filled:?}"
+        );
         assert!((filled[1] - (start[1] + px(40.))).abs() < px(0.5));
         assert_rows_follow_header(&state, &cells, cx);
     }
@@ -3985,5 +4148,218 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    /// Fork: a windowed table, its rows counted through a shared cell so a
+    /// test can grow them, the rows of its last render recorded.
+    struct WindowedDelegate {
+        rows_count: Rc<std::cell::Cell<usize>>,
+        rendered: Rc<RefCell<Vec<usize>>>,
+    }
+
+    impl TableDelegate for WindowedDelegate {
+        fn columns_count(&self, _: &App) -> usize {
+            2
+        }
+        fn rows_count(&self, _: &App) -> usize {
+            self.rows_count.get()
+        }
+        fn column(&self, col_ix: usize, _: &App) -> Column {
+            Column::new(format!("col-{col_ix}"), format!("Col {col_ix}"))
+        }
+        fn render_td(
+            &mut self,
+            row: usize,
+            col_ix: usize,
+            _: &mut Window,
+            _: &mut Context<TableState<Self>>,
+        ) -> impl IntoElement {
+            if col_ix == 0 {
+                self.rendered.borrow_mut().push(row);
+            }
+            div().child(row.to_string())
+        }
+    }
+
+    struct WindowedTable(Entity<TableState<WindowedDelegate>>);
+
+    impl Render for WindowedTable {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(240.)).h(px(200.)).child(DataTable::new(&self.0))
+        }
+    }
+
+    struct Windowed<'a> {
+        cx: &'a mut gpui::VisualTestContext,
+        state: Entity<TableState<WindowedDelegate>>,
+        rows_count: Rc<std::cell::Cell<usize>>,
+        rendered: Rc<RefCell<Vec<usize>>>,
+    }
+
+    impl Windowed<'_> {
+        /// Draws again and returns the rows that frame rendered.
+        fn rows(&mut self) -> Vec<usize> {
+            self.rendered.borrow_mut().clear();
+            self.cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx)
+            });
+            let mut rows = self.rendered.borrow().clone();
+            rows.dedup();
+            rows
+        }
+
+        fn top_row(&mut self) -> (usize, Pixels) {
+            self.state.read_with(self.cx, |state, _| {
+                let row_window = state.row_window().expect("the table is windowed");
+                (row_window.top_row(), row_window.row_offset())
+            })
+        }
+
+        fn wheel(&mut self, delta_y: f32) {
+            self.cx.simulate_event(gpui::ScrollEvent {
+                position: gpui::point(px(100.), px(100.)),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(delta_y))),
+                ..Default::default()
+            });
+        }
+    }
+
+    fn windowed_table(cx: &mut TestAppContext, rows_count: usize) -> Windowed<'_> {
+        cx.update(crate::init);
+        let rows_count = Rc::new(std::cell::Cell::new(rows_count));
+        let rendered = Rc::new(RefCell::new(Vec::new()));
+        let (view, cx) = cx.add_window_view({
+            let rows_count = rows_count.clone();
+            let rendered = rendered.clone();
+            move |window, cx| {
+                let delegate = WindowedDelegate {
+                    rows_count,
+                    rendered,
+                };
+                WindowedTable(cx.new(|cx| TableState::new(delegate, window, cx).windowed(true)))
+            }
+        });
+        let state = view.read_with(cx, |view, _| view.0.clone());
+        cx.update(|window, cx| {
+            let handle = state.focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        draw(cx);
+        Windowed {
+            cx,
+            state,
+            rows_count,
+            rendered,
+        }
+    }
+
+    /// The rows of a frame follow each other and are no more than fit.
+    fn assert_window(rows: &[usize], first: usize, last: usize) {
+        assert_eq!(rows.first(), Some(&first), "rows {rows:?}");
+        assert_eq!(rows.last(), Some(&last), "rows {rows:?}");
+        assert!(
+            rows.windows(2).all(|pair| pair[1] == pair[0] + 1),
+            "rows {rows:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_windowed_table_draws_only_the_rows_that_fit(cx: &mut TestAppContext) {
+        let mut table = windowed_table(cx, 10_000_000);
+        // 200 px less the border (2) and the header (32) is 166 px: six rows
+        // of 32 px, the last in part.
+        let rows = table.rows();
+        assert_window(&rows, 0, 5);
+        let visible = table
+            .state
+            .read_with(table.cx, |state, _| state.visible_range().rows().clone());
+        assert_eq!(visible, 0..6);
+    }
+
+    #[gpui::test]
+    fn the_keyboard_reaches_the_last_of_ten_million_rows(cx: &mut TestAppContext) {
+        let mut table = windowed_table(cx, 10_000_000);
+        table.cx.simulate_keystrokes("down end");
+        let rows = table.rows();
+        assert_window(&rows, 9_999_994, 9_999_999);
+        // The last row's bottom is the viewport's: 166 = 5 * 32 + 6.
+        assert_eq!(table.top_row(), (9_999_994, px(26.)));
+        let selected = table
+            .state
+            .read_with(table.cx, |state, _| state.selected_row());
+        assert_eq!(selected, Some(9_999_999));
+
+        table.cx.simulate_keystrokes("up up up up up up");
+        let rows = table.rows();
+        assert_eq!(
+            table.top_row(),
+            (9_999_993, px(0.)),
+            "row 9 999 993 to the top"
+        );
+        assert_window(&rows, 9_999_993, 9_999_998);
+
+        table.cx.simulate_keystrokes("home");
+        assert_window(&table.rows(), 0, 5);
+    }
+
+    #[gpui::test]
+    fn the_wheel_moves_a_windowed_table_by_the_pixel(cx: &mut TestAppContext) {
+        let mut table = windowed_table(cx, 10_000_000);
+        table.wheel(-40.);
+        assert_eq!(table.top_row(), (1, px(8.)));
+        assert_window(&table.rows(), 1, 6);
+
+        table.cx.simulate_keystrokes("down end");
+        table.rows();
+        // Half a pixel a frame near the end, which `f32` pixels over every
+        // row (3.2e8 px, 32 px apart) would round away.
+        for _ in 0..52 {
+            table.wheel(0.5);
+        }
+        assert_eq!(table.top_row(), (9_999_994, px(0.)));
+        table.wheel(32.);
+        assert_eq!(table.top_row(), (9_999_993, px(0.)));
+    }
+
+    #[gpui::test]
+    fn the_scrollbar_track_jumps_a_windowed_table_by_fraction(cx: &mut TestAppContext) {
+        let mut table = windowed_table(cx, 10_000_000);
+        // The middle of the track: the table's right edge (239 inside its
+        // border) less half a bar, and halfway down the 166 px below the
+        // header (1 + 32 + 83).
+        let position = gpui::point(px(239.) - Scrollbar::width() / 2., px(116.));
+        table
+            .cx
+            .simulate_mouse_move(position, None, gpui::Modifiers::none());
+        table.rows();
+        table.cx.simulate_click(position, gpui::Modifiers::none());
+        table.rows();
+        let fraction = table.state.read_with(table.cx, |state, _| {
+            state.row_window().map(|w| w.fraction())
+        });
+        let fraction = fraction.expect("the table is windowed");
+        assert!((fraction - 0.5).abs() < 0.01, "fraction {fraction}");
+        let (top_row, row_offset) = table.top_row();
+        // Six rows, or seven when the top one is out by more than 26 px.
+        let last = top_row + if row_offset > px(26.) { 6 } else { 5 };
+        assert_window(&table.rows(), top_row, last);
+    }
+
+    #[gpui::test]
+    fn a_windowed_table_follows_its_rows_as_they_stream_in(cx: &mut TestAppContext) {
+        let mut table = windowed_table(cx, 3);
+        // Fewer rows than fit: no window to scroll, nothing past the last row.
+        assert_window(&table.rows(), 0, 2);
+        table.wheel(-40.);
+        assert_eq!(table.top_row(), (0, px(0.)));
+
+        table.rows_count.set(2_000_000);
+        table.cx.simulate_keystrokes("down end");
+        assert_window(&table.rows(), 1_999_994, 1_999_999);
+
+        table.rows_count.set(4_000_000);
+        table.cx.simulate_keystrokes("end");
+        assert_window(&table.rows(), 3_999_994, 3_999_999);
     }
 }
