@@ -8,9 +8,9 @@ use crate::{
     v_flex,
 };
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, FocusHandle, InteractiveElement as _, IntoElement,
-    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, StyleRefinement,
-    Styled, Window, div, percentage, prelude::FluentBuilder,
+    AnyElement, App, ClickEvent, Div, ElementId, FocusHandle, InteractiveElement as _, IntoElement,
+    ParentElement as _, Role, SharedString, Stateful, StatefulInteractiveElement as _,
+    StyleRefinement, Styled, Window, div, percentage, prelude::FluentBuilder,
 };
 use gpui_base::TestSupportExt as _;
 use std::rc::Rc;
@@ -119,6 +119,10 @@ pub struct SidebarMenuItem {
     click_to_toggle: bool,
     children: Vec<Self>,
     suffix: Option<Rc<dyn Fn(&mut Window, &mut App) -> AnyElement + 'static>>,
+    detail: Option<Rc<dyn Fn(&mut Window, &mut App) -> AnyElement + 'static>>,
+    /// Drop targets and their drag-over styles, applied to the row in the
+    /// order they were added ([`Self::on_drop`], [`Self::drag_over`]).
+    drag_and_drop: Vec<Rc<dyn Fn(Stateful<Div>) -> Stateful<Div>>>,
     disabled: bool,
     context_menu: Option<Rc<dyn Fn(PopupMenu, &mut Window, &mut App) -> PopupMenu + 'static>>,
     focus_handle: Option<FocusHandle>,
@@ -143,6 +147,8 @@ impl SidebarMenuItem {
             click_to_toggle: false,
             children: Vec::new(),
             suffix: None,
+            detail: None,
+            drag_and_drop: Vec::new(),
             disabled: false,
             context_menu: None,
             focus_handle: None,
@@ -233,6 +239,49 @@ impl SidebarMenuItem {
     {
         self.suffix = Some(Rc::new(move |window, cx| {
             builder(window, cx).into_any_element()
+        }));
+        self
+    }
+
+    /// Set a second line under the label — a meter, a muted path. The row
+    /// grows to hold it; its highlight, click target and focus take it in.
+    pub fn detail<F, E>(mut self, builder: F) -> Self
+    where
+        F: Fn(&mut Window, &mut App) -> E + 'static,
+        E: IntoElement,
+    {
+        self.detail = Some(Rc::new(move |window, cx| {
+            builder(window, cx).into_any_element()
+        }));
+        self
+    }
+
+    /// Accept a drop of a `T` on the row, as [`gpui::InteractiveElement::on_drop`].
+    pub fn on_drop<T: 'static>(
+        mut self,
+        listener: impl Fn(&T, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        let listener = Rc::new(listener);
+        self.drag_and_drop.push(Rc::new(move |row| {
+            let listener = listener.clone();
+            row.on_drop::<T>(move |value, window, cx| listener(value, window, cx))
+        }));
+        self
+    }
+
+    /// Style the row while a `T` is dragged over it, as
+    /// [`gpui::InteractiveElement::drag_over`]. It wins over the active
+    /// row's fill; hover is not drawn during a drag.
+    pub fn drag_over<T: 'static>(
+        mut self,
+        style: impl Fn(StyleRefinement, &T, &mut Window, &mut App) -> StyleRefinement + 'static,
+    ) -> Self {
+        let style = Rc::new(style);
+        self.drag_and_drop.push(Rc::new(move |row| {
+            let style = style.clone();
+            row.drag_over::<T>(move |refinement, value, window, cx| {
+                style(refinement, value, window, cx)
+            })
         }));
         self
     }
@@ -360,6 +409,8 @@ impl SidebarItem for SidebarMenuItem {
         let is_hoverable = !is_active && !self.disabled;
         let is_disabled = self.disabled;
         let is_open = !is_collapsed && is_submenu && is_open_state;
+        let drag_and_drop = self.drag_and_drop.clone();
+        let detail = self.detail.clone().map(|detail| detail(window, cx));
 
         div()
             .id(id.clone())
@@ -369,6 +420,7 @@ impl SidebarItem for SidebarMenuItem {
                 h_flex()
                     .size_full()
                     .id("item")
+                    .map(|row| drag_and_drop.iter().fold(row, |row, refine| refine(row)))
                     .when(!is_disabled, |this| match &focus_handle {
                         Some(focus_handle) => this.track_focus(focus_handle),
                         None => this.tab_index(0),
@@ -407,62 +459,72 @@ impl SidebarItem for SidebarMenuItem {
                         })
                     })
                     .when(!is_collapsed, |this| {
-                        this.h_7()
-                            .child(
-                                h_flex()
-                                    .flex_1()
-                                    .gap_x_2()
-                                    .justify_between()
-                                    .overflow_x_hidden()
-                                    .child(
-                                        h_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .overflow_x_hidden()
-                                            .refine_style(&self.label_style)
-                                            // A block of its own, so the text
-                                            // is laid out at the width left to
-                                            // it and ends in "…"; as a flex
-                                            // item it kept its full width and
-                                            // was cut mid-letter.
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .child(self.label.clone()),
-                                            ),
+                        this.map(|this| match detail.is_some() {
+                            // As tall as its two lines; `h_7` is one.
+                            true => this.py_1(),
+                            false => this.h_7(),
+                        })
+                        .child(
+                            h_flex()
+                                .flex_1()
+                                .gap_x_2()
+                                .justify_between()
+                                .overflow_x_hidden()
+                                .child(
+                                    h_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_x_hidden()
+                                        .refine_style(&self.label_style)
+                                        // A block of its own, so the text
+                                        // is laid out at the width left to
+                                        // it and ends in "…"; as a flex
+                                        // item it kept its full width and
+                                        // was cut mid-letter.
+                                        .child(
+                                            v_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .gap_0p5()
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .child(self.label.clone()),
+                                                )
+                                                .children(detail),
+                                        ),
+                                )
+                                .when_some(self.suffix.clone(), |this, suffix| {
+                                    this.child(suffix(window, cx).into_any_element())
+                                }),
+                        )
+                        .when_some(set_open.clone(), |this, set_open| {
+                            this.child(
+                                Button::new("caret")
+                                    .xsmall()
+                                    .ghost()
+                                    .accessibility_label(self.caret_accessibility_label())
+                                    // The owner of a roving tabindex expands
+                                    // with the arrow keys; the caret is the
+                                    // mouse equivalent, not a stop of its own.
+                                    .when(owns_focus, |this| this.tab_stop(false))
+                                    .icon(
+                                        Icon::new(IconName::ChevronRight)
+                                            .size_4()
+                                            .when(is_open, |this| {
+                                                this.rotate(percentage(90. / 360.))
+                                            }),
                                     )
-                                    .when_some(self.suffix.clone(), |this, suffix| {
-                                        this.child(suffix(window, cx).into_any_element())
+                                    .on_click({
+                                        move |_, window, cx| {
+                                            // Avoid trigger item click, just expand/collapse submenu
+                                            cx.stop_propagation();
+                                            set_open(!is_open_state, window, cx);
+                                        }
                                     }),
                             )
-                            .when_some(set_open.clone(), |this, set_open| {
-                                this.child(
-                                    Button::new("caret")
-                                        .xsmall()
-                                        .ghost()
-                                        .accessibility_label(self.caret_accessibility_label())
-                                        // The owner of a roving tabindex expands
-                                        // with the arrow keys; the caret is the
-                                        // mouse equivalent, not a stop of its own.
-                                        .when(owns_focus, |this| this.tab_stop(false))
-                                        .icon(
-                                            Icon::new(IconName::ChevronRight)
-                                                .size_4()
-                                                .when(is_open, |this| {
-                                                    this.rotate(percentage(90. / 360.))
-                                                }),
-                                        )
-                                        .on_click({
-                                            move |_, window, cx| {
-                                                // Avoid trigger item click, just expand/collapse submenu
-                                                cx.stop_propagation();
-                                                set_open(!is_open_state, window, cx);
-                                            }
-                                        }),
-                                )
-                            })
+                        })
                     })
                     .when(is_disabled, |this| {
                         this.text_color(cx.theme().muted_foreground)
@@ -547,6 +609,18 @@ mod tests {
 
         assert!(expanded.collapsed_tooltip().is_none());
         assert!(iconless.collapsed_tooltip().is_none());
+    }
+
+    #[test]
+    fn drop_targets_and_their_styles_are_kept_in_order() {
+        struct Dragged;
+        let item = SidebarMenuItem::new("Downloads")
+            .on_drop(|_: &Dragged, _, _| {})
+            .drag_over::<Dragged>(|style, _, _, _| style);
+
+        assert_eq!(item.drag_and_drop.len(), 2);
+        assert!(item.detail.is_none());
+        assert!(item.detail(|_, _| div()).detail.is_some());
     }
 
     #[test]
