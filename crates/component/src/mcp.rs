@@ -2828,16 +2828,38 @@ struct SnapshotNode {
 /// an agent matches on — but it supplies one where nothing is painted, which
 /// is exactly the icon-only button the audit has always had to report as
 /// nameless.
+///
+/// A role guessed from the file is dropped inside an element that declared
+/// the same role: that is the widget's own trigger or label row, painted by
+/// the same file, not a second widget. A `Select` declares its combobox and
+/// its label on the outer element; the clickable row inside it would
+/// otherwise print as a second, nameless combobox.
 fn snapshot_nodes(
     elements: &[UiElement],
     interactive_only: bool,
     a11y: &A11yNodes,
 ) -> Vec<SnapshotNode> {
+    snapshot_nodes_within(elements, interactive_only, a11y, None)
+}
+
+/// [`snapshot_nodes`] below an element that declared `enclosing`.
+fn snapshot_nodes_within(
+    elements: &[UiElement],
+    interactive_only: bool,
+    a11y: &A11yNodes,
+    enclosing: Option<&'static str>,
+) -> Vec<SnapshotNode> {
     let mut nodes = Vec::new();
 
     for element in elements {
-        let children = snapshot_nodes(&element.children, interactive_only, a11y);
         let node = a11y.get(&element.accesskit_node_id);
+        let declared = node.and_then(|node| node.role);
+        let children = snapshot_nodes_within(
+            &element.children,
+            interactive_only,
+            a11y,
+            declared.or(enclosing),
+        );
 
         let derived = element
             .source_location
@@ -2847,8 +2869,9 @@ fn snapshot_nodes(
             // because one file paints both a title bar and its close button.
             // A declared role needs no such guard, so this filter stays on the
             // derived half.
-            .filter(|role| !REGION_ROLES.contains(role) || !children.is_empty());
-        let role = node.and_then(|node| node.role).or(derived);
+            .filter(|role| !REGION_ROLES.contains(role) || !children.is_empty())
+            .filter(|role| enclosing != Some(*role));
+        let role = declared.or(derived);
 
         let test_id = test_id_of(strip_id_decoration(&element.id)).map(str::to_string);
         let name = line_name(element, node.and_then(|node| node.label.as_deref()));
@@ -4363,6 +4386,46 @@ mod tests {
 
         let rendered = render(&snapshot_nodes(&[element], false, &a11y));
         assert!(rendered.contains("- button "), "{rendered}");
+    }
+
+    /// A `Select` declares its combobox and its name on the outer element;
+    /// the clickable row inside, painted by the same file, is part of it and
+    /// not a second combobox nobody named.
+    #[test]
+    fn a_part_of_a_declared_widget_is_not_a_second_one() {
+        let source = Some("crates/component/src/select.rs:1:1");
+        let title = ui_element("W/a.lang.input.title[0]", source, &["Rust"], vec![]);
+        let trigger = ui_element("W/a.lang.input[0]", source, &[], vec![title]);
+        let mut select = ui_element("W/a.lang[0]", source, &[], vec![trigger]);
+        select.accesskit_node_id = 16;
+        let mut a11y = A11yNodes::new();
+        a11y.insert(
+            16,
+            a11y_node_of(&json!({ "role": "ComboBox", "label": "Language" })),
+        );
+
+        let nodes = snapshot_nodes(&[select], false, &a11y);
+        let mut flat = Vec::new();
+        flatten_snapshot(&nodes, &mut flat);
+        let comboboxes: Vec<_> = flat
+            .iter()
+            .filter(|node| node.role == Some("combobox"))
+            .collect();
+        assert_eq!(comboboxes.len(), 1, "{}", render(&nodes));
+        assert!(audit_controls(&flat, 1.0).is_empty(), "{}", render(&nodes));
+
+        // A different widget inside keeps its own guess: the clear button of
+        // a select is still a button.
+        let clear = ui_element(
+            "W/a.lang.clear[0]",
+            Some("crates/component/src/button/button.rs:1:1"),
+            &["Clear"],
+            vec![],
+        );
+        let mut select = ui_element("W/a.lang[0]", source, &[], vec![clear]);
+        select.accesskit_node_id = 16;
+        let rendered = render(&snapshot_nodes(&[select], false, &a11y));
+        assert!(rendered.contains("- button \"Clear\""), "{rendered}");
     }
 
     /// A tab's label is painted by an id-less row inside it, which gpui

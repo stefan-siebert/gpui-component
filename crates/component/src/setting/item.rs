@@ -255,8 +255,15 @@ impl SettingItem {
         window: &mut Window,
         cx: &mut App,
     ) -> Stateful<Div> {
+        // The group's number too: `item-0` alone stands in every group, so
+        // the first switch of two groups could not be told apart, not even
+        // scoped (`item-0-1>>check` can).
         div()
-            .id(SharedString::from(format!("item-{}", options.item_ix())))
+            .id(SharedString::from(format!(
+                "item-{}-{}",
+                options.group_ix(),
+                options.item_ix()
+            )))
             .w_full()
             .child(match self {
                 SettingItem::Item {

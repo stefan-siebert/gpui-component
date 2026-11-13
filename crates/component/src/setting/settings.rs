@@ -389,7 +389,12 @@ impl Settings {
                     };
                     let is_page_active = selected_index.page_ix == page_ix
                         && (selected_index.group_ix.is_none() || groups.len() == 1);
+                    let entry_id = match &page.id {
+                        Some(id) => format!("page-{id}"),
+                        None => format!("page-{page_ix}"),
+                    };
                     SidebarMenuItem::new(page.title.clone())
+                        .id(entry_id)
                         .click_to_open(true)
                         .when_some(page.icon.clone(), |this, icon| this.icon(icon))
                         .when_some(entry_focus(page_key), |this, handle| {

@@ -106,6 +106,7 @@ impl Styled for SidebarMenu {
 /// Menu item for the [`SidebarMenu`]
 #[derive(Clone)]
 pub struct SidebarMenuItem {
+    id: Option<SharedString>,
     icon: Option<Icon>,
     label: SharedString,
     accessibility_label: Option<SharedString>,
@@ -134,6 +135,7 @@ impl SidebarMenuItem {
     /// Create a new [`SidebarMenuItem`] with a label.
     pub fn new(label: impl Into<SharedString>) -> Self {
         Self {
+            id: None,
             icon: None,
             label: label.into(),
             accessibility_label: None,
@@ -155,6 +157,19 @@ impl SidebarMenuItem {
             open: None,
             on_open_change: None,
         }
+    }
+
+    /// Give the item an id of its own instead of its position in the menu.
+    ///
+    /// The position (`0-2`) is all a menu knows, and it names nothing a
+    /// test or an inspector can hold on to: every expandable item has a
+    /// `caret` button, and without an id somebody chose on the item they
+    /// cannot be told apart. An id here scopes them (`page-general>>caret`)
+    /// and keeps naming the same item when the menu above it changes.
+    /// Siblings need different ids; the item's open state is kept under it.
+    pub fn id(mut self, id: impl Into<SharedString>) -> Self {
+        self.id = Some(id.into());
+        self
     }
 
     /// Set the icon for the menu item
@@ -371,7 +386,7 @@ impl SidebarItem for SidebarMenuItem {
         let click_to_toggle = self.click_to_toggle;
         let default_open = self.default_open;
         let collapsed_tooltip = self.collapsed_tooltip();
-        let id = id.into();
+        let id = self.id.clone().map_or_else(|| id.into(), ElementId::from);
         let label_text = self.label.clone();
         let accessibility_label = self.accessibility_label.clone();
         let is_submenu = self.is_submenu();

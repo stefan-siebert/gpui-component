@@ -29,6 +29,7 @@ pub type CustomContentFn = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 /// A setting page that can contain multiple setting groups.
 #[derive(Clone)]
 pub struct SettingPage {
+    pub(super) id: Option<SharedString>,
     pub(super) icon: Option<Icon>,
     resettable: bool,
     pub(super) default_open: bool,
@@ -44,6 +45,7 @@ pub struct SettingPage {
 impl SettingPage {
     pub fn new(title: impl Into<SharedString>) -> Self {
         Self {
+            id: None,
             icon: None,
             resettable: true,
             default_open: false,
@@ -74,6 +76,14 @@ impl SettingPage {
     /// default groups/items pipeline.
     pub(super) fn has_custom_content(&self) -> bool {
         self.custom_content.is_some()
+    }
+
+    /// The id of the page's entry in the sidebar, for tests and the
+    /// inspector: `page-<id>`. Without one the entry is named by its
+    /// position, `page-<n>`, which moves when a page before it comes or goes.
+    pub fn id(mut self, id: impl Into<SharedString>) -> Self {
+        self.id = Some(id.into());
+        self
     }
 
     /// Set the title of the setting page.
