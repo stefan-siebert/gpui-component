@@ -6,10 +6,10 @@ use crate::{
     v_flex,
 };
 use gpui::{
-    AbsoluteLength, AnyElement, App, ClickEvent, DefiniteLength, EdgesRefinement, ElementId,
-    InteractiveElement as _, IntoElement, Length, ListAlignment, ListState, ParentElement, Pixels,
-    RenderOnce, SharedString, StyleRefinement, Styled, Window, div, list, prelude::FluentBuilder,
-    px,
+    AbsoluteLength, AnyElement, App, ClickEvent, Corners, DefiniteLength, EdgesRefinement,
+    ElementId, Fill, Hsla, InteractiveElement as _, IntoElement, Length, ListAlignment, ListOffset,
+    ListState, ParentElement, Pixels, RenderOnce, SharedString, StyleRefinement, Styled, Window,
+    canvas, div, linear_color_stop, linear_gradient, list, prelude::FluentBuilder, px,
 };
 use std::{rc::Rc, time::Duration};
 
@@ -27,6 +27,37 @@ pub use menu::*;
 const DEFAULT_WIDTH: Pixels = px(255.);
 const COLLAPSED_WIDTH: Pixels = px(48.);
 const SIDEBAR_TRANSITION_DURATION: Duration = Duration::from_millis(200);
+/// How far down from the top of the content the scroll edge reaches.
+const SCROLL_EDGE_HEIGHT: Pixels = px(24.);
+/// The backdrop blur of the scroll edge: the whole edge lightly, its upper
+/// half harder, so the blur grows towards the header — the primitive has one
+/// radius per call, and each call is a render-pass split, so two bands.
+const SCROLL_EDGE_BLUR: [(f32, Pixels); 2] = [(1.0, px(3.)), (0.5, px(6.))];
+
+/// What content does as it scrolls under the sidebar's header — macOS 26's
+/// scroll edge effect.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScrollEdgeEffect {
+    /// Cut off at the edge.
+    #[default]
+    None,
+    /// Fades into the sidebar's background.
+    Fade,
+    /// Fades, and is blurred on its way out where the platform can blur what
+    /// is behind an element (`Window::supports_backdrop_blur`); elsewhere the
+    /// same as [`ScrollEdgeEffect::Fade`].
+    Soft,
+}
+
+/// How strongly the scroll edge shows, 0.0 to 1.0, for a list scrolled to
+/// `top`: not at all at the very top — it would wash out the first row —
+/// then growing over the first [`SCROLL_EDGE_HEIGHT`] scrolled.
+fn scroll_edge_strength(top: ListOffset) -> f32 {
+    if top.item_ix > 0 {
+        return 1.0;
+    }
+    (top.offset_in_item / SCROLL_EDGE_HEIGHT).clamp(0.0, 1.0)
+}
 
 /// The way a [`Sidebar`] behaves when it is collapsed.
 ///
@@ -233,6 +264,7 @@ pub struct Sidebar<E: SidebarItem + 'static> {
     collapsed: bool,
     /// A child to scroll into view in this frame, see [`Sidebar::reveal_item`].
     reveal_item: Option<usize>,
+    scroll_edge: ScrollEdgeEffect,
 }
 
 impl<E: SidebarItem> Sidebar<E> {
@@ -248,7 +280,16 @@ impl<E: SidebarItem> Sidebar<E> {
             collapsible: SidebarCollapsible::Icon,
             collapsed: false,
             reveal_item: None,
+            scroll_edge: ScrollEdgeEffect::None,
         }
+    }
+
+    /// What the content does as it scrolls under the header; cut off by
+    /// default. The fade goes to the sidebar's background — its own, or the
+    /// solid colour set with `bg`.
+    pub fn scroll_edge(mut self, effect: ScrollEdgeEffect) -> Self {
+        self.scroll_edge = effect;
+        self
     }
 
     /// Scroll the content so the child at `ix` (an index into the children,
@@ -435,6 +476,20 @@ impl<E: SidebarItem> RenderOnce for Sidebar<E> {
         // Determine effective expanded width from user's custom style or default.
         // Non-pixel widths still render correctly, but cannot use pixel width transitions.
         let expanded_width = sidebar_expanded_width(&self.style);
+        let edge_strength = match self.scroll_edge {
+            ScrollEdgeEffect::None => 0.0,
+            ScrollEdgeEffect::Fade | ScrollEdgeEffect::Soft => {
+                scroll_edge_strength(list_state.logical_scroll_top())
+            }
+        };
+        let edge_blur = self.scroll_edge == ScrollEdgeEffect::Soft
+            && edge_strength > 0.0
+            && window.supports_backdrop_blur();
+        let edge_color: Hsla = match &self.style.background {
+            Some(Fill::Color(background)) => background.as_solid(),
+            _ => None,
+        }
+        .unwrap_or(cx.theme().sidebar);
         let layout =
             SidebarLayout::new(self.collapsible, self.collapsed, expanded_width, self.side);
 
@@ -473,41 +528,85 @@ impl<E: SidebarItem> RenderOnce for Sidebar<E> {
                 )
             })
             .child(
-                v_flex().id("content").flex_1().min_h_0().child(
-                    v_flex()
-                        .id("inner")
-                        .size_full()
-                        .px_3()
-                        .gap_y_3()
-                        .when(layout.icon_collapsed, |this| this.p_2())
-                        .child(gpui_base::ScrollBounce::new(
-                            "bounce",
-                            &list_state,
-                            list(list_state.clone(), {
-                                move |ix, window, cx| {
-                                    let group = self.content.get(ix).cloned();
-                                    let is_first = ix == 0;
-                                    let is_last =
-                                        content_len > 0 && ix == content_len.saturating_sub(1);
-                                    div()
-                                        .id(ix)
-                                        .when_some(group, |this, group| {
-                                            this.child(
-                                                group
-                                                    .collapsed(layout.icon_collapsed)
-                                                    .render(ix, window, cx)
-                                                    .into_any_element(),
-                                            )
-                                        })
-                                        .when(is_first, |this| this.pt_3())
-                                        .when(is_last, |this| this.pb_3())
-                                        .into_any_element()
-                                }
-                            })
-                            .size_full(),
-                        ))
-                        .vertical_scrollbar(&list_state),
-                ),
+                v_flex()
+                    .id("content")
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        v_flex()
+                            .id("inner")
+                            .size_full()
+                            .px_3()
+                            .gap_y_3()
+                            .when(layout.icon_collapsed, |this| this.p_2())
+                            .child(gpui_base::ScrollBounce::new(
+                                "bounce",
+                                &list_state,
+                                list(list_state.clone(), {
+                                    move |ix, window, cx| {
+                                        let group = self.content.get(ix).cloned();
+                                        let is_first = ix == 0;
+                                        let is_last =
+                                            content_len > 0 && ix == content_len.saturating_sub(1);
+                                        div()
+                                            .id(ix)
+                                            .when_some(group, |this, group| {
+                                                this.child(
+                                                    group
+                                                        .collapsed(layout.icon_collapsed)
+                                                        .render(ix, window, cx)
+                                                        .into_any_element(),
+                                                )
+                                            })
+                                            .when(is_first, |this| this.pt_3())
+                                            .when(is_last, |this| this.pb_3())
+                                            .into_any_element()
+                                    }
+                                })
+                                .size_full(),
+                            ))
+                            .vertical_scrollbar(&list_state),
+                    )
+                    // Painted after the list, so the blur has the rows to read.
+                    .when(edge_strength > 0.0, |this| {
+                        this.relative().child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(SCROLL_EDGE_HEIGHT)
+                                .when(edge_blur, |this| {
+                                    this.child(
+                                        canvas(
+                                            |_, _, _| (),
+                                            |bounds, _, window, _| {
+                                                for (share, radius) in SCROLL_EDGE_BLUR {
+                                                    let mut band = bounds;
+                                                    band.size.height *= share;
+                                                    window.paint_backdrop_blur(
+                                                        band,
+                                                        Corners::default(),
+                                                        radius,
+                                                        gpui::transparent_black(),
+                                                    );
+                                                }
+                                            },
+                                        )
+                                        .absolute()
+                                        .size_full(),
+                                    )
+                                })
+                                .child(div().absolute().size_full().bg(linear_gradient(
+                                    180.,
+                                    linear_color_stop(
+                                        edge_color.opacity(edge_color.a * edge_strength),
+                                        0.,
+                                    ),
+                                    linear_color_stop(edge_color.opacity(0.), 1.),
+                                ))),
+                        )
+                    }),
             )
             .when_some(self.footer.take(), |this, footer| {
                 this.child(
@@ -587,6 +686,18 @@ impl<E: SidebarItem> RenderOnce for Sidebar<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_scroll_edge_grows_over_the_first_rows_scrolled() {
+        let at = |item_ix, offset| ListOffset {
+            item_ix,
+            offset_in_item: px(offset),
+        };
+        assert_eq!(scroll_edge_strength(at(0, 0.)), 0.0);
+        assert_eq!(scroll_edge_strength(at(0, 12.)), 0.5);
+        assert_eq!(scroll_edge_strength(at(0, 40.)), 1.0);
+        assert_eq!(scroll_edge_strength(at(3, 0.)), 1.0);
+    }
 
     fn layout(
         collapsible: SidebarCollapsible,
