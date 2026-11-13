@@ -231,6 +231,8 @@ pub struct Sidebar<E: SidebarItem + 'static> {
     side: Side,
     collapsible: SidebarCollapsible,
     collapsed: bool,
+    /// A child to scroll into view in this frame, see [`Sidebar::reveal_item`].
+    reveal_item: Option<usize>,
 }
 
 impl<E: SidebarItem> Sidebar<E> {
@@ -245,7 +247,20 @@ impl<E: SidebarItem> Sidebar<E> {
             side: Side::Left,
             collapsible: SidebarCollapsible::Icon,
             collapsed: false,
+            reveal_item: None,
         }
+    }
+
+    /// Scroll the content so the child at `ix` (an index into the children,
+    /// in the order they were added) is in view.
+    ///
+    /// The content is a virtual list whose scroll state the sidebar keeps to
+    /// itself; an owner that moves keyboard focus between rows passes the
+    /// row it moved to here, in the frame that follows the move. Only once:
+    /// passed every frame, it pins the list and the wheel cannot scroll it.
+    pub fn reveal_item(mut self, ix: usize) -> Self {
+        self.reveal_item = Some(ix);
+        self
     }
 
     /// Set the side of the sidebar.
@@ -402,6 +417,19 @@ impl<E: SidebarItem> RenderOnce for Sidebar<E> {
             .clone();
         if list_state.item_count() != content_len {
             list_state.reset(content_len);
+        }
+        if let Some(ix) = self.reveal_item.filter(|ix| *ix < content_len) {
+            // Only when it is not wholly in view already. The list measures
+            // a child once it has drawn it; for one it has not, it reckons
+            // with no height at all and scrolls too far, so a child that is
+            // in view stays where it is.
+            let viewport = list_state.viewport_bounds();
+            let in_view = list_state.bounds_for_item(ix).is_some_and(|item| {
+                item.top() >= viewport.top() && item.bottom() <= viewport.bottom()
+            });
+            if !in_view {
+                list_state.scroll_to_reveal_item(ix);
+            }
         }
 
         // Determine effective expanded width from user's custom style or default.

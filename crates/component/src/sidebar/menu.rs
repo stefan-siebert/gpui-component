@@ -417,9 +417,21 @@ impl SidebarItem for SidebarMenuItem {
                                     .child(
                                         h_flex()
                                             .flex_1()
+                                            .min_w_0()
                                             .overflow_x_hidden()
                                             .refine_style(&self.label_style)
-                                            .child(self.label.clone()),
+                                            // A block of its own, so the text
+                                            // is laid out at the width left to
+                                            // it and ends in "…"; as a flex
+                                            // item it kept its full width and
+                                            // was cut mid-letter.
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .child(self.label.clone()),
+                                            ),
                                     )
                                     .when_some(self.suffix.clone(), |this, suffix| {
                                         this.child(suffix(window, cx).into_any_element())
