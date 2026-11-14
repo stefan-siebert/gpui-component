@@ -699,6 +699,9 @@ impl RenderOnce for TabBar {
             .when(self.menu, |this| {
                 this.child(
                     Button::new("more")
+                        // Icon only: without a name a screen reader says
+                        // "button" and nothing else.
+                        .accessibility_label(t!("TabBar.AllTabs"))
                         .xsmall()
                         .ghost()
                         .dropdown_caret(true)
@@ -2134,5 +2137,44 @@ mod tests {
         let cx = show_late_bar(cx, px(0.));
         next_frame(cx);
         assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
+    }
+
+    /// The overflow button is an icon only. Unnamed, a screen reader
+    /// announces "button" and an agent has nothing to match on — the audit
+    /// found it in Elane's tab bar once a panel had more tabs than room.
+    #[gpui::test]
+    fn the_overflow_button_has_a_name(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (_, cx) = cx.add_window_view(|_, _| MenuHarness {
+            group_handler: false,
+            clicks: Rc::default(),
+            events: Rc::default(),
+        });
+        cx.update(|window, _| window.set_a11y_force_active(true));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let Some(json) = cx.update(|window, _| window.debug_a11y_tree_json()) else {
+            panic!("no accessibility tree was built");
+        };
+        let tree: serde_json::Value = match serde_json::from_str(&json) {
+            Ok(tree) => tree,
+            Err(error) => panic!("the tree is not JSON ({error}): {json}"),
+        };
+        let buttons: Vec<Option<&str>> = tree
+            .get("nodes")
+            .and_then(|nodes| nodes.as_object())
+            .into_iter()
+            .flat_map(|nodes| nodes.values())
+            .filter(|node| {
+                node.pointer("/aria/role").and_then(|role| role.as_str()) == Some("Button")
+            })
+            .map(|node| node.pointer("/aria/label").and_then(|label| label.as_str()))
+            .collect();
+        assert!(!buttons.is_empty(), "no button in the tree: {json}");
+        assert!(
+            buttons.iter().all(Option::is_some),
+            "a button without a name: {buttons:?}"
+        );
+        assert!(buttons.contains(&Some("All tabs")), "{buttons:?}");
     }
 }

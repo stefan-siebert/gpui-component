@@ -1338,6 +1338,7 @@ impl PopupMenu {
 
         match item {
             PopupMenuItem::Separator => this
+                .presentational()
                 .h_auto()
                 .p_0()
                 .my_0p5()
@@ -1357,8 +1358,15 @@ impl PopupMenu {
                 render,
                 icon,
                 disabled,
+                action,
+                handler,
                 ..
             } => this
+                // Nothing to activate: the row only lays out what it holds
+                // (a strip of buttons), and those are the controls.
+                .when(action.is_none() && handler.is_none(), |this| {
+                    this.presentational()
+                })
                 .when(!disabled, |this| {
                     this.on_click(cx.listener(move |this, event, window, cx| {
                         this.on_click(ix, event, window, cx)
@@ -1676,5 +1684,54 @@ mod tests {
         );
         assert_eq!(PopupMenuItem::separator().a11y_label(), None);
         assert_eq!(PopupMenuItem::element(|_, _| div()).a11y_label(), None);
+    }
+
+    /// A screen reader announces every `MenuItem` node. A separator line or
+    /// a row that only holds buttons of its own has nothing to say and no
+    /// name — the audit found four unnamed "menu items" and one row around
+    /// six buttons in Elane's file context menu.
+    #[gpui::test]
+    fn only_items_you_can_choose_are_menu_items(cx: &mut gpui::TestAppContext) {
+        use crate::button::Button;
+
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            PopupMenu::new(cx)
+                .item(PopupMenuItem::element(|_, _| {
+                    Button::new("back").accessibility_label("Back")
+                }))
+                .separator()
+                .item(PopupMenuItem::new("Open"))
+        });
+        cx.update(|window, _| window.set_a11y_force_active(true));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let Some(json) = cx.update(|window, _| window.debug_a11y_tree_json()) else {
+            panic!("no accessibility tree was built");
+        };
+        let tree: serde_json::Value = match serde_json::from_str(&json) {
+            Ok(tree) => tree,
+            Err(error) => panic!("the tree is not JSON ({error}): {json}"),
+        };
+        let labels_of = |role: &str| -> Vec<Option<String>> {
+            tree.get("nodes")
+                .and_then(|nodes| nodes.as_object())
+                .into_iter()
+                .flat_map(|nodes| nodes.values())
+                .filter(|node| node.pointer("/aria/role").and_then(|r| r.as_str()) == Some(role))
+                .map(|node| {
+                    node.pointer("/aria/label")
+                        .and_then(|label| label.as_str())
+                        .map(str::to_owned)
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            labels_of("MenuItem"),
+            vec![Some("Open".to_owned())],
+            "{json}"
+        );
+        assert_eq!(labels_of("Button"), vec![Some("Back".to_owned())], "{json}");
     }
 }

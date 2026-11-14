@@ -232,6 +232,14 @@ Dock:
     zh-HK: 目前版本無法顯示此面板。
     zh-TW: 目前版本無法顯示此面板。
     it: Questo pannello non è disponibile in questa versione.
+TabBar:
+  AllTabs:
+    en: All tabs
+    de: Alle Tabs
+    zh-CN: 所有标签页
+    zh-HK: 所有分頁
+    zh-TW: 所有分頁
+    it: Tutte le schede
 ColorPicker:
   Palette:
     en: Palette

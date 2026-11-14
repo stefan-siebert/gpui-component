@@ -11,6 +11,10 @@ use smallvec::SmallVec;
 pub(crate) struct MenuItemElement {
     id: ElementId,
     aria_label: Option<SharedString>,
+    /// `None` for an item that is layout only — a separator line, a row
+    /// that only holds controls of its own. A screen reader then skips it
+    /// instead of announcing an unnamed "menu item".
+    role: Option<Role>,
     style: StyleRefinement,
     disabled: bool,
     selected: bool,
@@ -26,6 +30,7 @@ impl MenuItemElement {
         Self {
             id: id.clone(),
             aria_label: None,
+            role: Some(Role::MenuItem),
             style: StyleRefinement::default(),
             disabled: false,
             selected: false,
@@ -44,6 +49,13 @@ impl MenuItemElement {
     /// Set the accessible label for the menu item.
     pub(crate) fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
         self.aria_label = Some(label.into());
+        self
+    }
+
+    /// Leave the item out of the accessibility tree: it is decoration or
+    /// layout, and whatever it holds speaks for itself.
+    pub(crate) fn presentational(mut self) -> Self {
+        self.role = None;
         self
     }
 
@@ -94,9 +106,11 @@ impl RenderOnce for MenuItemElement {
         h_flex()
             .id(self.id)
             .test_support()
-            .role(Role::MenuItem)
-            .when_some(self.aria_label, |this, label| this.aria_label(label))
-            .aria_selected(self.selected)
+            .when_some(self.role, |this, role| {
+                this.role(role)
+                    .when_some(self.aria_label, |this, label| this.aria_label(label))
+                    .aria_selected(self.selected)
+            })
             .gap_x_1()
             .py_1()
             .px_2()
