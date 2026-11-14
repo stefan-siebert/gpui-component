@@ -1158,7 +1158,7 @@ fn resolve_window(window_id: Option<&str>, cx: &mut App) -> Result<gpui::AnyWind
             .ok_or_else(|| format!("Window not found: {query}"));
     }
 
-    if let Some(handle) = cx.active_window() {
+    if let Some(handle) = open_active_window(cx) {
         return Ok(handle);
     }
 
@@ -1166,6 +1166,18 @@ fn resolve_window(window_id: Option<&str>, cx: &mut App) -> Result<gpui::AnyWind
         .into_iter()
         .next()
         .ok_or_else(|| "No windows available".to_string())
+}
+
+/// The OS-focused window, if it is still open. Right after a focused child
+/// window closes, `cx.active_window()` can keep naming it until the platform
+/// makes another window key — a step sent then would go to a window that is
+/// gone and fail with "window not found".
+fn open_active_window(cx: &App) -> Option<gpui::AnyWindowHandle> {
+    let active = cx.active_window()?;
+    cx.windows()
+        .into_iter()
+        .any(|handle| handle.window_id() == active.window_id())
+        .then_some(active)
 }
 
 /// Returns the id of the window that driver tools will target when no
@@ -1179,7 +1191,7 @@ fn resolve_window(window_id: Option<&str>, cx: &mut App) -> Result<gpui::AnyWind
 /// case `cx.active_window()` returns None but the first available window
 /// is still the correct dispatch target.
 fn default_target_window_id(cx: &mut App) -> Option<gpui::WindowId> {
-    if let Some(handle) = cx.active_window() {
+    if let Some(handle) = open_active_window(cx) {
         return Some(handle.window_id());
     }
     cx.windows().into_iter().next().map(|h| h.window_id())
@@ -5406,6 +5418,37 @@ mod tests {
                 evaluate_wait(&opts, cx).map(|(satisfied, _)| satisfied),
                 Ok(true)
             );
+        });
+    }
+
+    /// A focused child window that closes can stay `cx.active_window()`
+    /// until the platform makes another window key; a step without a
+    /// `window_id` sent then went to a window that is gone ("window not
+    /// found", seen 2026-11-14 after Escape closed Elane's search).
+    #[gpui::test]
+    fn a_closed_window_is_no_default_target(cx: &mut gpui::TestAppContext) {
+        use gpui::{Context, IntoElement, Render, Window, div};
+
+        struct Empty;
+
+        impl Render for Empty {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+            }
+        }
+
+        let (_, main) = cx.add_window_view(|_, _| Empty);
+        let main_id = main.update(|window, _| window.window_handle().window_id());
+        let (_, child) = cx.add_window_view(|_, _| Empty);
+        child.update(|window, _| window.activate_window());
+        child.run_until_parked();
+        child.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let target = resolve_window(None, cx).map(|handle| handle.window_id());
+            assert_eq!(target, Ok(main_id));
+            assert_eq!(default_target_window_id(cx), Some(main_id));
         });
     }
 
