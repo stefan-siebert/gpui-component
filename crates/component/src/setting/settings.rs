@@ -184,6 +184,7 @@ fn select_entry(
             group_ix: key.group_ix,
         };
         state.deferred_scroll_group_ix = key.group_ix;
+        state.reveal_selected = true;
         cx.notify();
     });
     if let Some(on_page_change) = on_page_change {
@@ -358,6 +359,16 @@ impl Settings {
         cx: &mut App,
     ) -> impl IntoElement {
         let selected_index = state.read(cx).selected_index;
+        // Once per selection, as `Sidebar::reveal_item` asks: every frame
+        // would pin the list against the wheel.
+        let reveal = state
+            .update(cx, |state, _| std::mem::take(&mut state.reveal_selected))
+            .then(|| {
+                filter
+                    .visible_pages()
+                    .position(|page_ix| page_ix == selected_index.page_ix)
+            })
+            .flatten();
         let search_input = state.read(cx).search_input.clone();
         let on_page_change = self.on_page_change.clone();
         let entry_focus = |key: NavKey| {
@@ -379,85 +390,96 @@ impl Settings {
                     .refine_style(&self.header_style)
                     .child(Input::new(&search_input).prefix(IconName::Search)),
             )
-            .child(SidebarMenu::new().key_context(NAV_CONTEXT).children(
-                filter.visible_pages().map(|page_ix| {
-                    let page = &self.pages[page_ix];
-                    let groups = &filter.groups[page_ix];
-                    let page_key = NavKey {
-                        page_ix,
-                        group_ix: None,
-                    };
-                    let is_page_active = selected_index.page_ix == page_ix
-                        && (selected_index.group_ix.is_none() || groups.len() == 1);
-                    let entry_id = match &page.id {
-                        Some(id) => format!("page-{id}"),
-                        None => format!("page-{page_ix}"),
-                    };
-                    SidebarMenuItem::new(page.title.clone())
-                        .id(entry_id)
-                        .click_to_open(true)
-                        .when_some(page.icon.clone(), |this, icon| this.icon(icon))
-                        .when_some(entry_focus(page_key), |this, handle| {
-                            this.track_focus(&handle)
-                        })
-                        .when(groups.len() > 1, |this| {
-                            let page_title = page.title.clone();
-                            let state = state.clone();
-                            this.open(state.read(cx).is_page_open(page)).on_open_change(
-                                move |open, _, cx| {
-                                    state.update(cx, |state, cx| {
-                                        state.open_pages.insert(page_title.clone(), open);
-                                        cx.notify();
-                                    })
-                                },
-                            )
-                        })
-                        .active(is_page_active)
-                        .on_click({
-                            let state = state.clone();
-                            let on_page_change = on_page_change.clone();
-                            move |_, _, cx| {
-                                select_entry(&state, page_key, on_page_change.as_ref(), cx)
-                            }
-                        })
-                        .when(groups.len() > 1, |this| {
-                            this.children(
-                                groups
-                                    .iter()
-                                    .copied()
-                                    .filter(|&ix| page.groups[ix].title.is_some())
-                                    .map(|group_ix| {
-                                        let group = &page.groups[group_ix];
-                                        let group_key = NavKey {
-                                            page_ix,
-                                            group_ix: Some(group_ix),
-                                        };
-                                        let is_active = selected_index.page_ix == page_ix
-                                            && selected_index.group_ix == Some(group_ix);
-                                        let title = group.title.clone().unwrap_or_default();
+            // One menu per page: the sidebar can scroll a child into view,
+            // not a row inside one, and with every page in a single menu a
+            // page selected below the fold stayed out of sight (2026-11-14).
+            .children(
+                filter
+                    .visible_pages()
+                    .enumerate()
+                    .map(|(position, page_ix)| {
+                        let page = &self.pages[page_ix];
+                        let groups = &filter.groups[page_ix];
+                        let page_key = NavKey {
+                            page_ix,
+                            group_ix: None,
+                        };
+                        let is_page_active = selected_index.page_ix == page_ix
+                            && (selected_index.group_ix.is_none() || groups.len() == 1);
+                        let entry_id = match &page.id {
+                            Some(id) => format!("page-{id}"),
+                            None => format!("page-{page_ix}"),
+                        };
+                        let entry = SidebarMenuItem::new(page.title.clone())
+                            .id(entry_id)
+                            .click_to_open(true)
+                            .when_some(page.icon.clone(), |this, icon| this.icon(icon))
+                            .when_some(entry_focus(page_key), |this, handle| {
+                                this.track_focus(&handle)
+                            })
+                            .when(groups.len() > 1, |this| {
+                                let page_title = page.title.clone();
+                                let state = state.clone();
+                                this.open(state.read(cx).is_page_open(page)).on_open_change(
+                                    move |open, _, cx| {
+                                        state.update(cx, |state, cx| {
+                                            state.open_pages.insert(page_title.clone(), open);
+                                            cx.notify();
+                                        })
+                                    },
+                                )
+                            })
+                            .active(is_page_active)
+                            .on_click({
+                                let state = state.clone();
+                                let on_page_change = on_page_change.clone();
+                                move |_, _, cx| {
+                                    select_entry(&state, page_key, on_page_change.as_ref(), cx)
+                                }
+                            })
+                            .when(groups.len() > 1, |this| {
+                                this.children(
+                                    groups
+                                        .iter()
+                                        .copied()
+                                        .filter(|&ix| page.groups[ix].title.is_some())
+                                        .map(|group_ix| {
+                                            let group = &page.groups[group_ix];
+                                            let group_key = NavKey {
+                                                page_ix,
+                                                group_ix: Some(group_ix),
+                                            };
+                                            let is_active = selected_index.page_ix == page_ix
+                                                && selected_index.group_ix == Some(group_ix);
+                                            let title = group.title.clone().unwrap_or_default();
 
-                                        SidebarMenuItem::new(title)
-                                            .when_some(entry_focus(group_key), |this, handle| {
-                                                this.track_focus(&handle)
-                                            })
-                                            .active(is_active)
-                                            .on_click({
-                                                let state = state.clone();
-                                                let on_page_change = on_page_change.clone();
-                                                move |_, _, cx| {
-                                                    select_entry(
-                                                        &state,
-                                                        group_key,
-                                                        on_page_change.as_ref(),
-                                                        cx,
-                                                    )
-                                                }
-                                            })
-                                    }),
-                            )
-                        })
-                }),
-            ));
+                                            SidebarMenuItem::new(title)
+                                                .when_some(
+                                                    entry_focus(group_key),
+                                                    |this, handle| this.track_focus(&handle),
+                                                )
+                                                .active(is_active)
+                                                .on_click({
+                                                    let state = state.clone();
+                                                    let on_page_change = on_page_change.clone();
+                                                    move |_, _, cx| {
+                                                        select_entry(
+                                                            &state,
+                                                            group_key,
+                                                            on_page_change.as_ref(),
+                                                            cx,
+                                                        )
+                                                    }
+                                                })
+                                        }),
+                                )
+                            });
+                        // The gap a single menu put between its rows.
+                        let menu = SidebarMenu::new().key_context(NAV_CONTEXT).child(entry);
+                        if position > 0 { menu.pt_2() } else { menu }
+                    }),
+            )
+            .when_some(reveal, |sidebar, position| sidebar.reveal_item(position));
 
         let on_page_change = self.on_page_change.clone();
         let handlers = Rc::new(NavHandlers {
@@ -676,6 +698,9 @@ pub struct SettingsState {
     content_focus: FocusHandle,
     /// Move focus into the content pane once the page it shows is drawn.
     enter_content_pending: bool,
+    /// Scroll the sidebar to the selected page in the next frame: after a
+    /// move by keyboard, or a page chosen from outside (`force_page`).
+    reveal_selected: bool,
 }
 
 impl SettingsState {
@@ -821,6 +846,7 @@ impl RenderOnce for Settings {
                 nav_focus: HashMap::new(),
                 content_focus: cx.focus_handle(),
                 enter_content_pending: false,
+                reveal_selected: false,
             }
         });
 
@@ -844,6 +870,7 @@ impl RenderOnce for Settings {
                         page_ix,
                         group_ix: None,
                     };
+                    s.reveal_selected = true;
                     cx.notify();
                 });
             }

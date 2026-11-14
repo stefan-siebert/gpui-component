@@ -619,7 +619,15 @@ async fn next_frame(window_id: Option<&str>, force_draw: bool, cx: &AsyncApp) ->
     let (tx, rx) = oneshot::channel::<()>();
 
     let registered = cx.update(|cx| {
-        let handle = resolve_window(window_id, cx)?;
+        // A window named by what it shows may not be open yet — a wait for
+        // it is paced by the frames of the window that would open it.
+        let handle = resolve_window(window_id, cx).or_else(|error| {
+            if window_id.is_some_and(|query| query.starts_with(WINDOW_WITH_PREFIX)) {
+                resolve_window(None, cx)
+            } else {
+                Err(error)
+            }
+        })?;
         handle
             .update(cx, |_, window, _| {
                 if force_draw {
@@ -725,6 +733,18 @@ fn has_conditions(opts: &WaitForParams) -> bool {
 fn evaluate_wait(opts: &WaitForParams, cx: &mut App) -> Result<(bool, serde_json::Value), String> {
     let mut checks = serde_json::Map::new();
     let mut holds = true;
+
+    // Waiting on a window named by what it shows is also waiting for that
+    // window to open: until it does, the condition does not hold yet.
+    if let Some(query) = opts
+        .window_id
+        .as_deref()
+        .filter(|query| query.starts_with(WINDOW_WITH_PREFIX))
+        && resolve_window(Some(query), cx).is_err()
+    {
+        checks.insert("window".into(), json!({ "query": query, "found": false }));
+        return Ok((false, serde_json::Value::Object(checks)));
+    }
 
     if opts.element_id.is_some() || opts.text.is_some() {
         let query = opts.element_id.as_deref().map(expand_ref).transpose()?;
@@ -1089,17 +1109,53 @@ fn with_elements<T>(
 
 // ===== Helpers =====
 
+/// The prefix of a window address that names a window by what it shows:
+/// `with:settings-view` is the window holding an element of that id, in any
+/// of the forms [`id_matches`] takes.
+///
+/// A script cannot know a `WindowId` in advance, and the active window is no
+/// address for a child window: with the app in the background no window is
+/// active, and the first one gets every step.
+const WINDOW_WITH_PREFIX: &str = "with:";
+
+/// Whether `handle` is the window `query` names — its `WindowId` as
+/// `get_windows` prints it, or `with:<element id>`.
+fn window_matches(handle: &gpui::AnyWindowHandle, query: &str, cx: &mut App) -> bool {
+    let window_id = format!("{:?}", handle.window_id());
+    let Some(element) = query.strip_prefix(WINDOW_WITH_PREFIX) else {
+        return window_id == query;
+    };
+    handle
+        .update(cx, |_, window, _| {
+            window.inspector_elements().iter().any(|info| {
+                let full_id = format!("{}/{}[{}]", window_id, info.global_id, info.instance_id);
+                id_matches(&full_id, &info.global_id, element)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// The windows a tool looks at: the one `window_id` names, or all of them.
+fn windows_named(window_id: Option<&str>, cx: &mut App) -> Vec<gpui::AnyWindowHandle> {
+    let windows = cx.windows();
+    match window_id {
+        Some(query) => windows
+            .into_iter()
+            .filter(|handle| window_matches(handle, query, cx))
+            .take(1)
+            .collect(),
+        None => windows,
+    }
+}
+
 /// Resolve a window handle from an optional window_id string.
 /// Falls back to: active window → first window.
 fn resolve_window(window_id: Option<&str>, cx: &mut App) -> Result<gpui::AnyWindowHandle, String> {
-    if let Some(id_str) = window_id {
-        for handle in cx.windows() {
-            let wid = format!("{:?}", handle.window_id());
-            if wid == id_str {
-                return Ok(handle);
-            }
-        }
-        return Err(format!("Window not found: {}", id_str));
+    if let Some(query) = window_id {
+        return windows_named(Some(query), cx)
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("Window not found: {query}"));
     }
 
     if let Some(handle) = cx.active_window() {
@@ -1151,14 +1207,7 @@ fn collect_match_candidates(
     limit: usize,
 ) -> Vec<serde_json::Value> {
     let query_lower = query.to_lowercase();
-    let windows: Vec<gpui::AnyWindowHandle> = if let Some(wid) = window_id {
-        cx.windows()
-            .into_iter()
-            .filter(|h| format!("{:?}", h.window_id()) == wid)
-            .collect()
-    } else {
-        cx.windows()
-    };
+    let windows = windows_named(window_id, cx);
 
     let mut candidates: Vec<serde_json::Value> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1369,8 +1418,28 @@ fn resolve_element_center(
     window_id: Option<&str>,
     cx: &mut App,
 ) -> Result<(gpui::Point<Pixels>, String), String> {
-    let (bounds, id) = resolve_element_bounds(query, window_id, cx)?;
-    Ok((bounds.center(), id))
+    let (bounds, clip, id) = resolve_element_painted(query, window_id, cx)?;
+    Ok((pointer_target(bounds, clip, &id)?, id))
+}
+
+/// Where a pointer aims at an element: the middle of the part of it that is
+/// painted. An element scrolled out of its list, or below the window's edge,
+/// still has bounds, and a click at their middle lands on whatever is drawn
+/// there instead — or on nothing, reported as success.
+fn pointer_target(
+    bounds: gpui::Bounds<Pixels>,
+    clip: gpui::Bounds<Pixels>,
+    id: &str,
+) -> Result<gpui::Point<Pixels>, String> {
+    let visible = bounds.intersect(&clip);
+    if visible.size.width <= px(0.) || visible.size.height <= px(0.) {
+        return Err(format!(
+            "{id} is outside the visible area (its bounds {bounds:?}, the area it is \
+             clipped to {clip:?}). Bring it into view first — the app's own keys, or \
+             `scroll` over the list holding it — then try again."
+        ));
+    }
+    Ok(visible.center())
 }
 
 /// Resolve an element's painted bounds by ID, in window coordinates.
@@ -1379,16 +1448,19 @@ fn resolve_element_bounds(
     window_id: Option<&str>,
     cx: &mut App,
 ) -> Result<(gpui::Bounds<Pixels>, String), String> {
+    resolve_element_painted(query, window_id, cx).map(|(bounds, _, id)| (bounds, id))
+}
+
+/// An element's bounds, the area it was clipped to when painted, and its
+/// full id.
+fn resolve_element_painted(
+    query: &str,
+    window_id: Option<&str>,
+    cx: &mut App,
+) -> Result<(gpui::Bounds<Pixels>, gpui::Bounds<Pixels>, String), String> {
     let query = expand_ref(query)?;
     let query = query.as_str();
-    let windows: Vec<gpui::AnyWindowHandle> = if let Some(wid) = window_id {
-        cx.windows()
-            .into_iter()
-            .filter(|h| format!("{:?}", h.window_id()) == wid)
-            .collect()
-    } else {
-        cx.windows()
-    };
+    let windows = windows_named(window_id, cx);
 
     for handle in &windows {
         let result = handle.update(cx, |_, window, _cx| {
@@ -1397,14 +1469,14 @@ fn resolve_element_bounds(
                 let full_id = format!("{}/{}[{}]", window_id_str, info.global_id, info.instance_id);
 
                 if id_matches(&full_id, &info.global_id, query) {
-                    return Some((info.bounds, full_id));
+                    return Some((info.bounds, info.content_mask.bounds, full_id));
                 }
             }
             None
         });
 
-        if let Ok(Some((bounds, id))) = result {
-            return Ok((bounds, id));
+        if let Ok(Some(found)) = result {
+            return Ok(found);
         }
     }
 
@@ -2024,15 +2096,7 @@ fn handle_inspect_ui_tree(
     // `is_active` reports default dispatch target, not OS focus. See `default_target_window_id`.
     let active_window_id = default_target_window_id(cx);
 
-    let windows: Vec<gpui::AnyWindowHandle> = if let Some(ref wid) = opts.window_id {
-        // Only the requested window
-        cx.windows()
-            .into_iter()
-            .filter(|h| format!("{:?}", h.window_id()) == *wid)
-            .collect()
-    } else {
-        cx.windows()
-    };
+    let windows = windows_named(opts.window_id.as_deref(), cx);
 
     let children: Vec<UiElement> = windows
         .iter()
@@ -5251,6 +5315,97 @@ mod tests {
                     Some(&serde_json::Value::Null)
                 );
             }
+        });
+    }
+
+    /// A pointer aims at the painted part of an element: the middle of what
+    /// is left after its clip, and nowhere at all when nothing is left — a
+    /// row scrolled below the window's edge once took a click that landed on
+    /// nothing and reported success.
+    #[test]
+    fn a_pointer_aims_at_what_is_painted() {
+        let bounds = |x: f32, y: f32, w: f32, h: f32| gpui::Bounds {
+            origin: point(px(x), px(y)),
+            size: gpui::size(px(w), px(h)),
+        };
+        let window = bounds(0., 0., 870., 600.);
+
+        let whole = pointer_target(bounds(10., 100., 200., 32.), window, "row");
+        assert_eq!(whole, Ok(point(px(110.), px(116.))));
+
+        let cut = pointer_target(bounds(10., 590., 200., 32.), window, "row");
+        assert_eq!(
+            cut,
+            Ok(point(px(110.), px(595.))),
+            "the part above the edge"
+        );
+
+        let gone = pointer_target(bounds(10., 616., 200., 32.), window, "page-network");
+        assert!(
+            gone.as_ref()
+                .is_err_and(|error| error.contains("page-network")
+                    && error.contains("outside the visible area")),
+            "{gone:?}"
+        );
+    }
+
+    /// `with:<element id>` names the window that shows that element — the
+    /// address a script has for a child window, which is never the active
+    /// one while the app runs in the background. Waiting on a window that is
+    /// not open yet is a condition that does not hold, not an error.
+    #[gpui::test]
+    fn a_window_is_named_by_an_element_it_shows(cx: &mut gpui::TestAppContext) {
+        use gpui::{
+            Context, InteractiveElement as _, IntoElement, Render, StatefulInteractiveElement as _,
+            Styled, Window, div,
+        };
+
+        struct Shows(&'static str);
+
+        impl Render for Shows {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                // A hitbox is what puts an element in the inspector's list.
+                div().id(self.0).size(px(100.)).on_click(|_, _, _| {})
+            }
+        }
+
+        cx.update(|cx| {
+            crate::init(cx);
+            cx.request_inspector_ids();
+        });
+        let (_, main) = cx.add_window_view(|_, _| Shows("main-view"));
+        main.update(|window, cx| window.draw(cx).clear(cx));
+        let (_, settings) = cx.add_window_view(|_, _| Shows("settings-view"));
+        settings.update(|window, cx| window.draw(cx).clear(cx));
+        let settings_id = settings.update(|window, _| window.window_handle().window_id());
+
+        cx.update(|cx| {
+            let named = resolve_window(Some("with:settings-view"), cx).map(|h| h.window_id());
+            assert_eq!(named, Ok(settings_id));
+            let by_id =
+                resolve_window(Some(&format!("{settings_id:?}")), cx).map(|h| h.window_id());
+            assert_eq!(by_id, Ok(settings_id), "the WindowId form still works");
+            assert!(resolve_window(Some("with:nowhere"), cx).is_err());
+            assert_eq!(windows_named(Some("with:settings-view"), cx).len(), 1);
+
+            let opts = WaitForParams {
+                window_id: Some("with:nowhere".into()),
+                app_state_path: Some("/window_count".into()),
+                ..Default::default()
+            };
+            let (satisfied, checks) = evaluate_wait(&opts, cx).expect("a wait, not an error");
+            assert!(!satisfied);
+            assert_eq!(checks.pointer("/window/found"), Some(&json!(false)));
+
+            let opts = WaitForParams {
+                window_id: Some("with:settings-view".into()),
+                element_id: Some("settings-view".into()),
+                ..Default::default()
+            };
+            assert_eq!(
+                evaluate_wait(&opts, cx).map(|(satisfied, _)| satisfied),
+                Ok(true)
+            );
         });
     }
 

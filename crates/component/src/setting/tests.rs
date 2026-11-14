@@ -337,3 +337,54 @@ fn selecting_a_group_from_another_page_scrolls_to_it(cx: &mut TestAppContext) {
     let target = cx.debug_bounds("setting-1-2-1").unwrap();
     assert!(target.top() >= px(0.) && target.bottom() <= px(700.));
 }
+
+/// A page selected below the sidebar's fold — by ↓, or chosen from outside
+/// with `force_page` — scrolls into view. Until 2026-11-14 every page sat in
+/// one `SidebarMenu`, the one child the sidebar could scroll to, so the
+/// selection moved out of sight and stayed there.
+#[gpui::test]
+fn a_page_selected_below_the_fold_scrolls_into_view(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.request_inspector_ids());
+    let (host, cx) = setup(cx);
+    cx.update(|_, cx| {
+        host.update(cx, |host, cx| {
+            host.pages = (0..16)
+                .map(|ix| {
+                    SettingPage::new(format!("Page {ix}"))
+                        .group(SettingGroup::new().item(item("unrelated")))
+                })
+                .collect();
+            cx.notify();
+        });
+    });
+    cx.simulate_resize(size(px(1000.), px(300.)));
+    draw(cx);
+
+    let row = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            window
+                .inspector_elements()
+                .into_iter()
+                .find(|info| info.global_id.ends_with(".page-15.item"))
+                .map(|info| info.bounds)
+        })
+    };
+    assert_eq!(row(cx), None, "the last page starts out of sight");
+
+    cx.update(|_, cx| {
+        let state = host.read(cx).state.clone().expect("rendered");
+        let key = NavKey {
+            page_ix: 15,
+            group_ix: None,
+        };
+        select_entry(&state, key, None, cx);
+    });
+    draw(cx);
+    draw(cx);
+
+    let bounds = row(cx).expect("the selected page's row is drawn");
+    assert!(
+        bounds.top() >= px(0.) && bounds.bottom() <= px(300.),
+        "{bounds:?}"
+    );
+}
