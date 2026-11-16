@@ -1552,6 +1552,11 @@ impl PopupMenu {
                 .child(
                     h_flex()
                         .flex_1()
+                        // Narrower than its content when the menu has a
+                        // `max_w`: an element that can shorten itself (a path
+                        // cut at its start) gets the room to do it, instead
+                        // of running past the edge and being clipped.
+                        .min_w_0()
                         .min_h(item_height)
                         .items_center()
                         .gap_x_1()
