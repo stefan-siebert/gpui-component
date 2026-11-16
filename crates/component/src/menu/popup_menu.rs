@@ -12,13 +12,22 @@ use gpui::{
     StatefulInteractiveElement, Styled, WeakEntity, Window, anchored, deferred, div, img,
     prelude::FluentBuilder, px, rems,
 };
-use gpui::{ClickEvent, Half, MouseDownEvent, OwnedMenuItem, Point, Subscription};
+use gpui::{ClickEvent, Half, KeyDownEvent, MouseDownEvent, OwnedMenuItem, Point, Subscription};
 use gpui_base::TestSupportExt as _;
 
 use std::rc::Rc;
 use std::sync::Arc;
 
 const CONTEXT: &str = "PopupMenu";
+
+gpui::actions!(
+    popup_menu,
+    [
+        /// Backspace in a [`PopupMenu::searchable`] menu: take the last
+        /// character off the query.
+        SearchBackspace
+    ]
+);
 
 /// What goes in a menu row's leading icon slot.
 ///
@@ -63,6 +72,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("down", SelectDown, Some(CONTEXT)),
         KeyBinding::new("left", SelectLeft, Some(CONTEXT)),
         KeyBinding::new("right", SelectRight, Some(CONTEXT)),
+        // A binding, not a key listener: actions run before `on_key_down`,
+        // so an outer `backspace` binding (a file list's "go up") would
+        // otherwise fire behind the open menu.
+        KeyBinding::new("backspace", SearchBackspace, Some(CONTEXT)),
     ]);
 }
 
@@ -364,7 +377,29 @@ pub struct PopupMenu {
     /// reaches it, while the scroll offset is still baked into its anchor.
     priority: usize,
 
+    /// Whether typing filters the items — see [`Self::searchable`].
+    searchable: bool,
+    /// What has been typed so far; empty shows every item.
+    query: String,
+    /// The width the items had when the query began. Filtering keeps it, so
+    /// the menu does not shrink under the pointer with every key.
+    search_width: Option<Pixels>,
+
     _subscriptions: Vec<Subscription>,
+}
+
+/// Whether `query` occurs in `label` where a word begins, ignoring case:
+/// "del" finds "Delete", "new tab" finds "Open in New Tab", "r" finds
+/// "Rename" but not every label with an r in it.
+fn matches_at_word_start(label: &str, query: &str) -> bool {
+    let label = label.to_lowercase();
+    let query = query.to_lowercase();
+    label.match_indices(query.as_str()).any(|(at, _)| {
+        label[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !before.is_alphanumeric())
+    })
 }
 
 impl PopupMenu {
@@ -388,6 +423,9 @@ impl PopupMenu {
             size: Size::default(),
             submenu_anchor: (Anchor::TopLeft, Pixels::ZERO),
             priority: gpui_base::POPUP_PRIORITY,
+            searchable: false,
+            query: String::new(),
+            search_width: None,
             _subscriptions: vec![],
         }
     }
@@ -486,6 +524,41 @@ impl PopupMenu {
     pub fn scrollable(mut self, scrollable: bool) -> Self {
         self.scrollable = scrollable;
         self
+    }
+
+    /// Let typing filter the menu, default is false.
+    ///
+    /// Printable keys build a query shown above the items, and only items
+    /// and submenus with a word of their label starting with it (ignoring
+    /// case) stay; separators,
+    /// labels and custom elements step aside while a query stands. Backspace
+    /// takes a character back, Escape clears the query before it closes the
+    /// menu, Enter picks the highlighted match. Typed keys stop here — they
+    /// no longer reach the trigger's ancestors (a list's type-to-find).
+    pub fn searchable(mut self, searchable: bool) -> Self {
+        self.searchable = searchable;
+        self
+    }
+
+    /// The query typed into a [`Self::searchable`] menu; empty when nothing
+    /// is typed.
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// Move the first `count` items to the end, in reverse order: a header
+    /// (an item and the separator under it) becomes a footer (the separator,
+    /// then the item).
+    ///
+    /// For a menu that turned out to sit mostly above its pointer, where what
+    /// was built to be next to the pointer is now at the far edge.
+    pub fn mirror_header_to_footer(&mut self, count: usize, cx: &mut Context<Self>) {
+        let count = count.min(self.menu_items.len());
+        let mut header: Vec<_> = self.menu_items.drain(..count).collect();
+        header.reverse();
+        self.menu_items.extend(header);
+        self.selected_index = None;
+        cx.notify();
     }
 
     /// Set the side to show check icon, default is `Side::Left`.
@@ -799,6 +872,9 @@ impl PopupMenu {
         menu.menu_items.clear();
         menu.selected_index = None;
         *self = f(menu, window, cx);
+        if !self.query.is_empty() {
+            self.select_first_match(cx);
+        }
         cx.notify();
     }
 
@@ -885,7 +961,95 @@ impl PopupMenu {
         self.menu_items
             .iter()
             .enumerate()
-            .filter(|(_, item)| item.is_clickable())
+            .filter(|(_, item)| self.can_select(item))
+    }
+
+    /// Whether `item` shows under the current query.
+    fn matches_query(&self, item: &PopupMenuItem) -> bool {
+        if self.query.is_empty() {
+            return true;
+        }
+        match item {
+            PopupMenuItem::Item { label, .. } | PopupMenuItem::Submenu { label, .. } => {
+                matches_at_word_start(label, &self.query)
+            }
+            PopupMenuItem::Separator
+            | PopupMenuItem::Label(_)
+            | PopupMenuItem::ElementItem { .. } => false,
+        }
+    }
+
+    /// Whether the keyboard may land on `item`: it can be clicked and the
+    /// query leaves it showing.
+    fn can_select(&self, item: &PopupMenuItem) -> bool {
+        item.is_clickable() && self.matches_query(item)
+    }
+
+    /// Highlight the first match of the query, or nothing when none is left.
+    fn select_first_match(&mut self, cx: &mut Context<Self>) {
+        let first = self.clickable_menu_items().next().map(|(ix, _)| ix);
+        match first {
+            Some(ix) => self.set_selected_index(ix, cx),
+            None => {
+                self.selected_index = None;
+                cx.notify();
+            }
+        }
+    }
+
+    fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.searchable {
+            return;
+        }
+        let modifiers = &event.keystroke.modifiers;
+        if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+            return;
+        }
+        // A synthesized key (tests, automation) may carry no `key_char`; a
+        // one-character key name is then what was typed.
+        let keystroke = &event.keystroke;
+        let Some(text) = keystroke
+            .key_char
+            .as_deref()
+            .or_else(|| (keystroke.key.chars().count() == 1).then_some(keystroke.key.as_str()))
+        else {
+            return;
+        };
+        if text.is_empty() || text.chars().any(char::is_control) {
+            return;
+        }
+        cx.stop_propagation();
+        if self.query.is_empty() {
+            self.search_width = Some(self.bounds.size.width);
+        }
+        self.query.push_str(text);
+        self.select_first_match(cx);
+        cx.notify();
+    }
+
+    fn search_backspace(&mut self, _: &SearchBackspace, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.searchable {
+            cx.propagate();
+            return;
+        }
+        // Consumed even with nothing typed: Backspace behind an open menu is
+        // not the list's "go up".
+        if self.query.pop().is_some() {
+            self.select_first_match(cx);
+            cx.notify();
+        }
+    }
+
+    /// Escape: a query goes first, the menu with the next press.
+    fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.query.is_empty() {
+            self.query.clear();
+            self.search_width = None;
+            self.selected_index = None;
+            cx.notify();
+            return;
+        }
+        self.dismiss(&Cancel, window, cx);
     }
 
     fn on_click(
@@ -908,7 +1072,10 @@ impl PopupMenu {
     fn activate(&mut self, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         match self.selected_index {
             Some(index) => {
-                let item = self.menu_items.get(index);
+                let item = self
+                    .menu_items
+                    .get(index)
+                    .filter(|item| self.matches_query(item));
                 match item {
                     Some(PopupMenuItem::Item {
                         handler, action, ..
@@ -975,7 +1142,7 @@ impl PopupMenu {
             .iter()
             .enumerate()
             .rev()
-            .find(|(i, item)| *i < ix && item.is_clickable())
+            .find(|(i, item)| *i < ix && self.can_select(item))
         {
             self.set_selected_index(prev_ix, cx);
             return;
@@ -987,8 +1154,13 @@ impl PopupMenu {
 
     fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
+        // Under a query, item 0 is most likely filtered away.
         let Some(ix) = self.selected_index else {
-            self.set_selected_index(0, cx);
+            if self.query.is_empty() {
+                self.set_selected_index(0, cx);
+            } else {
+                self.select_first_match(cx);
+            }
             return;
         };
 
@@ -996,13 +1168,17 @@ impl PopupMenu {
             .menu_items
             .iter()
             .enumerate()
-            .find(|(i, item)| *i > ix && item.is_clickable())
+            .find(|(i, item)| *i > ix && self.can_select(item))
         {
             self.set_selected_index(next_ix, cx);
             return;
         }
 
-        self.set_selected_index(0, cx);
+        if self.query.is_empty() {
+            self.set_selected_index(0, cx);
+        } else {
+            self.select_first_match(cx);
+        }
     }
 
     fn select_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
@@ -1580,12 +1756,37 @@ impl Render for PopupMenu {
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::confirm))
-            .on_action(cx.listener(Self::dismiss))
+            .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::search_backspace))
+            .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
             .popover_style(cx)
             .text_color(cx.theme().popover_foreground)
             .relative()
             .occlude()
+            .when(!self.query.is_empty(), |this| {
+                let any_match = self.clickable_menu_items().next().is_some();
+                this.child(
+                    h_flex()
+                        .id("search")
+                        .px_2()
+                        .pt_1()
+                        .gap_x_1p5()
+                        .items_center()
+                        .text_sm()
+                        .text_color(if any_match {
+                            cx.theme().popover_foreground
+                        } else {
+                            cx.theme().muted_foreground
+                        })
+                        .child(
+                            Icon::new(IconName::Search)
+                                .xsmall()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(self.query.clone()),
+                )
+            })
             .child(
                 v_flex()
                     .id("items")
@@ -1593,6 +1794,10 @@ impl Render for PopupMenu {
                     .gap_y_0p5()
                     .min_w(rems(8.))
                     .when_some(self.min_width, |this, min_width| this.min_w(min_width))
+                    .when_some(
+                        self.search_width.filter(|_| !self.query.is_empty()),
+                        |this, width| this.min_w(width),
+                    )
                     .max_w(max_width)
                     .when(self.scrollable, |this| {
                         this.max_h(max_height)
@@ -1605,6 +1810,7 @@ impl Render for PopupMenu {
                             .enumerate()
                             // Ignore last separator
                             .filter(|(ix, item)| !(*ix + 1 == items_count && item.is_separator()))
+                            .filter(|(_, item)| self.matches_query(item))
                             .map(|(ix, item)| self.render_item(ix, item, options, window, cx)),
                     )
                     .on_prepaint(move |bounds, _, cx| view.update(cx, |r, _| r.bounds = bounds)),
@@ -1733,5 +1939,172 @@ mod tests {
             "{json}"
         );
         assert_eq!(labels_of("Button"), vec![Some("Back".to_owned())], "{json}");
+    }
+
+    gpui::actions!(
+        popup_menu_search_test,
+        [CopyItem, DeleteItem, RenameItem, GoUp]
+    );
+
+    /// A menu inside a parent that, like a file list, reacts to typed keys
+    /// and binds Backspace itself.
+    struct SearchRoot {
+        menu: Entity<PopupMenu>,
+        keys_behind: Rc<std::cell::RefCell<Vec<String>>>,
+        went_up: Rc<std::cell::Cell<bool>>,
+    }
+
+    impl Render for SearchRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let keys_behind = self.keys_behind.clone();
+            let went_up = self.went_up.clone();
+            div()
+                .key_context("SearchRoot")
+                .size_full()
+                .on_key_down(move |event: &KeyDownEvent, _, _| {
+                    keys_behind.borrow_mut().push(event.keystroke.key.clone());
+                })
+                .on_action(move |_: &GoUp, _, _| went_up.set(true))
+                .child(self.menu.clone())
+        }
+    }
+
+    fn search_menu(
+        cx: &mut gpui::TestAppContext,
+        searchable: bool,
+    ) -> (
+        Entity<SearchRoot>,
+        &mut gpui::VisualTestContext,
+        Rc<std::cell::RefCell<Vec<&'static str>>>,
+    ) {
+        let picked = Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::default());
+            init(cx);
+            cx.bind_keys([KeyBinding::new("backspace", GoUp, Some("SearchRoot"))]);
+            let on_copy = picked.clone();
+            cx.on_action(move |_: &CopyItem, _| on_copy.borrow_mut().push("copy"));
+            let on_delete = picked.clone();
+            cx.on_action(move |_: &DeleteItem, _| on_delete.borrow_mut().push("delete"));
+            let on_rename = picked.clone();
+            cx.on_action(move |_: &RenameItem, _| on_rename.borrow_mut().push("rename"));
+        });
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let menu = PopupMenu::build(window, cx, |menu, _, _| {
+                menu.searchable(searchable)
+                    .item(PopupMenuItem::element(|_, _| div().child("toolbar")))
+                    .separator()
+                    .menu("Copy", Box::new(CopyItem))
+                    .menu("Delete", Box::new(DeleteItem))
+                    .separator()
+                    .menu("Rename", Box::new(RenameItem))
+            });
+            menu.focus_handle(cx).focus(window, cx);
+            SearchRoot {
+                menu,
+                keys_behind: Rc::default(),
+                went_up: Rc::default(),
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        (root, cx, picked)
+    }
+
+    fn query_of(root: &Entity<SearchRoot>, cx: &mut gpui::VisualTestContext) -> String {
+        root.read_with(cx, |root, cx| root.menu.read(cx).query().to_string())
+    }
+
+    #[gpui::test]
+    fn typing_filters_and_enter_picks_the_first_match(cx: &mut gpui::TestAppContext) {
+        let (root, cx, picked) = search_menu(cx, true);
+
+        cx.simulate_keystrokes("r e");
+        assert_eq!(query_of(&root, cx), "re");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert_eq!(*picked.borrow(), vec!["rename"]);
+        assert!(root.read_with(cx, |root, _| root.keys_behind.borrow().is_empty()));
+    }
+
+    #[gpui::test]
+    fn arrows_walk_only_the_matches(cx: &mut gpui::TestAppContext) {
+        let (_root, cx, picked) = search_menu(cx, true);
+
+        // "c" leaves Copy alone — no word of "Delete" or "Rename" starts
+        // with it — so Down wraps around to Copy instead of landing on a
+        // filtered item.
+        cx.simulate_keystrokes("c down enter");
+        cx.run_until_parked();
+
+        assert_eq!(*picked.borrow(), vec!["copy"]);
+    }
+
+    #[test]
+    fn a_query_matches_where_a_word_begins() {
+        assert!(matches_at_word_start("Delete permanently", "del"));
+        assert!(matches_at_word_start("Delete permanently", "PERM"));
+        assert!(matches_at_word_start("Open in New Tab", "new tab"));
+        assert!(matches_at_word_start("Copy to…", "to"));
+        assert!(!matches_at_word_start(
+            "Open in New Tab of Other Panel",
+            "r"
+        ));
+        assert!(!matches_at_word_start("Delete", "ete"));
+    }
+
+    #[gpui::test]
+    fn backspace_and_escape_undo_the_query_before_anything_else(cx: &mut gpui::TestAppContext) {
+        let (root, cx, picked) = search_menu(cx, true);
+
+        cx.simulate_keystrokes("c x backspace");
+        assert_eq!(query_of(&root, cx), "c");
+        cx.simulate_keystrokes("escape");
+        assert_eq!(query_of(&root, cx), "");
+        // The menu is still open: the next Escape closes it, not the first.
+        assert!(picked.borrow().is_empty());
+
+        // Backspace on an empty query is not the parent's "go up".
+        cx.simulate_keystrokes("backspace");
+        assert!(!root.read_with(cx, |root, _| root.went_up.get()));
+    }
+
+    #[gpui::test]
+    fn a_plain_menu_lets_typed_keys_travel_on(cx: &mut gpui::TestAppContext) {
+        let (root, cx, _) = search_menu(cx, false);
+
+        cx.simulate_keystrokes("d backspace");
+
+        assert_eq!(query_of(&root, cx), "");
+        assert_eq!(
+            *root.read_with(cx, |root, _| root.keys_behind.borrow().clone()),
+            vec!["d".to_string()]
+        );
+        assert!(root.read_with(cx, |root, _| root.went_up.get()));
+    }
+
+    #[gpui::test]
+    fn a_header_becomes_a_footer_in_mirror_order(cx: &mut gpui::TestAppContext) {
+        let (root, cx, _) = search_menu(cx, false);
+
+        root.update(cx, |root, cx| {
+            root.menu
+                .update(cx, |menu, cx| menu.mirror_header_to_footer(2, cx))
+        });
+
+        let shape = root.read_with(cx, |root, cx| {
+            root.menu
+                .read(cx)
+                .menu_items
+                .iter()
+                .map(|item| match item {
+                    PopupMenuItem::Item { label, .. } => label.to_string(),
+                    PopupMenuItem::Separator => "-".to_string(),
+                    PopupMenuItem::ElementItem { .. } => "toolbar".to_string(),
+                    _ => "?".to_string(),
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(shape, vec!["Copy", "Delete", "-", "Rename", "-", "toolbar"]);
     }
 }
