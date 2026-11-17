@@ -14,7 +14,7 @@ use gpui::{
 use super::{
     InlineElement, TextViewMultiClickKind, inline::point_in_text_selection, state::LineSpan,
 };
-use crate::GlobalState;
+use crate::{GlobalState, touch_selection::caret_line_box};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct InlineMetrics {
@@ -161,6 +161,14 @@ impl InlineObjectSelectionProjection {
             *selected = object_in_selection(self.bounds, start, end);
         }
     }
+
+    pub(super) fn deselect(&self) {
+        if let Some(selected) = self.selected.upgrade()
+            && let Ok(mut selected) = selected.lock()
+        {
+            *selected = false;
+        }
+    }
 }
 
 fn object_in_selection(
@@ -185,7 +193,7 @@ pub(super) struct InlineObject {
     object: MeasuredInlineObject,
     selected: Arc<Mutex<bool>>,
     selection_bounds: Bounds<Pixels>,
-    line_bounds: Bounds<Pixels>,
+    line_bounds: super::state::ParagraphRows,
     content: AnyElement,
     content_measured: bool,
     link: Option<super::node::LinkMark>,
@@ -210,7 +218,7 @@ impl InlineObject {
         object: MeasuredInlineObject,
         selected: Arc<Mutex<bool>>,
         selection_bounds: Bounds<Pixels>,
-        line_bounds: Bounds<Pixels>,
+        line_bounds: super::state::ParagraphRows,
     ) -> Self {
         let (content, content_measured) = object.element();
         Self {
@@ -229,6 +237,7 @@ impl InlineObject {
     }
 }
 
+#[cfg(not(feature = "gpui-fast"))]
 impl IntoElement for InlineObject {
     type Element = Self;
     fn into_element(self) -> Self {
@@ -342,9 +351,11 @@ impl Element for InlineObject {
                             |row| row.contains(&bounds.center()),
                         )
                     })
-                    || state.selection_points(cx).is_some_and(|(start, end)| {
-                        object_in_selection(self.selection_bounds, start, end)
-                    }))
+                    || state
+                        .painted_selection_points(cx)
+                        .is_some_and(|(start, end)| {
+                            object_in_selection(self.selection_bounds, start, end)
+                        }))
         });
         if let Ok(mut value) = self.selected.lock() {
             *value = selected;
@@ -387,13 +398,20 @@ impl Element for InlineObject {
                 .unwrap()
                 .read(cx)
                 .selection_adapter
-                .register_copy_projection(super::selection_adapter::CopyProjection::InlineObject(
-                    InlineObjectSelectionProjection {
-                        selected: Arc::downgrade(&self.selected),
-                        bounds: self.selection_bounds,
-                    },
-                ));
-            if self.link.is_none() {
+                .register_copy_projection(
+                    super::selection_adapter::CopyProjection::InlineObject(
+                        InlineObjectSelectionProjection {
+                            selected: Arc::downgrade(&self.selected),
+                            bounds: self.selection_bounds,
+                        },
+                    ),
+                    cx,
+                );
+            if self.link.is_none()
+                && view
+                    .as_ref()
+                    .is_some_and(|view| view.read(cx).shows_text_cursor())
+            {
                 window.set_cursor_style(CursorStyle::IBeam, hitbox);
             }
             let visible = bounds.intersect(&window.content_mask().bounds);
@@ -409,6 +427,7 @@ impl Element for InlineObject {
             let text = self.text.to_string();
             let current_view = window.current_view();
             let line_bounds = self.line_bounds;
+            let object_bounds = self.selection_bounds;
             window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                 if !phase.bubble()
                     || !hitbox.is_hovered(window)
@@ -430,6 +449,13 @@ impl Element for InlineObject {
                                 event.position,
                                 TextViewMultiClickKind::Word,
                                 text.clone(),
+                                (
+                                    caret_line_box(object_bounds.origin, object_bounds.size.height),
+                                    caret_line_box(
+                                        object_bounds.top_right(),
+                                        object_bounds.size.height,
+                                    ),
+                                ),
                                 cx,
                             );
                         }
@@ -509,7 +535,7 @@ mod tests {
                 measured,
                 Arc::default(),
                 Bounds::default(),
-                Bounds::default(),
+                crate::text::state::ParagraphRows::single(Bounds::default()),
             );
             let mut accessible = gpui::accesskit::Node::new(Role::Unknown);
             object.write_a11y_info(&mut accessible);

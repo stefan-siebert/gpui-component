@@ -8,7 +8,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::test::{TestAppContextExt, TestWindowExt};
 use gpui_kit::{
-    AppContext, Context, Entity, Focusable, TestAppContext, Window, div, prelude::*, px, size,
+    AppContext, Bounds, Context, Entity, Focusable, TestAppContext, Window, div, point, prelude::*,
+    px, size,
 };
 use std::time::Duration;
 
@@ -134,8 +135,8 @@ async fn dialog_validates_scoped_input_saves_and_dismisses_notification(cx: &mut
         window.try_find("dialog").is_none() && window.try_find("notification").is_some()
     })
     .await;
-    // Toast entrance also uses GPUI's wall-clock Animation (400 ms).
-    std::thread::sleep(Duration::from_millis(410));
+    // Toast entrance (400 ms) runs on the test clock.
+    cx.executor().advance_clock(Duration::from_millis(410));
     cx.update_window(handle.into(), |_, window, cx| {
         assert_eq!(window.find("name").value(), Some("Ada 中文"));
         assert!(window.find("notification").visible());
@@ -147,6 +148,80 @@ async fn dialog_validates_scoped_input_saves_and_dismisses_notification(cx: &mut
         window.try_find("notification").is_none()
     })
     .await;
+}
+
+#[gpui_kit::test]
+async fn notifications_stay_interactive_above_dialogs(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        cx.set_reduce_motion(true);
+    });
+    let (handle, _) = common::open_window(cx, Some(size(px(800.), px(700.))), |window, cx| {
+        cx.new(|cx| Workspace {
+            saved: cx.new(|cx| InputState::new(window, cx)),
+            draft: cx.new(|cx| InputState::new(window, cx)),
+        })
+    });
+    for count in 1..=2 {
+        let closed = std::rc::Rc::new(std::cell::Cell::new(false));
+        cx.update_window(handle.into(), |_, window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            window.open_dialog(cx, move |dialog, _, _| {
+                dialog
+                    .title("Edit profile")
+                    .child(Input::new(&input).id("draft"))
+            });
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(1), |window, _| {
+            window.find_all("dialog").len() == count
+        })
+        .await;
+        let focus = cx
+            .update_window(handle.into(), |_, window, cx| {
+                let focus = window.focused(cx).expect("dialog focus");
+                let closed = closed.clone();
+                window.push_notification(
+                    Notification::new()
+                        .message("Profile updated")
+                        .autohide(false)
+                        .on_close(move |_, _| closed.set(true)),
+                    cx,
+                );
+                focus
+            })
+            .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(1), |window, _| {
+            window.try_find("notification").is_some()
+        })
+        .await;
+        // Toast entrance uses wall-clock Animation, independently of the test clock.
+        std::thread::sleep(Duration::from_millis(410));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(focus.is_focused(window), "notification took dialog focus");
+            assert!(window.find("notification").visible());
+            assert_eq!(window.find_all("dialog").len(), count);
+            window.hover("notification", cx);
+            assert!(window.within("notification").find("close").visible());
+            // This must reach the actual dismiss button through the modal backdrop.
+            window.within("notification").click("close", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(1), |window, _| {
+            window.try_find("notification").is_none()
+        })
+        .await;
+        assert!(closed.get(), "notification dismiss callback did not run");
+        cx.update_window(handle.into(), |_, window, _| {
+            assert!(
+                focus.is_focused(window),
+                "dismissing notification changed focus"
+            );
+            assert_eq!(window.find_all("dialog").len(), count);
+        })
+        .unwrap();
+    }
 }
 
 #[gpui_kit::test]
@@ -212,9 +287,9 @@ async fn escape_dismisses_dialog_and_sheet_and_restores_focus(cx: &mut TestAppCo
         window.try_find("sheet-content").is_some()
     })
     .await;
-    // GPUI's non-synced Animation uses std::time::Instant, not the test clock.
-    // Finish the actual 150 ms entrance before asserting its final geometry.
-    std::thread::sleep(Duration::from_millis(160));
+    // GPUI Animation runs on the test clock; advance it past
+    // the 150 ms entrance before asserting the final geometry.
+    cx.executor().advance_clock(Duration::from_millis(160));
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
         let sheet = window.find("sheet-content").bounds();
@@ -231,6 +306,47 @@ async fn escape_dismisses_dialog_and_sheet_and_restores_focus(cx: &mut TestAppCo
     .await;
     cx.update_window(handle.into(), |_, window, _| {
         assert_eq!(window.find("name").focused(), Some(true));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn sheet_and_notifications_stay_in_the_fully_visible_area(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (handle, _) = common::open_window(cx, Some(size(px(400.), px(800.))), |window, cx| {
+        cx.new(|cx| Workspace {
+            saved: cx.new(|cx| InputState::new(window, cx)),
+            draft: cx.new(|cx| InputState::new(window, cx)),
+        })
+    });
+    // As on a phone: a status bar above, the on-screen keyboard below.
+    let visible = Bounds::new(point(px(0.), px(40.)), size(px(400.), px(500.)));
+    cx.simulate_window_visual_viewport_change(handle.into(), visible);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.fully_visible_bounds(), visible);
+        window.click("notify", cx);
+        window.click("inspect", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(1), |window, _| {
+        window.try_find("sheet-content").is_some() && window.try_find("notification").is_some()
+    })
+    .await;
+    // Let the sheet's 150 ms entrance finish (see above).
+    cx.executor().advance_clock(Duration::from_millis(160));
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let sheet = window.find("sheet-content").bounds();
+        assert!(
+            sheet.top() >= visible.top() && sheet.bottom() <= visible.bottom(),
+            "sheet {sheet:?} outside {visible:?}"
+        );
+        let toast = window.find("notification").bounds();
+        assert!(
+            toast.top() >= visible.top() && toast.bottom() <= visible.bottom(),
+            "notification {toast:?} outside {visible:?}"
+        );
     })
     .unwrap();
 }

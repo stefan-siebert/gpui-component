@@ -4,6 +4,7 @@ use gpui::{
     RenderOnce, SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled, Window,
     div, prelude::FluentBuilder,
 };
+use gpui_base::LogicalStyledExt as _;
 use rust_i18n::t;
 
 use crate::{
@@ -184,6 +185,7 @@ impl RenderOnce for DropdownButton {
             .role(gpui::Role::Group)
             .when(is_ghost, |this| this.group(HALVES_GROUP))
             .h_flex()
+            .flex_row_dir(cx)
             .refine_style(&self.style)
             .when_some(self.button, |this, button| {
                 let disabled = self.disabled || button.is_disabled();

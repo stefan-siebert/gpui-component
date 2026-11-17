@@ -1,3 +1,4 @@
+use gpui_base::LogicalStyledExt as _;
 use std::rc::Rc;
 
 use gpui::{
@@ -192,6 +193,7 @@ impl RenderOnce for Alert {
         let border_color = self.variant.border_color(cx);
 
         h_flex()
+            .flex_row_dir(cx)
             .id(self.id)
             .role(Role::Alert)
             .w_full()
@@ -208,7 +210,7 @@ impl RenderOnce for Alert {
             .refine_style(&self.style)
             .child(
                 div()
-                    .flex()
+                    .flex_row_dir(cx)
                     .flex_1()
                     .when(self.banner, |this| this.items_center())
                     .overflow_hidden()

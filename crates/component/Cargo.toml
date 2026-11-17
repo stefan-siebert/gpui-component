@@ -7,7 +7,7 @@ documentation = "https://docs.rs/gpui-component"
 homepage = "https://gpui-kit.com"
 repository = "https://github.com/longbridge/gpui-kit"
 readme = "../../README.md"
-version = "0.8.0"
+version = "0.10.0"
 publish = true
 edition.workspace = true
 
@@ -161,7 +161,7 @@ image = { workspace = true, optional = true }
 num-traits = "0.2"
 
 # Calendar
-chrono = "0.4.38"
+jiff = "1.0"
 
 # Code Editor
 lsp-types.workspace = true

@@ -31,6 +31,7 @@ members = [
     "examples/system_monitor",
     "examples/focus_trap",
     "examples/tooltip_top_edge",
+    "examples/link_tooltip",
     "examples/sidebar",
     "examples/text_max_lines",
     "examples/text_selection",
@@ -40,7 +41,6 @@ members = [
     "examples/ai_recipes",
     "examples/speech",
     "crates/shell",
-    "crates/shell/rquickjs-compat",
 ]
 resolver = "2"
 
@@ -49,14 +49,14 @@ publish = false
 edition = "2024"
 
 [workspace.dependencies]
-gpui-kit = { path = "crates/kit", version = "0.8.0" }
-gpui-component = { path = "crates/component", version = "0.8.0" }
-gpui-base = { path = "crates/base", version = "0.8.0" }
-gpui-component-macros = { path = "crates/component-macros", version = "0.8.0" }
-gpui-kit-assets = { path = "crates/assets", version = "0.8.0" }
-gpui-fps = { path = "crates/fps", version = "0.8.0" }
-gpui-shell = { path = "crates/shell", version = "0.8.0" }
-gpui-webview = { path = "crates/webview", version = "0.8.0" }
+gpui-kit = { path = "crates/kit", version = "0.10.0" }
+gpui-component = { path = "crates/component", version = "0.10.0" }
+gpui-base = { path = "crates/base", version = "0.10.0" }
+gpui-component-macros = { path = "crates/component-macros", version = "0.10.0" }
+gpui-kit-assets = { path = "crates/assets", version = "0.10.0" }
+gpui-fps = { path = "crates/fps", version = "0.10.0" }
+gpui-shell = { path = "crates/shell", version = "0.10.0" }
+gpui-webview = { path = "crates/webview", version = "0.10.0" }
 story = { path = "crates/story" }
 # Git, not a sibling path: a consumer that pulls this crate by git (speedy)
 # must be able to resolve the `mcp` feature without a ../gpui-mcp checkout.
@@ -74,9 +74,9 @@ gpui_web = { git = "https://github.com/stefan-siebert/zed", branch = "gpui-mcp-p
 # Fast is optional; existing crates select it through their gpui-fast feature.
 # Explicit package fields make Cargo use these dependency keys as Rust crate names;
 # the packages declare the same library names as the pre backend.
-gpui-fast = { package = "gpui-fast", version = "0.1.10", features = ["windows-manifest-provided-by-host"] }
-gpui-fast-platform = { package = "gpui-fast-platform", version = "0.1.10", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-gpui-fast-web = { package = "gpui-fast-web", version = "0.1.10" }
+gpui-fast = { package = "gpui-fast", version = "0.1.16", features = ["windows-manifest-provided-by-host"] }
+gpui-fast-platform = { package = "gpui-fast-platform", version = "0.1.16", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui-fast-web = { package = "gpui-fast-web", version = "0.1.16" }
 gpui_macros = { git = "https://github.com/stefan-siebert/zed", branch = "gpui-mcp-patches-v2" }
 reqwest_client = { git = "https://github.com/stefan-siebert/zed", branch = "gpui-mcp-patches-v2" }
 sum-tree = { version = "0.2.0", package = "zed-sum-tree" }
@@ -138,6 +138,7 @@ manual_is_multiple_of = "allow"
 map_entry = "allow"
 module_inception = "allow"
 non_canonical_partial_ord_impl = "allow"
+redundant_clone = "deny"
 reversed_empty_ranges = "allow"
 single_range_in_vec_init = "allow"
 style = { level = "allow", priority = -1 }
@@ -197,10 +198,6 @@ cap-std = { opt-level = 3 }
 strip = "symbols"
 
 [patch.crates-io]
-# LLRT's public modules still name their compatible binding dependency
-# `rquickjs`. Route those dependencies through a source-compatible facade so
-# the shell and LLRT share the exact same quickjs-jit types and VM.
-rquickjs = { path = "crates/shell/rquickjs-compat" }
 # Fork: stacker's psm, which may have better WASM support.
 psm = { git = "https://github.com/rust-lang/stacker", branch = "master" }
 

@@ -1,8 +1,10 @@
 use gpui::{
-    Action, AsKeystroke, FocusHandle, Half, InteractiveElement as _, IntoElement, KeyBinding,
-    KeyContext, Keystroke, ParentElement as _, RenderOnce, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _, relative,
+    Action, FocusHandle, Half, InteractiveElement as _, IntoElement, KeyBinding, KeyContext,
+    KeybindingKeystroke, Keystroke, ParentElement as _, RenderOnce, StyleRefinement, Styled,
+    Window, div, prelude::FluentBuilder as _, relative,
 };
+
+use gpui_base::TestTextExt as _;
 
 use crate::{ActiveTheme, Sizable, Size, StyledExt};
 
@@ -108,8 +110,20 @@ impl Kbd {
     }
 
     fn from_binding(binding: &KeyBinding) -> Option<Self> {
-        let key = binding.keystrokes().first()?;
-        Some(Self::new(key.as_keystroke().clone()))
+        binding
+            .keystrokes()
+            .first()
+            .map(Self::from_keybinding_keystroke)
+    }
+
+    /// Show a keystroke as it was bound. On Windows its inner keystroke is
+    /// what the keyboard reports instead: `alt-+` for `alt-shift-=`.
+    fn from_keybinding_keystroke(key: &KeybindingKeystroke) -> Self {
+        Self::new(Keystroke {
+            modifiers: *key.modifiers(),
+            key: key.key().into(),
+            key_char: None,
+        })
     }
 
     /// Return the Platform specific keybinding string by KeyStroke
@@ -272,7 +286,7 @@ impl RenderOnce for Kbd {
         div()
             // Lets a test ask whether a given shortcut hint was painted this
             // frame; a no-op outside test-support builds.
-            .debug_selector(|| format!("kbd:{}", self.stroke.unparse()))
+            .debug_selector(|| format!("kbd:{}", self.stroke.unparse(cx.platform_info().os)))
             .text_color(cx.theme().muted_foreground)
             .bg(cx.theme().tokens.muted)
             .when(self.outline, |this| {
@@ -295,6 +309,7 @@ impl RenderOnce for Kbd {
             .flex_shrink_0()
             .refine_style(&self.style)
             .child(Self::format_keystroke(&self.stroke, self.arrow_glyphs))
+            .test_text(Self::format_keystroke(&self.stroke, self.arrow_glyphs))
             .into_any_element()
     }
 }
@@ -313,7 +328,7 @@ mod tests {
         use super::Kbd;
         use gpui::Keystroke;
 
-        let glyphs = |text: &str| -> String {
+        let glyphs = |text: &'static str| -> String {
             let stroke = Keystroke::parse(text).expect("valid keystroke");
             Kbd::format_keystroke(&stroke, true)
         };
@@ -331,7 +346,8 @@ mod tests {
         use super::Kbd;
         use gpui::Keystroke;
 
-        let format = |text: &str| Kbd::format(&Keystroke::parse(text).expect("valid keystroke"));
+        let format =
+            |text: &'static str| Kbd::format(&Keystroke::parse(text).expect("valid keystroke"));
         assert_eq!(format("multiply"), "Num *");
         assert_eq!(format("add"), "Num +");
         assert_eq!(format("subtract"), "Num -");
@@ -354,10 +370,7 @@ mod tests {
             assert_eq!(Kbd::format(&Keystroke::parse("cmd--").unwrap()), "⌘-");
             assert_eq!(Kbd::format(&Keystroke::parse("cmd-+").unwrap()), "⌘+");
             assert_eq!(Kbd::format(&Keystroke::parse("cmd-enter").unwrap()), "⌘⏎");
-            assert_eq!(
-                Kbd::format(&Keystroke::parse("secondary-f12").unwrap()),
-                "⌘F12"
-            );
+            assert_eq!(Kbd::format(&Keystroke::parse("cmd-f12").unwrap()), "⌘F12");
             assert_eq!(
                 Kbd::format(&Keystroke::parse("shift-pagedown").unwrap()),
                 "⇧Page Down"
@@ -419,5 +432,27 @@ mod tests {
                 "Alt+Tab"
             );
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_from_keybinding_keystroke() {
+        use super::Kbd;
+        use gpui::{KeybindingKeystroke, Keystroke, Modifiers};
+
+        // What the Windows keyboard mapper makes of `alt-shift-=`.
+        let key = KeybindingKeystroke::new(
+            Keystroke::parse("alt-+").unwrap(),
+            Modifiers {
+                alt: true,
+                shift: true,
+                ..Default::default()
+            },
+            "=".into(),
+        );
+        assert_eq!(
+            Kbd::format(Kbd::from_keybinding_keystroke(&key).keystroke()),
+            "Alt+Shift+="
+        );
     }
 }

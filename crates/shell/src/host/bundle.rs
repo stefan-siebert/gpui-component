@@ -110,15 +110,25 @@ pub(super) fn create(
             brand.name()
         );
     }
-    let root = crate::resolve_app_root(directory, ENTRY)?;
-    if !root.join(MANIFEST_FILE).is_file() {
+    let directory = if directory.is_file() {
+        directory.parent().unwrap_or(directory)
+    } else {
+        directory
+    };
+    let manifest = directory
+        .join(MANIFEST_FILE)
+        .is_file()
+        .then(|| PluginManifest::read(directory))
+        .transpose()?;
+    let entry = manifest.as_ref().map_or(ENTRY, PluginManifest::entry);
+    let root = crate::resolve_app_root(directory, entry)?;
+    let Some(manifest) = manifest else {
         bail!(
             "{} has no {MANIFEST_FILE}. A bundle needs one: its `id` keeps the user's data \
              when the application is moved or updated, and its `name` and `version` name the bundle.",
             root.display()
         );
-    }
-    let manifest = PluginManifest::read(&root)?;
+    };
 
     let platform = options.platform.unwrap_or_else(Platform::host);
     if options.download_url.is_some() && platform != Platform::Linux {
@@ -168,7 +178,7 @@ pub(super) fn create(
             tree.bytes(format!("{contents}/PkgInfo"), b"APPL????".to_vec(), false);
             tree.bytes(
                 format!("{contents}/MacOS/{}", names.display),
-                shell_script(MACOS_LAUNCHER, &values).into_bytes(),
+                shell_script(MACOS_LAUNCHER, &values)?.into_bytes(),
                 true,
             );
             if let Some(icon) = &icon {
@@ -209,7 +219,7 @@ pub(super) fn create(
             }
             tree.bytes(
                 format!("{top}/{}", names.command),
-                shell_script(LINUX_LAUNCHER, &values).into_bytes(),
+                shell_script(LINUX_LAUNCHER, &values)?.into_bytes(),
                 true,
             );
             add_application(&mut tree, &root, &format!("{top}/app"), &exclude)?;
@@ -224,7 +234,7 @@ pub(super) fn create(
                     .with_context(|| format!("cannot read {}", archive.display()))?,
             );
             let installer = out.join("install.sh");
-            let script = shell_script(LINUX_INSTALLER, &values);
+            let script = shell_script(LINUX_INSTALLER, &values)?;
             replace_file(&installer, |mut file| file.write_all(script.as_bytes()))?;
             set_executable(&installer)?;
             let remote = match options.download_url.as_deref() {
@@ -359,29 +369,67 @@ struct ScriptValues<'a> {
 }
 
 impl ScriptValues<'_> {
+    /// Each placeholder, where its value comes from, and the value.
+    fn placeholders(&self) -> [(&'static str, &'static str, &str); 10] {
+        [
+            ("ID", "`id`", self.id),
+            ("NAME", "`name`", self.name),
+            ("COMMAND", "the command name", self.command),
+            ("APP_VERSION", "`version`", self.app_version),
+            (
+                "RUNTIME_VERSION",
+                "the runtime version",
+                self.runtime_version,
+            ),
+            ("ICON_SIZE", "the icon size", &self.icon_size),
+            ("ARCHIVE", "the archive name", &self.archive),
+            (
+                "ARCHIVE_SHA256",
+                "the archive checksum",
+                &self.archive_sha256,
+            ),
+            ("DOWNLOAD_URL", "`--download-url`", self.download_url),
+            ("STEM", "the archive directory", self.stem),
+        ]
+    }
+
     /// The raw value of one placeholder, or `None` for one this does not know.
     fn get(&self, placeholder: &str) -> Option<&str> {
-        Some(match placeholder {
-            "ID" => self.id,
-            "NAME" => self.name,
-            "COMMAND" => self.command,
-            "APP_VERSION" => self.app_version,
-            "RUNTIME_VERSION" => self.runtime_version,
-            "ICON_SIZE" => &self.icon_size,
-            "ARCHIVE" => &self.archive,
-            "ARCHIVE_SHA256" => &self.archive_sha256,
-            "DOWNLOAD_URL" => self.download_url,
-            "STEM" => self.stem,
-            _ => return None,
-        })
+        self.placeholders()
+            .into_iter()
+            .find(|(name, _, _)| *name == placeholder)
+            .map(|(_, _, value)| value)
+    }
+
+    /// Quoting keeps a value one word, but the templates also put values in
+    /// comments and in the desktop entry `install.sh` writes, where a line
+    /// break ends the comment or starts a new key.
+    fn check(&self) -> Result<()> {
+        for (_, source, value) in self.placeholders() {
+            if value.chars().any(|character| {
+                // U+0085 is already a control character.
+                character.is_control() || matches!(character, '\u{2028}' | '\u{2029}')
+            }) {
+                bail!(
+                    "{source} {value:?} contains a line break or another control character, \
+                     which the bundle's scripts cannot hold"
+                );
+            }
+        }
+        Ok(())
     }
 }
 
 /// A POSIX shell template with every value as one single-quoted word. A line
 /// holding only `@RUNTIME_FUNCTIONS@` becomes the shared runtime functions.
-fn shell_script(template: &str, values: &ScriptValues) -> String {
+fn shell_script(template: &str, values: &ScriptValues) -> Result<String> {
+    values.check()?;
+    Ok(fill_shell_script(template, values))
+}
+
+fn fill_shell_script(template: &str, values: &ScriptValues) -> String {
     substitute(template, |placeholder| match placeholder {
-        "RUNTIME_FUNCTIONS" => Some(shell_script(RUNTIME_FUNCTIONS, values)),
+        "RUNTIME_FUNCTIONS" => Some(fill_shell_script(RUNTIME_FUNCTIONS, values)),
         placeholder => values.get(placeholder).map(shell_quote),
     })
 }
@@ -987,7 +1035,7 @@ fn mark_as_gui_program(bytes: &mut [u8]) -> Result<()> {
 fn write_zip(tree: &Tree, file: fs::File) -> io::Result<()> {
     let too_large = || io::Error::other("the bundle is too large for a zip archive");
     let mut out = io::BufWriter::new(file);
-    let (time, date) = dos_time(chrono::Local::now().naive_local());
+    let (time, date) = dos_time(jiff::ZonedDateTime::now().datetime());
     let mut central = Vec::new();
     let mut offset = 0u32;
 
@@ -1073,14 +1121,23 @@ fn write_zip(tree: &Tree, file: fs::File) -> io::Result<()> {
 }
 
 /// A zip entry's MS-DOS time and date, which cannot say anything before 1980.
-fn dos_time(time: chrono::NaiveDateTime) -> (u16, u16) {
-    use chrono::{Datelike as _, Timelike as _};
+fn dos_time(time: jiff::civil::DateTime) -> (u16, u16) {
     if time.year() < 1980 {
         return (0, (1 << 5) | 1);
     }
+    let (hour, minute, second) = (
+        time.hour() as u32,
+        time.minute() as u32,
+        time.second() as u32,
+    );
+    let (year, month, day) = (
+        (time.year() - 1980) as u32,
+        time.month() as u32,
+        time.day() as u32,
+    );
     (
-        ((time.hour() << 11) | (time.minute() << 5) | (time.second() / 2)) as u16,
-        ((((time.year() - 1980) as u32) << 9) | (time.month() << 5) | time.day()) as u16,
+        ((hour << 11) | (minute << 5) | (second / 2)) as u16,
+        ((year << 9) | (month << 5) | day) as u16,
     )
 }
 
@@ -1093,6 +1150,83 @@ mod tests {
             r#"{{ "id": "{id}", "name": "{name}", "version": "1.2.3-beta.1", "entry": "main.js" }}"#
         ))
         .expect("manifest")
+    }
+
+    fn bundle_entry(entry: &str) {
+        let directory = std::env::temp_dir().join(format!(
+            "gpui-shell-bundle-entry-{}-{}",
+            entry.replace('/', "-"),
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let app = directory.join("app");
+        fs::create_dir_all(app.join(entry).parent().expect("entry parent")).expect("app");
+        fs::write(app.join(entry), "export {};").expect("entry");
+        let source = format!(
+            r#"{{ "id": "com.example.bundle", "name": "Bundle Test", "version": "1.0.0", "entry": "{entry}" }}"#
+        );
+        fs::write(app.join(MANIFEST_FILE), &source).expect("manifest");
+        let out = directory.join("out");
+        let options = BundleOptions {
+            platform: Some(Platform::MacOS),
+            out: Some(out.clone()),
+            ..Default::default()
+        };
+        create(&app, &options, HostBrand::gpui_shell()).expect("bundle");
+        let packaged = out.join("Bundle Test.app/Contents/Resources/app");
+        assert_eq!(
+            fs::read_to_string(packaged.join(entry)).unwrap(),
+            "export {};"
+        );
+        assert_eq!(
+            fs::read_to_string(packaged.join(MANIFEST_FILE)).unwrap(),
+            source
+        );
+
+        if entry == ENTRY {
+            create(&app.join(entry), &options, HostBrand::gpui_shell())
+                .expect("bundle from entry file");
+        }
+
+        // An existing main.js must not mask a missing declared entry.
+        fs::remove_file(app.join(entry)).expect("remove entry");
+        if entry != ENTRY {
+            fs::write(app.join(ENTRY), "export {};").expect("default entry");
+        }
+        let error = create(&app, &options, HostBrand::gpui_shell()).unwrap_err();
+        assert!(error.to_string().contains(&format!("no `{entry}`")));
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn bundles_the_manifest_entry_without_main_js() {
+        bundle_entry("src/main.js");
+    }
+
+    #[test]
+    fn bundles_the_default_main_js_entry() {
+        bundle_entry(ENTRY);
+    }
+
+    #[test]
+    fn bundle_requires_a_valid_manifest() {
+        let app =
+            std::env::temp_dir().join(format!("gpui-shell-bundle-manifest-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&app);
+        fs::create_dir_all(&app).expect("app");
+        fs::write(app.join(ENTRY), "export {};").expect("entry");
+        let options = BundleOptions {
+            platform: Some(Platform::MacOS),
+            out: Some(app.join("out")),
+            ..Default::default()
+        };
+        let error = create(&app, &options, HostBrand::gpui_shell()).unwrap_err();
+        assert!(error.to_string().contains("has no gpui-shell.json"));
+        fs::write(app.join(MANIFEST_FILE), "{}").expect("invalid manifest");
+        let error = create(&app, &options, HostBrand::gpui_shell()).unwrap_err();
+        assert!(error.to_string().contains("id"));
+        assert!(!app.join("out").exists());
+        let _ = fs::remove_dir_all(&app);
     }
 
     #[test]
@@ -1148,7 +1282,8 @@ mod tests {
         let script = shell_script(
             "id=@ID@\nname=@NAME@\nsize=@ICON_SIZE@\nmail=me@example.com @UNKNOWN@\n",
             &values("It's @ID@"),
-        );
+        )
+        .expect("script");
         assert_eq!(
             script,
             "id='com.example.its'\nname='It'\\''s @ID@'\nsize='256'\n\
@@ -1157,7 +1292,7 @@ mod tests {
 
         // Every placeholder the real templates use is one this fills.
         for template in [LINUX_LAUNCHER, LINUX_INSTALLER, MACOS_LAUNCHER] {
-            let script = shell_script(template, &values("A"));
+            let script = shell_script(template, &values("A")).expect("script");
             // Independent of `substitute`, so a name it fails to read is caught.
             let left = script.split('@').skip(1).step_by(2).find(|name| {
                 !name.is_empty()
@@ -1169,10 +1304,44 @@ mod tests {
         }
 
         // The runtime functions come in whole, with their own placeholders filled.
-        let launcher = shell_script("#!/bin/sh\n@RUNTIME_FUNCTIONS@\nexec x\n", &values("A"));
+        let launcher =
+            shell_script("#!/bin/sh\n@RUNTIME_FUNCTIONS@\nexec x\n", &values("A")).expect("script");
         assert!(launcher.starts_with("#!/bin/sh\n"));
         assert!(launcher.ends_with("\nexec x\n"));
         assert!(!launcher.contains("@RUNTIME_FUNCTIONS@"));
+    }
+
+    #[test]
+    fn a_name_that_breaks_a_line_is_refused() {
+        for name in [
+            "A\ntouch /tmp/x",
+            "A\rB",
+            "A\u{85}B",
+            "A\u{2028}B",
+            "A\u{2029}B",
+        ] {
+            let error = shell_script(LINUX_INSTALLER, &values(name))
+                .expect_err("a line break in `name` must not reach a script");
+            assert!(error.to_string().starts_with("`name` "), "{error}");
+        }
+
+        let mut published = values("A");
+        published.download_url = "https://example.com/\nB";
+        let error = shell_script(LINUX_INSTALLER, &published).expect_err("a line break");
+        assert!(
+            error.to_string().starts_with("`--download-url` "),
+            "{error}"
+        );
+
+        let script = shell_script(
+            "# Starts @NAME@\nname=@NAME@\n",
+            &values("Folio 时钟 \"Q\" It's"),
+        )
+        .expect("spaces, CJK and quotes stay allowed");
+        assert_eq!(
+            script,
+            "# Starts 'Folio 时钟 \"Q\" It'\\''s'\nname='Folio 时钟 \"Q\" It'\\''s'\n"
+        );
     }
 
     #[test]

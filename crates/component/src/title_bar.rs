@@ -1,12 +1,14 @@
 use std::rc::Rc;
 
+use gpui_base::LogicalStyledExt as _;
+
 use crate::{ActiveTheme, Icon, IconName, Sizable as _, StyledExt, h_flex, scaled_px};
 use gpui::{
     AnyElement, App, Background, ClickEvent, Context, Hsla, InteractiveElement,
     IntoElement, MAX_BUTTONS_PER_SIDE, MouseButton, ParentElement, Pixels, Point, Render,
     RenderOnce, Rgba, StatefulInteractiveElement as _, StyleRefinement, Styled, TitlebarOptions,
     Window, WindowButton, WindowButtonLayout, WindowControlArea, WindowOptions, div,
-    linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px,
+    linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::TestSupportExt as _;
 use smallvec::SmallVec;
@@ -329,7 +331,7 @@ struct WindowControls {
 }
 
 impl RenderOnce for WindowControls {
-    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let is_linux = cfg!(target_os = "linux");
         let is_maximized = window.is_maximized();
         let on_close = self.on_close_window;
@@ -375,7 +377,9 @@ impl RenderOnce for WindowControls {
             })
             .collect();
 
+        // In RTL the controls sit on the start (left) edge, close outermost.
         h_flex()
+            .flex_row_dir(cx)
             .id(self.id)
             .test_support()
             .items_center()
@@ -504,16 +508,29 @@ impl RenderOnce for TitleBar {
             state.update(cx, |state, _| state.traffic_lights_for = height);
         }
 
+        let radii = crate::window_corner_radii(window, cx);
+
         // Main title bar container - all event handlers go here (like Zed's approach)
         h_flex()
+            .flex_row_dir(cx)
             .id("title-bar")
             .flex_shrink_0()
             // Mark as drag zone for the platform
             .window_control_area(WindowControlArea::Drag)
             .w_full()
             .h(height)
-            // Left padding: skip if left window controls will provide spacing
-            .when(!has_left_controls, |this| this.pl(left_padding))
+            // Left padding: skip if left window controls will provide spacing.
+            // macOS draws its traffic lights on the left whatever the
+            // direction; elsewhere the padding is on the start edge.
+            .when(!has_left_controls, |this| {
+                if is_macos {
+                    this.pl(left_padding)
+                } else {
+                    this.ps(left_padding, cx)
+                }
+            })
+            .rounded_tl(radii.top_left)
+            .rounded_tr(radii.top_right)
             .border_b_1()
             .border_color(cx.theme().title_bar_border)
             // Upstream's gradient blend of `title_bar` into `background`,
@@ -531,6 +548,18 @@ impl RenderOnce for TitleBar {
             .on_mouse_down(
                 MouseButton::Left,
                 window.listener_for(&state, |state, event: &gpui::MouseDownEvent, window, cx| {
+                    // A control that took the press, such as a Button or a
+                    // focusable Select, prevents the default; its click must
+                    // not turn into a window move. Sampled before this
+                    // handler prevents the default itself (Windows, below).
+                    let taken_by_control = window.default_prevented();
+                    // The bar moves the window; it never starts a text
+                    // selection. On Windows the press arrives through the
+                    // caption hit test and the move loop swallows the
+                    // release, so a started selection would follow the
+                    // pointer afterwards.
+                    crate::GlobalState::suppress_text_selection(cx);
+
                     // A WM_NCLBUTTONDOWN this titlebar posted itself comes back
                     // through GPUI as one more MouseDown. Let it fall through to
                     // DefWindowProc untouched (no prevent_default, no
@@ -601,8 +630,7 @@ impl RenderOnce for TitleBar {
                         state.last_mousedown_pos = Some(event.position);
                     }
 
-                    let _ = (window, &cx); // suppress unused warnings on non-Windows
-                    state.should_move = true;
+                    state.should_move = !taken_by_control;
                     state.drag_start_pos = Some(event.position);
                 }),
             )
@@ -615,15 +643,20 @@ impl RenderOnce for TitleBar {
             )
             .on_mouse_move(window.listener_for(
                 &state,
-                |state,
-                 #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
-                 event: &gpui::MouseMoveEvent,
-                 window,
-                 _| {
+                |state, event: &gpui::MouseMoveEvent, window, cx| {
+                    // Not on Windows: the bar is caption area there, and a
+                    // non-client move reports no pressed button.
+                    #[cfg(not(target_os = "windows"))]
+                    if event.pressed_button != Some(MouseButton::Left) {
+                        state.should_move = false;
+                        return;
+                    }
                     if state.should_move {
                         #[cfg(not(target_os = "windows"))]
                         {
                             state.should_move = false;
+                            gpui_base::TextSelection::end(window, cx);
+                            cx.stop_active_drag(window);
                             window.start_window_move();
                         }
                         #[cfg(target_os = "windows")]
@@ -641,6 +674,8 @@ impl RenderOnce for TitleBar {
                                     state.should_move = false;
                                     state.drag_start_pos = None;
                                     state.synthetic_nc_down_posted = true;
+                                    gpui_base::TextSelection::end(window, cx);
+                                    cx.stop_active_drag(window);
                                     start_window_move_win32(window);
                                 }
                             }
@@ -710,7 +745,7 @@ impl RenderOnce for TitleBar {
                     .overflow_x_hidden()
                     .w_full()
                     .h_full()
-                    .when(window.is_fullscreen(), |this| this.pl_3())
+                    .when(window.is_fullscreen(), |this| this.ps(rems(0.75), cx))
                     .children(self.children),
             )
             // Right window controls (standard: minimize, maximize, close)
@@ -835,7 +870,89 @@ fn start_window_move_win32(window: &mut gpui::Window) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Rgba, linear_color_stop, linear_gradient};
+    use gpui::{
+        AppContext as _, Modifiers, Rgba, TestAppContext, VisualTestContext, linear_color_stop,
+        linear_gradient, point, px,
+    };
+    use std::cell::Cell;
+
+    use crate::button::Button;
+
+    const BUTTON: &str = "title-bar-button";
+
+    struct BarWithButton {
+        clicks: Rc<Cell<usize>>,
+    }
+
+    impl Render for BarWithButton {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let clicks = self.clicks.clone();
+            TitleBar::new().child(div().w(px(200.)).child("App")).child(
+                Button::new("open")
+                    .label("Open")
+                    .debug_selector(|| BUTTON.to_string())
+                    .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+            )
+        }
+    }
+
+    fn open(cx: &mut TestAppContext) -> (VisualTestContext, Rc<Cell<usize>>) {
+        cx.update(crate::init);
+        let clicks = Rc::new(Cell::new(0));
+        let view = cx.new(|_| BarWithButton {
+            clicks: clicks.clone(),
+        });
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| crate::Root::new(view.clone(), window, cx))
+            })
+            .unwrap()
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        (cx, clicks)
+    }
+
+    /// Press, move one pixel, release, as a hand often does.
+    fn click_with_drift(cx: &mut VisualTestContext, at: gpui::Point<Pixels>) {
+        let drift = point(at.x + px(1.), at.y);
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(drift, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(drift, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn a_press_on_a_control_keeps_its_click(cx: &mut TestAppContext) {
+        let (mut cx, clicks) = open(cx);
+        let at = cx
+            .debug_bounds(BUTTON)
+            .expect("the button is drawn")
+            .center();
+        click_with_drift(&mut cx, at);
+        assert_eq!(clicks.get(), 1);
+    }
+
+    #[gpui::test]
+    fn a_press_on_the_bar_does_not_start_a_text_selection(cx: &mut TestAppContext) {
+        let (mut cx, _) = open(cx);
+        let button = cx.debug_bounds(BUTTON).expect("the button is drawn");
+        let bar = point(button.left() - px(100.), button.center().y);
+        cx.simulate_mouse_down(bar, MouseButton::Left, Modifiers::default());
+        cx.update(|_, cx| assert!(crate::GlobalState::is_text_selection_suppressed(cx)));
+    }
+
+    /// The test platform's `start_window_move` is `unimplemented!()`, so a
+    /// press on the bar itself still reaching it shows up as this panic.
+    /// Fork: not on Windows, where this title bar posts the caption message
+    /// itself, and only once the pointer has moved four pixels.
+    #[cfg(not(target_os = "windows"))]
+    #[gpui::test]
+    #[should_panic(expected = "not implemented")]
+    fn a_press_on_the_bar_itself_still_moves_the_window(cx: &mut TestAppContext) {
+        let (mut cx, _) = open(cx);
+        let button = cx.debug_bounds(BUTTON).expect("the button is drawn");
+        click_with_drift(&mut cx, point(button.left() - px(100.), button.center().y));
+    }
 
     #[test]
     fn test_default_title_bar_background() {

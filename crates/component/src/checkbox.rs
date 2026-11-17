@@ -10,10 +10,11 @@ use gpui::{
     RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
     prelude::FluentBuilder as _, px, relative, rems, svg,
 };
-use gpui_base::{CheckboxIndicator, spring};
+use gpui_base::{CheckboxIndicator, LogicalStyledExt as _, spring};
 
-// The value type of the styled Checkbox, re-exported so a caller that sets a
-// tri-state box does not have to reach past this module into `gpui_base`.
+// Fork: the value type of the styled Checkbox, re-exported so a caller that
+// sets a tri-state box does not have to reach past this module into
+// `gpui_base`.
 pub use gpui_base::CheckboxState;
 
 /// A Checkbox element.
@@ -27,7 +28,8 @@ pub struct Checkbox {
     label: Option<Text>,
     accessibility_label: Option<SharedString>,
     children: Vec<AnyElement>,
-    state: CheckboxState,
+    checked: bool,
+    indeterminate: bool,
     disabled: bool,
     size: Size,
     tab_stop: bool,
@@ -49,7 +51,8 @@ impl Checkbox {
             label: None,
             accessibility_label: None,
             children: Vec::new(),
-            state: CheckboxState::Unchecked,
+            checked: false,
+            indeterminate: false,
             disabled: false,
             size: Size::default(),
             on_click: None,
@@ -97,35 +100,28 @@ impl Checkbox {
     }
 
     /// Set the checked state for the checkbox.
-    ///
-    /// Clears any indeterminate state; [`Self::state`] keeps the third value
-    /// in play.
     pub fn checked(mut self, checked: bool) -> Self {
-        self.state = if checked {
-            CheckboxState::Checked
-        } else {
-            CheckboxState::Unchecked
-        };
+        self.checked = checked;
         self
     }
 
-    /// Set the full tri-state value: unchecked, checked, or indeterminate.
+    /// Show the mixed state, for example on a checkbox that selects a group
+    /// whose items are only partly checked. Default is false.
     ///
-    /// Indeterminate draws a dash in place of the check mark. It is the mixed
-    /// value of a box standing for several items that disagree, and the state
-    /// screen readers announce as such.
-    pub fn state(mut self, state: CheckboxState) -> Self {
-        self.state = state;
+    /// While set, the checkbox draws a dash instead of the check mark and
+    /// reports the mixed state to assistive technology, whatever
+    /// [`checked`](Self::checked) says. Activating it requests `true`.
+    pub fn indeterminate(mut self, indeterminate: bool) -> Self {
+        self.indeterminate = indeterminate;
         self
     }
 
-    /// Mark the checkbox indeterminate, or clear that back to unchecked.
-    pub fn indeterminate(mut self, indeterminate: bool) -> Self {
-        if indeterminate {
-            self.state = CheckboxState::Indeterminate;
-        } else if self.state == CheckboxState::Indeterminate {
-            self.state = CheckboxState::Unchecked;
-        }
+    /// Fork: set the full tri-state value at once: unchecked, checked, or
+    /// indeterminate. Upstream keeps the value as [`Self::checked`] plus
+    /// [`Self::indeterminate`]; this sets both.
+    pub fn state(mut self, state: CheckboxState) -> Self {
+        self.checked = state == CheckboxState::Checked;
+        self.indeterminate = state == CheckboxState::Indeterminate;
         self
     }
 
@@ -135,10 +131,6 @@ impl Checkbox {
     }
 
     /// Handle a requested checked value from pointer or keyboard activation.
-    ///
-    /// An indeterminate box reports `true`, matching the base widget's
-    /// activation rule; a caller that cycles through all three values ignores
-    /// the reported bool and advances its own state instead.
     ///
     /// This is a controlled value: the owner must write the requested value and
     /// call `cx.notify()` to render it. Disabled controls do not call the handler.
@@ -199,7 +191,7 @@ impl Selectable for Checkbox {
     }
 
     fn is_selected(&self) -> bool {
-        self.state == CheckboxState::Checked
+        self.checked
     }
 }
 
@@ -216,20 +208,35 @@ impl Sizable for Checkbox {
     }
 }
 
+/// Draws the mark inside a checkbox or radio indicator.
+///
+/// `mark` is the icon to show, or `None` to fade the last shown one out.
 pub(crate) fn checkbox_check_icon(
     id: ElementId,
     size: Size,
-    checked: bool,
+    mark: Option<IconName>,
     disabled: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement {
+    let mark = mark.map(IconNamed::path);
+    let shown = window.use_keyed_state(
+        ElementId::NamedChild(id.clone().into(), "mark-icon".into()),
+        cx,
+        |_, _| mark.clone().unwrap_or_else(|| IconName::Check.path()),
+    );
+    if let Some(mark) = &mark
+        && shown.read(cx) != mark
+    {
+        shown.update(cx, |shown, _| *shown = mark.clone());
+    }
+    let path = shown.read(cx).clone();
     // The mark keeps its path while the spring is still fading it out. Guarding
     // the path on `checked` alone unmounted the glyph the moment the box was
     // cleared, so only the fade-in was ever visible.
     let opacity = spring(
         (id, "mark"),
-        if checked { 1. } else { 0. },
+        if mark.is_some() { 1. } else { 0. },
         cx.theme().motion_tokens().spring_control,
         window,
         cx,
@@ -253,58 +260,21 @@ pub(crate) fn checkbox_check_icon(
         })
         .text_color(color)
         .when(opacity > 0., |this| {
-            this.path(IconName::Check.path()).opacity(opacity)
-        })
-}
-
-/// The dash a checkbox shows for [`CheckboxState::Indeterminate`] — the same
-/// geometry as the check mark so the two can cross-fade in place.
-pub(crate) fn checkbox_mixed_icon(
-    id: ElementId,
-    size: Size,
-    indeterminate: bool,
-    disabled: bool,
-    window: &mut Window,
-    cx: &mut App,
-) -> impl IntoElement {
-    let opacity = spring(
-        (id, "mixed-mark"),
-        if indeterminate { 1. } else { 0. },
-        cx.theme().motion_tokens().spring_control,
-        window,
-        cx,
-    );
-    let color = if disabled {
-        cx.theme().primary_foreground.opacity(0.5)
-    } else {
-        cx.theme().primary_foreground
-    };
-
-    svg()
-        .absolute()
-        .top_px()
-        .left_px()
-        .map(|this| match size {
-            Size::XSmall => this.size_2(),
-            Size::Small => this.size_2p5(),
-            Size::Medium => this.size_3(),
-            Size::Large => this.size_3p5(),
-            _ => this.size_3(),
-        })
-        .text_color(color)
-        .when(opacity > 0., |this| {
-            this.path(IconName::Minus.path()).opacity(opacity)
+            this.path(crate::resolve_icon_path(path, cx))
+                .opacity(opacity)
         })
 }
 
 impl RenderOnce for Checkbox {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = self.state;
-        let checked = state == CheckboxState::Checked;
-        let indeterminate = state == CheckboxState::Indeterminate;
-        // The indicator is filled for both non-empty values, so the mixed box
-        // reads as "something is set here" the way the checked one does.
-        let filled = checked || indeterminate;
+        let state = if self.indeterminate {
+            CheckboxState::Indeterminate
+        } else if self.checked {
+            CheckboxState::Checked
+        } else {
+            CheckboxState::Unchecked
+        };
+        let filled = state != CheckboxState::Unchecked;
         let has_content = self.label.is_some() || !self.children.is_empty();
         let indicator_size = rems(match self.size {
             Size::XSmall => 0.75,
@@ -352,12 +322,14 @@ impl RenderOnce for Checkbox {
                 this.accessibility_label(label)
             })
             .when_some(on_click, |this, on_click| {
-                this.on_change(move |_, _, window, cx| {
+                this.on_change(move |next, _, window, cx| {
                     window.prevent_default();
-                    on_click(&!checked, window, cx);
+                    on_click(&(next == CheckboxState::Checked), window, cx);
                 })
             })
             .h_flex()
+            // The indicator leads, on the start edge.
+            .flex_row_dir(cx)
             .gap_2()
             .items_start()
             .line_height(relative(1.))
@@ -405,20 +377,13 @@ impl RenderOnce for Checkbox {
                             })
                     })
                     .child(checkbox_check_icon(
-                        self.id.clone(),
-                        self.size,
-                        checked,
-                        self.disabled,
-                        window,
-                        cx,
-                    ))
-                    // Both marks are always mounted and absolutely stacked;
-                    // each one's spring fades it in or out, so a box switching
-                    // between checked and mixed cross-fades instead of popping.
-                    .child(checkbox_mixed_icon(
                         self.id,
                         self.size,
-                        indeterminate,
+                        match state {
+                            CheckboxState::Checked => Some(IconName::Check),
+                            CheckboxState::Indeterminate => Some(IconName::Minus),
+                            CheckboxState::Unchecked => None,
+                        },
                         self.disabled,
                         window,
                         cx,
@@ -434,12 +399,6 @@ impl RenderOnce for Checkbox {
                         .map(|this| {
                             if let Some(label) = self.label {
                                 this.child(
-                                    // No line_height of its own: the column
-                                    // above sets 1.2, and a line box exactly
-                                    // as tall as the font puts every
-                                    // descender outside it — which the
-                                    // column's overflow_hidden then clips,
-                                    // so "Manager" lost the tail of its `g`.
                                     div()
                                         .size_full()
                                         .text_color(cx.theme().foreground)
@@ -476,6 +435,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn state_sets_both_halves_of_the_value() {
+        let mixed = Checkbox::new("attr").state(CheckboxState::Indeterminate);
+        assert!(mixed.indeterminate && !mixed.checked);
+        assert!(
+            !mixed.is_selected(),
+            "a mixed box is not selected — it stands for items that disagree"
+        );
+        let checked = mixed.state(CheckboxState::Checked);
+        assert!(checked.checked && !checked.indeterminate);
+        let cleared = checked.state(CheckboxState::Unchecked);
+        assert!(!cleared.checked && !cleared.indeterminate);
+    }
+
+    #[test]
     fn an_explicit_accessibility_label_replaces_the_visible_one() {
         let plain = Checkbox::new("remember").label("Remember me");
         assert_eq!(plain.accessibility_label, None);
@@ -491,41 +464,6 @@ mod tests {
         assert!(
             matches!(named.label.as_ref(), Some(Text::String(label)) if label.as_ref() == "Remember me"),
             "and must not change what is drawn"
-        );
-    }
-
-    #[test]
-    fn indeterminate_is_a_third_value_checked_does_not_reach() {
-        let mixed = Checkbox::new("attr").indeterminate(true);
-        assert_eq!(mixed.state, CheckboxState::Indeterminate);
-        assert!(
-            !mixed.is_selected(),
-            "a mixed box is not selected — it stands for items that disagree"
-        );
-
-        // checked() is the two-value setter and always leaves indeterminate.
-        assert_eq!(
-            Checkbox::new("attr")
-                .indeterminate(true)
-                .checked(false)
-                .state,
-            CheckboxState::Unchecked
-        );
-        // Clearing indeterminate falls back to unchecked, and never disturbs a
-        // box that was not mixed to begin with.
-        assert_eq!(
-            Checkbox::new("attr")
-                .indeterminate(true)
-                .indeterminate(false)
-                .state,
-            CheckboxState::Unchecked
-        );
-        assert_eq!(
-            Checkbox::new("attr")
-                .checked(true)
-                .indeterminate(false)
-                .state,
-            CheckboxState::Checked
         );
     }
 
@@ -577,7 +515,8 @@ mod tests {
     }
 
     fn activate_key(cx: &mut VisualTestContext, key: &str) {
-        let keystroke = Keystroke::parse(key).unwrap();
+        let keystroke =
+            cx.update(|_, cx| Keystroke::parse_with_os(key, cx.platform_info().os).unwrap());
         cx.simulate_event(KeyDownEvent {
             keystroke: keystroke.clone(),
             is_held: false,
@@ -642,5 +581,137 @@ mod tests {
             .expect("custom content must prepaint through the Base child seam");
         assert!(bounds.size.width > px(0.));
         assert!(bounds.size.height > px(0.));
+    }
+
+    #[gpui::test]
+    fn the_check_mark_asks_the_icon_resolver_for_its_path(cx: &mut TestAppContext) {
+        struct CheckedHarness;
+
+        impl Render for CheckedHarness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                Checkbox::new("checked").checked(true)
+            }
+        }
+
+        let asked = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        cx.update(|cx| {
+            crate::init(cx);
+            cx.set_reduce_motion(true);
+            let asked = asked.clone();
+            crate::set_icon_resolver(cx, move |path, _| {
+                asked.borrow_mut().push(path.to_string());
+                None
+            });
+        });
+        let (_, cx) = cx.add_window_view(|_, _| CheckedHarness);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        assert!(
+            asked.borrow().contains(&IconName::Check.path().to_string()),
+            "the check mark must be drawn from the resolved path"
+        );
+    }
+
+    #[gpui::test]
+    fn an_indeterminate_checkbox_draws_a_dash(cx: &mut TestAppContext) {
+        struct MixedHarness;
+
+        impl Render for MixedHarness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                Checkbox::new("mixed").checked(true).indeterminate(true)
+            }
+        }
+
+        let asked = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        cx.update(|cx| {
+            crate::init(cx);
+            cx.set_reduce_motion(true);
+            let asked = asked.clone();
+            crate::set_icon_resolver(cx, move |path, _| {
+                asked.borrow_mut().push(path.to_string());
+                None
+            });
+        });
+        let (_, cx) = cx.add_window_view(|_, _| MixedHarness);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let asked = asked.borrow();
+        assert!(asked.contains(&IconName::Minus.path().to_string()));
+        assert!(
+            !asked.contains(&IconName::Check.path().to_string()),
+            "the mixed state replaces the check mark"
+        );
+    }
+
+    #[gpui::test]
+    fn activating_an_indeterminate_checkbox_requests_checked(cx: &mut TestAppContext) {
+        struct MixedHarness {
+            requested: Rc<Cell<Option<bool>>>,
+        }
+
+        impl Render for MixedHarness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let requested = self.requested.clone();
+                div().size(px(100.)).child(
+                    Checkbox::new("mixed")
+                        .size_full()
+                        .checked(true)
+                        .indeterminate(true)
+                        .on_change(move |checked, _, _| requested.set(Some(*checked))),
+                )
+            }
+        }
+
+        cx.update(crate::init);
+        let requested = Rc::new(Cell::new(None));
+        let (_, cx) = cx.add_window_view({
+            let requested = requested.clone();
+            move |_, _| MixedHarness { requested }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_click(point(px(10.), px(10.)), Modifiers::default());
+
+        assert_eq!(requested.get(), Some(true));
+    }
+
+    #[cfg(feature = "test-support")]
+    #[gpui::test]
+    fn indeterminate_reports_the_mixed_state_over_checked(cx: &mut TestAppContext) {
+        struct MixedHarness;
+
+        impl Render for MixedHarness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .child(
+                        Checkbox::new("mixed")
+                            .label("All files")
+                            .checked(true)
+                            .indeterminate(true),
+                    )
+                    .child(
+                        Checkbox::new("cleared")
+                            .label("One file")
+                            .checked(true)
+                            .indeterminate(false),
+                    )
+            }
+        }
+
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(|_, _| MixedHarness);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        cx.update(|window, _| {
+            let find = |id: &'static str| {
+                gpui_base::test_support::find(window, &[], &ElementId::from(id))
+                    .expect("the checkbox is observed")
+            };
+            let mixed = find("mixed");
+            assert_eq!(mixed.indeterminate(), Some(true));
+            assert_eq!(mixed.checked(), Some(false));
+            let cleared = find("cleared");
+            assert_eq!(cleared.indeterminate(), Some(false));
+            assert_eq!(cleared.checked(), Some(true));
+        });
     }
 }

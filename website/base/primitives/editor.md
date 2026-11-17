@@ -62,6 +62,20 @@ let editor = cx.new(|cx| {
 Editor::new(&editor)
 ```
 
+## Text origin geometry
+
+`EditorState::text_origin_offset(&self) -> Option<Pixels>` reads the horizontal
+offset from the content area's left edge to unscrolled, left-aligned source text.
+It includes the gap and any line-number, folding, and decoration lanes, but
+excludes input-frame padding, scrolling, and alignment. Add frame padding
+separately when aligning a static source view with an editor.
+
+The value comes from the most recent layout, so it is `None` before first
+layout. Lay out the editor before aligning its replacement, and render again
+after changing gutter settings or typography. Do not substitute a fixed default
+for an editor that has not been laid out. Use `range_to_bounds` for the actual
+screen position of visible text, including scrolling and alignment.
+
 ## Whitespace and decorations
 
 ```rust
@@ -86,6 +100,12 @@ share UTF-8 normalization and edit tracking. See
 [Geometric range decorations](../../component/editor.md#geometric-range-decorations)
 for ownership, boundary affinity, deletion, undo/redo, folding, layering, and
 indexing semantics; import the same types from `gpui_kit::base::input`.
+
+Use `create_gutter_decorations_collection` to mark whole lines in a strip before
+the line numbers. Use `create_overview_ruler_decorations_collection` to mark lines
+on the vertical scrollbar track. Monaco calls this track the overview ruler. These
+collections keep empty ranges, which mark line boundaries. See
+[Gutter and overview ruler decorations](../../component/editor.md#gutter-and-overview-ruler-decorations).
 
 ## Highlighting and language features
 

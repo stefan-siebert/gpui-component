@@ -22,15 +22,20 @@ fn advance_focus(window: &mut Window, cx: &mut App, advance: fn(&mut Window, &mu
     };
 
     advance(window, cx);
-    let first_candidate = window.focused(cx);
+    // GPUI's tab order can cycle short of the whole window (a stop whose
+    // previous stop is itself), so the walk ends at the first repeated stop,
+    // not only on a return to the one it began with.
+    let mut visited = Vec::new();
     while !container.contains_focused(window, cx) {
-        advance(window, cx);
-        if window.focused(cx) == first_candidate {
-            // The trap has no rendered tab stops. Its own handle remains a
+        let focused = window.focused(cx);
+        if visited.contains(&focused) {
+            // No tab stop in the trap is reachable. Its own handle remains a
             // safe focus target even when excluded from ordinary tab order.
             container.focus(window, cx);
             break;
         }
+        visited.push(focused);
+        advance(window, cx);
     }
 }
 
@@ -240,6 +245,8 @@ impl Styled for Root {
 }
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "test-support")]
+        crate::test_support::begin_frame(window);
         for plugin in &self.plugins {
             (plugin.prepare)(window, cx);
         }
@@ -427,6 +434,37 @@ mod tests {
         assert_eq!(background_focuses.get(), 0);
     }
 
+    thread_local! {
+        static SCRIPTED_STOPS: std::cell::RefCell<Vec<FocusHandle>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Moves focus to the next scripted stop, in place of `focus_prev`. Running
+    /// out fails the test, so a search that never stops cannot hang it.
+    fn scripted_advance(window: &mut Window, cx: &mut App) {
+        SCRIPTED_STOPS
+            .with(|stops| stops.borrow_mut().pop())
+            .expect("the search kept advancing after a stop repeated")
+            .focus(window, cx);
+    }
+
+    #[gpui::test]
+    fn focus_trap_search_ends_at_a_short_cycle_on_its_container(cx: &mut TestAppContext) {
+        let (cx, container, controls, background, _) = trap_harness(cx, 2);
+        cx.update(|window, cx| {
+            controls[0].focus(window, cx);
+            window.draw(cx).clear(cx);
+        });
+        // A tab order in which the second stop is its own neighbor never
+        // returns to the first. Popped from the end: first, second, second.
+        let (first, second) = (background[0].clone(), background[1].clone());
+        SCRIPTED_STOPS.with(|stops| *stops.borrow_mut() = vec![second.clone(), second, first]);
+
+        cx.update(|window, cx| advance_focus(window, cx, scripted_advance));
+        assert_trapped_focus(cx, &container, &container);
+        assert!(SCRIPTED_STOPS.with(|stops| stops.borrow().is_empty()));
+    }
+
     #[gpui::test]
     fn inactive_focus_trap_does_not_capture_background_navigation(cx: &mut TestAppContext) {
         let (cx, _, _, background, background_focuses) = trap_harness(cx, 2);
@@ -573,5 +611,50 @@ mod tests {
                 assert_trapped_focus(cx, &containers[index], &controls[index][1]);
             }
         }
+    }
+    struct BottomBarDemo {
+        bar: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    }
+
+    impl Render for BottomBarDemo {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let bar = self.bar.clone();
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().w_full())
+                .child(
+                    div().h(px(40.)).w_full().child(
+                        gpui::canvas(move |bounds, _, _| bar.set(Some(bounds)), |_, _, _, _| {})
+                            .size_full(),
+                    ),
+                )
+        }
+    }
+
+    /// #3857: a `size_full` view inside `Root` fills the window height, so a
+    /// bar at the end of a column sits at the window's bottom edge.
+    #[gpui::test]
+    fn size_full_view_fills_window_height(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let bar = Rc::new(Cell::new(None));
+        let (_, cx) = cx.add_window_view({
+            let bar = bar.clone();
+            move |window, cx| {
+                let view = cx.new(|_| BottomBarDemo { bar });
+                Root::new(view, window, cx)
+            }
+        });
+        let viewport = cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.viewport_size()
+        });
+        let bounds = bar.get().expect("bar painted");
+        assert_eq!(
+            bounds.bottom(),
+            viewport.height,
+            "bar at {bounds:?}, viewport {viewport:?}"
+        );
     }
 }

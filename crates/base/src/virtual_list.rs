@@ -208,6 +208,7 @@ where
         render_items: Box::new(render_range),
         sizing_behavior: ListSizingBehavior::default(),
         item_to_measure_index: 0,
+        measure_cross_axis: true,
     }
 }
 
@@ -224,6 +225,9 @@ pub struct VirtualList {
     >,
     sizing_behavior: ListSizingBehavior,
     item_to_measure_index: usize,
+    /// Whether to render and lay out an item each frame to infer the
+    /// cross-axis content size.
+    measure_cross_axis: bool,
 }
 
 impl Styled for VirtualList {
@@ -254,10 +258,16 @@ impl VirtualList {
     /// Specify for table.
     ///
     /// Table is special, because the `scroll_handle` is based on Table head (That is not a virtual list).
+    ///
+    /// Such a list only follows the shared handle along its axis and never
+    /// scrolls across it: it fills the size its parent gives it, so the
+    /// cross-axis content size is not measured. That saves rendering and
+    /// laying out one extra item per list every frame, i.e. one per table row.
     #[doc(hidden)]
     pub fn with_scroll_handle(mut self, scroll_handle: &VirtualListScrollHandle) -> Self {
         self.base = div().id(self.id.clone()).size_full();
         self.scroll_handle = scroll_handle.clone();
+        self.measure_cross_axis = false;
         self
     }
 
@@ -317,7 +327,7 @@ impl VirtualList {
         window: &mut Window,
         cx: &mut App,
     ) -> Size<Pixels> {
-        if self.items_count == 0 {
+        if self.items_count == 0 || !self.measure_cross_axis {
             return Size::default();
         }
 
@@ -350,6 +360,7 @@ pub struct VirtualListFrameState {
 #[derive(Default, Clone)]
 pub struct ItemSizeLayout {
     items_sizes: Rc<Vec<Size<Pixels>>>,
+    axis_and_gap: Option<(Axis, Pixels)>,
     content_size: Size<Pixels>,
     sizes: Rc<[Pixels]>,
     origins: Rc<[Pixels]>,
@@ -411,6 +422,7 @@ fn visible_range(origins: &[Pixels], sizes: &[Pixels], viewport: Range<Pixels>) 
     first..last.max(first)
 }
 
+#[cfg(not(feature = "gpui-fast"))]
 impl IntoElement for VirtualList {
     type Element = Self;
 
@@ -474,8 +486,11 @@ impl Element for VirtualList {
                             .along(self.axis)
                             .to_pixels(font_size.into(), rem_size);
 
-                        if state.items_sizes != self.item_sizes {
+                        if state.items_sizes != self.item_sizes
+                            || state.axis_and_gap != Some((self.axis, gap))
+                        {
                             state.items_sizes = self.item_sizes.clone();
+                            state.axis_and_gap = Some((self.axis, gap));
                             // Prepare each item's size by axis
                             state.sizes = self
                                 .item_sizes
@@ -540,7 +555,7 @@ impl Element for VirtualList {
                                                     }
                                                 },
                                             );
-                                            size.height = known_dimensions.width.unwrap_or(
+                                            size.height = known_dimensions.height.unwrap_or(
                                                 match available_space.height {
                                                     AvailableSpace::Definite(x) => x,
                                                     AvailableSpace::MinContent
@@ -768,7 +783,7 @@ impl Element for VirtualList {
 mod tests {
     use super::*;
 
-    use gpui::{Context, TestAppContext};
+    use gpui::{Context, ParentElement as _, TestAppContext, VisualTestContext};
 
     struct VirtualListHarness {
         axis: Axis,
@@ -884,6 +899,119 @@ mod tests {
     #[gpui::test]
     fn horizontal_visible_range_and_deferred_scroll_are_preserved(cx: &mut TestAppContext) {
         exercise_axis(cx, Axis::Horizontal);
+    }
+
+    /// Three 30 by 10 items, laid out along `axis` with `gap` between them.
+    struct GeometryHarness {
+        axis: Axis,
+        gap: Pixels,
+    }
+
+    impl Render for GeometryHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            virtual_list(
+                cx.entity(),
+                "virtual-list-geometry",
+                self.axis,
+                Rc::new(vec![size(px(30.), px(10.)); 3]),
+                |_, visible_range, _, _| {
+                    visible_range
+                        .map(|ix| {
+                            div()
+                                .w(px(30.))
+                                .h(px(10.))
+                                .debug_selector(move || format!("geometry-item-{ix}"))
+                        })
+                        .collect::<Vec<_>>()
+                },
+            )
+            .gap(self.gap)
+            .w(px(120.))
+            .h(px(100.))
+        }
+    }
+
+    /// Where the second item sits relative to the first.
+    fn second_item_offset(cx: &mut VisualTestContext) -> Point<Pixels> {
+        let first = cx.debug_bounds("geometry-item-0").unwrap().origin;
+        let second = cx.debug_bounds("geometry-item-1").unwrap().origin;
+        second - first
+    }
+
+    #[gpui::test]
+    fn changing_the_gap_moves_the_items(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| GeometryHarness {
+            axis: Axis::Vertical,
+            gap: px(0.),
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(second_item_offset(cx), point(px(0.), px(10.)));
+
+        cx.update(|window, cx| {
+            view.update(cx, |harness, cx| {
+                harness.gap = px(20.);
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(second_item_offset(cx), point(px(0.), px(30.)));
+    }
+
+    #[gpui::test]
+    fn changing_the_axis_moves_the_items(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| GeometryHarness {
+            axis: Axis::Vertical,
+            gap: px(0.),
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(second_item_offset(cx), point(px(0.), px(10.)));
+
+        cx.update(|window, cx| {
+            view.update(cx, |harness, cx| {
+                harness.axis = Axis::Horizontal;
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(second_item_offset(cx), point(px(30.), px(0.)));
+    }
+
+    #[gpui::test]
+    fn a_horizontal_list_infers_its_height_from_its_items(cx: &mut TestAppContext) {
+        struct InferHarness;
+
+        impl Render for InferHarness {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .w(px(120.))
+                    .child(
+                        virtual_list(
+                            cx.entity(),
+                            "virtual-list-infer",
+                            Axis::Horizontal,
+                            Rc::new(vec![size(px(30.), px(10.)); 3]),
+                            |_, visible_range, _, _| {
+                                visible_range
+                                    .map(|_| div().w(px(30.)).h(px(10.)))
+                                    .collect::<Vec<_>>()
+                            },
+                        )
+                        .with_sizing_behavior(ListSizingBehavior::Infer)
+                        .w(px(120.))
+                        .h_auto()
+                        .flex_none(),
+                    )
+                    .child(div().size(px(1.)).debug_selector(|| "after-list".into()))
+            }
+        }
+
+        let (_, cx) = cx.add_window_view(|_, _| InferHarness);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        // The list is as tall as its items, not as wide as itself.
+        assert_eq!(cx.debug_bounds("after-list").unwrap().top(), px(10.));
     }
 
     #[gpui::test]

@@ -188,7 +188,7 @@ impl CompletionProvider for ExampleLspStore {
                     completion_item(
                         &replace_range,
                         "/date",
-                        format!("{}", chrono::Local::now().date_naive()).as_str(),
+                        format!("{}", jiff::ZonedDateTime::now().date()).as_str(),
                         "Insert current date",
                     ),
                     completion_item(&replace_range, "/thanks", "Thank you!", "Insert Thank you!"),
@@ -559,7 +559,7 @@ impl CodeActionProvider for TextConvertor {
             edit: Some(WorkspaceEdit {
                 changes: Some(
                     std::iter::once((
-                        document_uri.clone(),
+                        document_uri,
                         vec![TextEdit {
                             range,
                             new_text: old_text

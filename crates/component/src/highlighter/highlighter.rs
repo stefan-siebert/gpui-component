@@ -6,8 +6,8 @@ use anyhow::{Context, Result, anyhow};
 use gpui::{HighlightStyle, SharedString};
 use gpui_base::input::RopeExt as _;
 use ropey::{ChunkCursor, Rope};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -488,7 +488,7 @@ impl SyntaxHighlighter {
         // registered parser factory) default to a highlighter that never parses
         // and creates no styles.
         if !LanguageRegistry::singleton().has_parser(lang) {
-            return Ok(Self::build_inert(config.name.clone()));
+            return Ok(Self::build_inert(config.name));
         }
 
         let (mut parser, grammar) = LanguageRegistry::singleton().parser(lang)?;
@@ -1158,7 +1158,7 @@ impl SyntaxHighlighter {
         }
 
         let mut query_cursor = QueryCursor::new();
-        query_cursor.set_byte_range(range.clone());
+        query_cursor.set_byte_range(range);
 
         let mut matches = query_cursor.matches(query, root_node, TextProvider(source));
 
@@ -1187,7 +1187,7 @@ impl SyntaxHighlighter {
                         last_highlight_name.unwrap_or(highlight_name),
                     ));
                 } else {
-                    highlights.push(HighlightItem::new(node_range, highlight_name.clone()));
+                    highlights.push(HighlightItem::new(node_range, highlight_name));
                 }
             }
         }
@@ -1313,6 +1313,34 @@ impl SyntaxHighlighter {
         }
 
         unique_styles(range, styles)
+    }
+}
+
+impl Drop for SyntaxHighlighter {
+    /// Freeing the syntax trees of a large document takes tens of milliseconds, so they are
+    /// freed off the thread that replaces the document.
+    fn drop(&mut self) {
+        let trees = (self.tree.take(), std::mem::take(&mut self.injection_layers));
+        if trees.0.is_some() || !trees.1.is_empty() {
+            drop_in_background(trees);
+        }
+    }
+}
+
+/// Drop `value` on a shared background thread, or right here if that thread cannot be started.
+fn drop_in_background(value: impl Send + 'static) {
+    static DROPPER: OnceLock<Option<mpsc::Sender<Box<dyn Send>>>> = OnceLock::new();
+    let dropper = DROPPER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<Box<dyn Send>>();
+        std::thread::Builder::new()
+            .name("syntax-tree-drop".into())
+            .spawn(move || receiver.into_iter().for_each(drop))
+            .ok()?;
+        Some(sender)
+    });
+    if let Some(dropper) = dropper {
+        // A failed send hands the value back, and it is dropped here.
+        let _ = dropper.send(Box::new(value));
     }
 }
 
@@ -2118,5 +2146,19 @@ $x = 1;
             vec![(2..2, red), (4..6, green)],
             vec![(0..4, clean), (4..6, green), (6..10, clean)],
         );
+    }
+    #[test]
+    fn values_dropped_in_the_background_are_freed_on_another_thread() {
+        struct ReportsDropThread(std::sync::mpsc::Sender<std::thread::ThreadId>);
+        impl Drop for ReportsDropThread {
+            fn drop(&mut self) {
+                let _ = self.0.send(std::thread::current().id());
+            }
+        }
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        super::drop_in_background(ReportsDropThread(sender));
+        let dropped_on = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_ne!(dropped_on, std::thread::current().id());
     }
 }

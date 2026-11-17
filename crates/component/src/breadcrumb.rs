@@ -7,6 +7,7 @@ use gpui::{
 };
 
 use crate::{ActiveTheme, Icon, IconName, StyledExt, h_flex, tooltip::Tooltip};
+use gpui_base::{LayoutDirection, LogicalStyledExt as _};
 
 /// A breadcrumb navigation element.
 #[derive(IntoElement)]
@@ -209,11 +210,16 @@ impl Breadcrumb {
 struct BreadcrumbSeparator;
 impl RenderOnce for BreadcrumbSeparator {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        Icon::new(IconName::ChevronRight)
-            .text_color(cx.theme().muted_foreground)
-            .flex_shrink_0()
-            .size_3p5()
-            .into_any_element()
+        // Points from an item to the next, toward the end edge.
+        Icon::new(if LayoutDirection::global(cx).is_rtl() {
+            IconName::ChevronLeft
+        } else {
+            IconName::ChevronRight
+        })
+        .text_color(cx.theme().muted_foreground)
+        .flex_shrink_0()
+        .size_3p5()
+        .into_any_element()
     }
 }
 
@@ -239,6 +245,7 @@ impl RenderOnce for Breadcrumb {
         }
 
         h_flex()
+            .flex_row_dir(cx)
             .gap_1p5()
             .text_sm()
             .text_color(cx.theme().muted_foreground)

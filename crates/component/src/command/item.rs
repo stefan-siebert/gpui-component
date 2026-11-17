@@ -348,6 +348,7 @@ mod tests {
             ),
         );
         let cloned = entry.clone();
+        drop(entry);
         let CommandEntry::Group(group) = cloned else {
             panic!("the cloned entry should remain a group");
         };

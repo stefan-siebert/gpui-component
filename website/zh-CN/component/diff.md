@@ -17,9 +17,9 @@ description: 用于代码审阅、合并冲突和源文件预览的只读 unifie
 ```rust
 use gpui_kit::*;
 use gpui_kit::component::diff::{
-    Diff, DiffAnnotation, DiffChangeIndicator, DiffConflictResolution, DiffFile, DiffHoverHighlight,
-    DiffHunkSeparator, DiffInlineUnit, DiffLinePosition, DiffLineRange, DiffMode,
-    DiffSide, DiffState,
+    Diff, DiffAnnotation, DiffChangeIndicator, DiffConflictResolution, DiffDecoration, DiffFile,
+    DiffGutterMarker, DiffHoverHighlight, DiffHunkSeparator, DiffInlineUnit, DiffLinePosition,
+    DiffLineRange, DiffMode, DiffParseOptions, DiffSide, DiffSpanHighlight, DiffState,
 };
 ```
 
@@ -76,6 +76,24 @@ Diff 不计算差异，不加载仓库文件，也不应用修改。patch 未提
 `is_binary()` 判断二进制变更。二进制文件、仅修改权限或纯重命名等没有源文本行的文件，
 在文件头下方显示摘要。格式错误的 hunk 和不支持的 combined diff 返回 `DiffParseError`，
 通过 `line()` 和 `message()` 获取 patch 位置与原因。
+
+因大小限制被截断的 patch 通常在某个 hunk 中间结束。`DiffFile::parse_with` 接受
+`DiffParseOptions` 启用的宽松规则；`DiffFile::parse` 仍保持严格解析：
+
+```rust
+let options = DiffParseOptions::new().truncated_hunks(true);
+let files = DiffFile::parse_with(patch, options)?;
+let cut = files.iter().any(DiffFile::is_truncated);
+```
+
+启用 `truncated_hunks(true)` 后，hunk 可以在达到头部声明的行数之前结束，行数按实际出现的行计算。
+这类 hunk 中的空行视为空的上下文行。声明的行数仍是每个 hunk 的上限；格式错误的头部、
+无效路径和顺序错乱的 hunk 仍会返回错误。`is_truncated()` 判断文件是否包含这类 hunk。
+如果应用会在截断的 patch 末尾追加标记，请在解析前移除它。
+
+对于没有 `diff --git` 分隔符的多文件 unified diff，成对的 `---` 和 `+++` 文件头会结束未完整的 hunk。
+这些前缀也可能是源代码正文；如果按正文解释能够凑齐 hunk 声明的行数，则优先保留这一解释。
+即使截断的 hunk 没有正文，原始侧和修改侧的 hunk 位置也必须保持有序。
 
 另有两个构造方法用于不属于 patch 的文件，二者在任何显示模式下都只显示一列：
 
@@ -233,6 +251,7 @@ Diff::new(&self.diff)
     .change_background(true)
     .hover_highlight(DiffHoverHighlight::None)
     .soft_wrap(false)
+    .split_ratio(0.5)
     .h(rems(24.))
 ```
 
@@ -242,6 +261,9 @@ Diff::new(&self.diff)
   标记变更行；`change_background(false)` 去掉整行底色，但保留行内强调。
 - `hover_highlight` 强调指针下的行、行号或两者。
 - `soft_wrap(true)` 在列宽处自动换行，行高随内容增加，不再横向滚动。
+- `split_ratio` 设置 Split 模式中原始列所占的宽度比例（默认 0.5，限制在 0.1–0.9），
+  例如由应用提供的可拖动分隔线控制。未启用自动换行时，每一列保持该比例并裁剪过长的行，
+  两列的代码一起横向滚动，行号保持不动。
 
 组件根据每个文件的路径识别语法语言；`DiffFile::with_language` 可以用 `rust` 等高亮语言名覆盖识别结果。
 启用相应的 Cargo grammar feature，例如 `tree-sitter-rust`；`tree-sitter-languages`
@@ -347,6 +369,57 @@ Diff::new(&self.diff).on_add_annotation(cx.listener(|this, range: &DiffLineRange
     this.start_comment(range.clone(), cx);
 }))
 ```
+
+## 装饰与 gutter marker
+
+诊断、引用和评论可以直接标记源代码，不插入内容，也不改变选区：
+
+```rust
+let path = "src/retry.rs";
+Diff::new(&self.diff)
+    .decorations([DiffDecoration::new(DiffLineRange::new(path, DiffSide::Modified, 10, 12))
+        .with_background(cx.theme().warning.opacity(0.2))])
+    .gutter_markers([DiffGutterMarker::new(
+        "overflow",
+        DiffLinePosition::new(path, DiffSide::Modified, 10),
+    )
+    .with_label("Possible overflow")])
+    .render_gutter_marker(|marker, _, _| {
+        let id = marker.id().clone();
+        Button::new(id.clone())
+            .ghost()
+            .xsmall()
+            .icon(IconName::TriangleAlert)
+            .tooltip(marker.label().clone())
+            .on_click(move |_, window, cx| open_details(&id, window, cx))
+    })
+```
+
+`decorations` 为每个 `DiffLineRange` 覆盖的行绘制背景。结束在另一侧的范围，在起始侧覆盖
+`start` 及之后的行，在结束侧覆盖到 `end` 为止。背景位于变更背景之上，行内强调、搜索高亮和
+文字之下；选中的行显示选区背景，复制行为不变。多个装饰重叠时，显示最后传入的那个。
+不调用 `with_background` 时，使用半透明的 warning 颜色。
+
+同时设置 `gutter_markers` 和 `render_gutter_marker` 后，行号与代码之间会出现一条宽高都等于
+一行的 marker 栏。每行只显示一个 marker；多个 marker 指向同一行时，显示最先传入的那个。
+请渲染可获得焦点的控件，例如朗读 `DiffGutterMarker::label()` 的 ghost `Button`，这样
+marker 既能用鼠标操作，也能用 Enter 和 Space 激活。按下 marker 不会开始文本或行选择。
+详情面板由应用管理，关闭时由应用恢复焦点。
+
+`span_highlights` 强调一行内的一段字符，例如搜索命中的文字：
+
+```rust
+Diff::new(&self.diff).span_highlights([DiffSpanHighlight::new(
+    DiffLinePosition::new(path, DiffSide::Modified, 10),
+    4..9,
+)])
+```
+
+范围是该行内容中的字节区间，按 Tab 展开之前计算。它的背景绘制在语法高亮、行内强调和装饰之上，
+文本选区仍显示在它上面。不调用 `with_background` 时，使用半透明的 warning 颜色；
+`with_foreground` 设置背景较深时的文字颜色。
+
+与批注一样，装饰、marker 和字符高亮在每次渲染时传入，当前的 builder 调用就是它们唯一的数据来源。
 
 ## 鼠标与键盘交互
 

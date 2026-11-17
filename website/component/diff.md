@@ -20,9 +20,9 @@ whole source file for reference, or a working file with merge conflicts.
 ```rust
 use gpui_kit::*;
 use gpui_kit::component::diff::{
-    Diff, DiffAnnotation, DiffChangeIndicator, DiffConflictResolution, DiffFile, DiffHoverHighlight,
-    DiffHunkSeparator, DiffInlineUnit, DiffLinePosition, DiffLineRange, DiffMode,
-    DiffSide, DiffState,
+    Diff, DiffAnnotation, DiffChangeIndicator, DiffConflictResolution, DiffDecoration, DiffFile,
+    DiffGutterMarker, DiffHoverHighlight, DiffHunkSeparator, DiffInlineUnit, DiffLinePosition,
+    DiffLineRange, DiffMode, DiffParseOptions, DiffSide, DiffSpanHighlight, DiffState,
 };
 ```
 
@@ -89,6 +89,29 @@ changes. A file without source rows, such as a binary file, a mode change or a
 pure rename, shows a summary below its header. Malformed hunks and unsupported
 combined diffs return a `DiffParseError`; its `line()` and `message()` identify
 the patch location and reason.
+
+A patch cut at a size limit usually ends inside a hunk. `DiffFile::parse_with`
+accepts the relaxations a `DiffParseOptions` enables; `DiffFile::parse` stays
+strict:
+
+```rust
+let options = DiffParseOptions::new().truncated_hunks(true);
+let files = DiffFile::parse_with(patch, options)?;
+let cut = files.iter().any(DiffFile::is_truncated);
+```
+
+With `truncated_hunks(true)`, a hunk may end before its declared line counts,
+and its counts come from the lines present. An empty line inside such a hunk is
+an empty context line. Declared counts still bound each hunk, and malformed
+headers, invalid paths and unordered hunks are still errors. `is_truncated()`
+reports a file with such a hunk. Remove any marker the application appends to a
+cut patch before parsing it.
+
+In a multi-file unified diff without `diff --git` separators, a paired `---`
+and `+++` header ends a short hunk. These prefixes can also be source text:
+when that interpretation completes the declared hunk, it takes precedence.
+Hunk positions must stay ordered on both sides even when a short hunk supplies
+no lines.
 
 Two constructors cover files that are not part of a patch. Both show one column
 in every display mode:
@@ -269,6 +292,7 @@ Diff::new(&self.diff)
     .change_background(true)
     .hover_highlight(DiffHoverHighlight::None)
     .soft_wrap(false)
+    .split_ratio(0.5)
     .h(rems(24.))
 ```
 
@@ -280,6 +304,11 @@ Diff::new(&self.diff)
 - `hover_highlight` emphasizes the line, its number, or both under the pointer.
 - `soft_wrap(true)` wraps long lines at the column width, and rows grow instead
   of scrolling horizontally.
+- `split_ratio` gives the original column that share of the width in Split
+  mode (0.5 by default, clamped to 0.1–0.9), for example from a divider the
+  application lets users drag. Without soft wrap, each column keeps its share
+  and clips its long lines, and the code of both columns scrolls horizontally
+  together while the line numbers stay in place.
 
 Syntax language is detected from each file's path; `DiffFile::with_language`
 overrides it with a highlighter language name such as `rust`. Enable the
@@ -410,6 +439,66 @@ Diff::new(&self.diff).on_add_annotation(cx.listener(|this, range: &DiffLineRange
     this.start_comment(range.clone(), cx);
 }))
 ```
+
+## Decorations and gutter markers
+
+Diagnostics, references and comments can mark source in place, without
+inserting content or changing the selection:
+
+```rust
+let path = "src/retry.rs";
+Diff::new(&self.diff)
+    .decorations([DiffDecoration::new(DiffLineRange::new(path, DiffSide::Modified, 10, 12))
+        .with_background(cx.theme().warning.opacity(0.2))])
+    .gutter_markers([DiffGutterMarker::new(
+        "overflow",
+        DiffLinePosition::new(path, DiffSide::Modified, 10),
+    )
+    .with_label("Possible overflow")])
+    .render_gutter_marker(|marker, _, _| {
+        let id = marker.id().clone();
+        Button::new(id.clone())
+            .ghost()
+            .xsmall()
+            .icon(IconName::TriangleAlert)
+            .tooltip(marker.label().clone())
+            .on_click(move |_, window, cx| open_details(&id, window, cx))
+    })
+```
+
+`decorations` paints a background on every line of each `DiffLineRange`. A
+range ending on the other side covers its start side from `start` onwards and
+its end side up to `end`. The fill sits above the change background and below
+inline emphasis, search highlights and text; a selected line shows the
+selection instead, and copying is unchanged. Where decorations overlap, the
+last supplied one is shown. Without `with_background`, the fill is a
+translucent warning color.
+
+`gutter_markers` together with `render_gutter_marker` adds a lane, one row high
+and wide, between the line numbers and the code. The lane holds one marker per
+line; when several target the same line, the first supplied is shown. Render a
+focusable control, such as a ghost `Button` that announces
+`DiffGutterMarker::label()`, so the marker works with Enter and Space as well as
+the pointer. Pressing a marker does not start a text or line selection. The
+application owns the details panel and returns focus when it closes.
+
+`span_highlights` emphasizes a character span inside one line, such as the
+matched text of a search hit:
+
+```rust
+Diff::new(&self.diff).span_highlights([DiffSpanHighlight::new(
+    DiffLinePosition::new(path, DiffSide::Modified, 10),
+    4..9,
+)])
+```
+
+The span is a byte range in the line's content, before tab expansion. Its fill
+paints over syntax, inline emphasis and decorations, and a text selection still
+shows above it. Without `with_background`, the fill is a translucent warning
+color; `with_foreground` sets the text color over a strong fill.
+
+Like annotations, decorations, markers and span highlights are supplied on
+every render, so the current builder call is their only source.
 
 ## Pointer and keyboard interaction
 

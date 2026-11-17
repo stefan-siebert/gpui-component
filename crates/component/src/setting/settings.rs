@@ -3,11 +3,12 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use crate::{
-    IconName, Sizable, Size, StyledExt,
+    Icon, IconName, Sizable, Size, StyledExt,
     actions::{Confirm, SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp},
+    empty::{Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle},
     group_box::GroupBoxVariant,
     h_resizable,
-    input::{Input, InputState},
+    input::{Escape, Input, InputState},
     resizable_panel,
     setting::SettingPage,
     sidebar::{Sidebar, SidebarMenu, SidebarMenuItem},
@@ -347,7 +348,28 @@ impl Settings {
                 .into_any_element();
         }
 
+        if filter.visible_pages().next().is_none() {
+            return div()
+                .size_full()
+                .debug_selector(|| "settings-no-results".into())
+                .child(Self::render_no_results())
+                .into_any_element();
+        }
+
         div().into_any_element()
+    }
+
+    fn render_no_results() -> impl IntoElement {
+        Empty::new().size_full().header(
+            EmptyHeader::new()
+                .media(
+                    EmptyMedia::new()
+                        .with_variant(EmptyMediaVariant::Icon)
+                        .child(Icon::new(IconName::Search)),
+                )
+                .title(EmptyTitle::new().child(t!("Settings.no_results")))
+                .description(EmptyDescription::new().child(t!("Settings.no_results_description"))),
+        )
     }
 
     fn render_sidebar(
@@ -388,6 +410,22 @@ impl Settings {
                 div()
                     .w_full()
                     .refine_style(&self.header_style)
+                    // The input passes on an Escape it has no use for. Clear a
+                    // non-empty query with it; otherwise let it reach an enclosing
+                    // dialog or window. On Android, Escape is the back button,
+                    // which never edits a field.
+                    .on_action({
+                        let search_input = search_input.clone();
+                        move |_: &Escape, window, cx| {
+                            if search_input.read(cx).value().is_empty()
+                                || cfg!(target_os = "android")
+                            {
+                                cx.propagate();
+                                return;
+                            }
+                            search_input.update(cx, |input, cx| input.clean(window, cx));
+                        }
+                    })
                     .child(Input::new(&search_input).prefix(IconName::Search)),
             )
             // One menu per page: the sidebar can scroll a child into view,
@@ -410,9 +448,13 @@ impl Settings {
                             Some(id) => format!("page-{id}"),
                             None => format!("page-{page_ix}"),
                         };
+                        // Going to a page opens its groups; clicking the title of
+                        // the page on display again folds or unfolds them.
+                        let is_page_shown = selected_index.page_ix == page_ix;
                         let entry = SidebarMenuItem::new(page.title.clone())
                             .id(entry_id)
-                            .click_to_open(true)
+                            .click_to_open(!is_page_shown)
+                            .click_to_toggle(is_page_shown)
                             .when_some(page.icon.clone(), |this, icon| this.icon(icon))
                             .when_some(entry_focus(page_key), |this, handle| {
                                 this.track_focus(&handle)
@@ -517,7 +559,6 @@ impl Settings {
                 move |_: &SelectLeft, window, cx| handlers.collapse_or_parent(window, cx)
             })
             .on_action({
-                let handlers = handlers.clone();
                 move |_: &Confirm, window, cx| handlers.activate(window, cx)
             })
             .child(sidebar)
@@ -876,7 +917,18 @@ impl RenderOnce for Settings {
             }
         }
 
-        let query = state.read(cx).search_input.read(cx).value();
+        // The placeholder is localized when the state is created, and rebuilding
+        // the state would lose the selected page, so follow a runtime locale
+        // change here. `set_placeholder` notifies, so only write on a change.
+        let placeholder = t!("Settings.search_placeholder");
+        let search_input = state.read(cx).search_input.clone();
+        if search_input.read(cx).presentation().placeholder() != &*placeholder {
+            search_input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx);
+            });
+        }
+
+        let query = search_input.read(cx).value();
         let filter = SettingsFilter::new(&self.pages, &query, cx);
         let previous = state.read(cx).selected_index;
         let selected = filter.selected_index(previous);
@@ -1066,7 +1118,7 @@ mod nav_tests {
         settle(cx);
     }
 
-    fn key(cx: &mut VisualTestContext, key: &str) {
+    fn key(cx: &mut VisualTestContext, key: &'static str) {
         let keystroke = Keystroke::parse(key).unwrap();
         cx.simulate_event(KeyDownEvent {
             keystroke: keystroke.clone(),

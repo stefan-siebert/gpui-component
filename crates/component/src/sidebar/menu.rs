@@ -12,6 +12,7 @@ use gpui::{
     ParentElement as _, Role, SharedString, Stateful, StatefulInteractiveElement as _,
     StyleRefinement, Styled, Window, div, percentage, prelude::FluentBuilder,
 };
+use gpui_base::LogicalStyledExt as _;
 use gpui_base::TestSupportExt as _;
 use std::rc::Rc;
 
@@ -402,7 +403,7 @@ impl SidebarItem for SidebarMenuItem {
         // Requests a new open state from whichever side owns it.
         let set_open: Option<Rc<dyn Fn(bool, &mut Window, &mut App)>> = if !is_submenu {
             None
-        } else if let Some(open_state) = open_state.clone() {
+        } else if let Some(open_state) = open_state {
             Some(Rc::new(move |open, _, cx: &mut App| {
                 open_state.update(cx, |is_open, cx| {
                     *is_open = open;
@@ -426,6 +427,7 @@ impl SidebarItem for SidebarMenuItem {
         let is_open = !is_collapsed && is_submenu && is_open_state;
         let drag_and_drop = self.drag_and_drop.clone();
         let detail = self.detail.clone().map(|detail| detail(window, cx));
+        let rtl = gpui_base::LayoutDirection::global(cx).is_rtl();
 
         div()
             .id(id.clone())
@@ -433,6 +435,7 @@ impl SidebarItem for SidebarMenuItem {
             .w_full()
             .child(
                 h_flex()
+                    .flex_row_dir(cx)
                     .size_full()
                     .id("item")
                     .map(|row| drag_and_drop.iter().fold(row, |row, refine| refine(row)))
@@ -481,12 +484,14 @@ impl SidebarItem for SidebarMenuItem {
                         })
                         .child(
                             h_flex()
+                                .flex_row_dir(cx)
                                 .flex_1()
                                 .gap_x_2()
                                 .justify_between()
                                 .overflow_x_hidden()
                                 .child(
                                     h_flex()
+                                        .flex_row_dir(cx)
                                         .flex_1()
                                         .min_w_0()
                                         .overflow_x_hidden()
@@ -525,11 +530,24 @@ impl SidebarItem for SidebarMenuItem {
                                     // mouse equivalent, not a stop of its own.
                                     .when(owns_focus, |this| this.tab_stop(false))
                                     .icon(
-                                        Icon::new(IconName::ChevronRight)
-                                            .size_4()
-                                            .when(is_open, |this| {
-                                                this.rotate(percentage(90. / 360.))
-                                            }),
+                                        // Points toward the end edge while
+                                        // closed and turns down when open.
+                                        Icon::new(if rtl {
+                                            IconName::ChevronLeft
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .size_4()
+                                        .when(
+                                            is_open,
+                                            |this| {
+                                                // A quarter turn toward down: clockwise
+                                                // from right, counter-clockwise from left.
+                                                this.rotate(percentage(
+                                                    if rtl { 270. } else { 90. } / 360.,
+                                                ))
+                                            },
+                                        ),
                                     )
                                     .on_click({
                                         move |_, window, cx| {
@@ -583,11 +601,11 @@ impl SidebarItem for SidebarMenuItem {
                 this.child(
                     v_flex()
                         .id("submenu")
-                        .border_l_1()
+                        .border_s(gpui::px(1.), cx)
                         .border_color(cx.theme().sidebar_border)
                         .gap_1()
-                        .ml_3p5()
-                        .pl_2p5()
+                        .ms(gpui::rems(0.875), cx)
+                        .ps(gpui::rems(0.625), cx)
                         .py_0p5()
                         .children(self.children.into_iter().enumerate().map(|(ix, item)| {
                             let id = format!("{}-{}", id, ix);

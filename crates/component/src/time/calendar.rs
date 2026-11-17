@@ -1,13 +1,13 @@
-use chrono::Weekday;
 use gpui::{
     App, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, RenderOnce,
     SharedString, StyleRefinement, Styled, Window, prelude::FluentBuilder as _, px,
 };
+use jiff::civil::Weekday;
 use rust_i18n::t;
 
 use crate::{ActiveTheme, Icon, IconName, Sizable, Size, StyledExt as _};
 
-use gpui_base::{Calendar as BaseCalendar, CalendarItemKind};
+use gpui_base::{Calendar as BaseCalendar, CalendarItemKind, LayoutDirection};
 pub use gpui_base::{CalendarEvent, CalendarState, Date, Matcher};
 
 fn month_name(month: i32) -> SharedString {
@@ -52,7 +52,7 @@ impl Calendar {
             state: state.clone(),
             style: StyleRefinement::default(),
             number_of_months: 1,
-            first_day_of_week: Weekday::Sun,
+            first_day_of_week: Weekday::Sunday,
         }
     }
     pub fn number_of_months(mut self, count: usize) -> Self {
@@ -102,12 +102,13 @@ impl RenderOnce for Calendar {
             })
             .item(move |item, state, _, cx| {
                 let item = match state.kind() {
+                    // Previous points toward the start edge: the right in RTL.
                     CalendarItemKind::Previous => item
                         .clear_children()
-                        .child(Icon::new(IconName::ChevronLeft).size_4()),
+                        .child(Icon::new(start_chevron(cx)).size_4()),
                     CalendarItemKind::Next => item
                         .clear_children()
-                        .child(Icon::new(IconName::ChevronRight).size_4()),
+                        .child(Icon::new(end_chevron(cx)).size_4()),
                     _ => item,
                 };
                 item.map(|this| match size {
@@ -209,15 +210,30 @@ impl RenderOnce for Calendar {
     }
 }
 
+fn start_chevron(cx: &App) -> IconName {
+    if LayoutDirection::global(cx).is_rtl() {
+        IconName::ChevronRight
+    } else {
+        IconName::ChevronLeft
+    }
+}
+
+fn end_chevron(cx: &App) -> IconName {
+    if LayoutDirection::global(cx).is_rtl() {
+        IconName::ChevronLeft
+    } else {
+        IconName::ChevronRight
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CalendarItemKind, Date, uses_compact_text};
-    use chrono::NaiveDate;
 
     #[test]
     fn date_display_is_stable() {
         assert_eq!(
-            Date::Single(Some(NaiveDate::from_ymd_opt(2024, 8, 3).unwrap())).to_string(),
+            Date::Single(Some(jiff::civil::date(2024, 8, 3))).to_string(),
             "2024-08-03"
         );
         assert_eq!(Date::Single(None).to_string(), "nil");

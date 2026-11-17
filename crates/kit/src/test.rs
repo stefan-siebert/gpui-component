@@ -411,8 +411,8 @@ impl TestWindowExt for Window {
         mouse_up(self, to, MouseButton::Left, 1, modifiers, cx);
     }
     fn press(&mut self, key: &str, cx: &mut App) {
-        let key =
-            Keystroke::parse(key).unwrap_or_else(|error| panic!("invalid test keystroke: {error}"));
+        let key = Keystroke::parse_with_os(key, cx.platform_info().os)
+            .unwrap_or_else(|error| panic!("invalid test keystroke: {error}"));
         self.render_frame(cx);
         press_key(self, key, cx);
         self.render_frame(cx);
@@ -507,8 +507,8 @@ impl ScopedWindow<'_> {
     /// Dispatches to current focus, requiring an observed focus binding inside this scope.
     /// Does not move focus; click a scoped input first.
     pub fn press(&mut self, key: &str, cx: &mut App) {
-        let key =
-            Keystroke::parse(key).unwrap_or_else(|error| panic!("invalid test keystroke: {error}"));
+        let key = Keystroke::parse_with_os(key, cx.platform_info().os)
+            .unwrap_or_else(|error| panic!("invalid test keystroke: {error}"));
         self.window.render_frame(cx);
         require_scope_focus(self.window, &self.scope);
         press_key(self.window, key, cx);
@@ -560,8 +560,8 @@ fn input_text(window: &mut Window, text: &str, scope: Option<&[ElementId]>, cx: 
             require_scope_focus(window, scope);
         }
         let text = character.to_string();
-        let mut key =
-            Keystroke::parse(&text).expect("a Unicode character is a valid GPUI keystroke");
+        let mut key = Keystroke::parse_with_os(&text, cx.platform_info().os)
+            .expect("a Unicode character is a valid GPUI keystroke");
         key.key_char = Some(text);
         window.dispatch_keystroke(key, cx);
         window.render_frame(cx);

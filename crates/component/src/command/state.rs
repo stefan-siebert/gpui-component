@@ -1,3 +1,4 @@
+use gpui_base::LogicalStyledExt as _;
 use gpui_base::TestSupportExt as _;
 use std::rc::Rc;
 
@@ -43,6 +44,7 @@ pub(crate) struct CommandModel {
     pub(crate) searchable: bool,
     pub(crate) filterable: bool,
     pub(crate) dispatch_actions: bool,
+    pub(crate) highlight_matches: bool,
     pub(crate) on_query: Option<Rc<OnQuery>>,
     pub(crate) on_select: Option<Rc<OnIndex>>,
     pub(crate) on_confirm: Option<Rc<OnIndex>>,
@@ -56,6 +58,7 @@ impl Default for CommandModel {
             searchable: true,
             filterable: true,
             dispatch_actions: true,
+            highlight_matches: false,
             on_query: None,
             on_select: None,
             on_confirm: None,
@@ -359,6 +362,16 @@ impl CommandState {
             true
         } else {
             item.matches(query)
+        }
+    }
+
+    /// The query the rows highlight in their labels: the one the palette
+    /// filtered by when `highlight_matches` is on, or none.
+    fn highlighted_query(&self) -> &str {
+        if self.model.highlight_matches && self.model.searchable && self.model.filterable {
+            self.applied_query.trim()
+        } else {
+            ""
         }
     }
 
@@ -977,17 +990,23 @@ impl CommandState {
         // The binding owns the trailing slot, so only an item without one can
         // show its check there.
         let trailing = match binding {
-            Some(binding) => Some(binding.ml_auto().into_any_element()),
+            Some(binding) => Some(binding.ms(gpui::Length::Auto, cx).into_any_element()),
             None => item.checked.then(|| {
-                crate::Sizable::xsmall(Icon::new(IconName::Check).ml_auto()).into_any_element()
+                crate::Sizable::xsmall(Icon::new(IconName::Check).ms(gpui::Length::Auto, cx))
+                    .into_any_element()
             }),
         };
-        let label_line = |content: gpui::Div| {
+        let label = item
+            .label_text()
+            .cloned()
+            .map(|label| crate::label::highlight_matches(label, self.highlighted_query(), cx));
+        let label_line = |content: gpui::Div, cx: &App| {
             content
+                .flex_row_dir(cx)
                 .when_some(item.icon.clone(), |this, icon| {
                     this.child(icon.size_4().text_color(icon_color))
                 })
-                .when_some(item.label_text().cloned(), |this, label| this.child(label))
+                .when_some(label, |this, label| this.child(label))
         };
 
         let row = self
@@ -995,6 +1014,11 @@ impl CommandState {
             .id(self.matched[matched_ix].index_path)
             .test_support()
             .role(Role::ListBoxOption)
+            // The row's text is drawn by a child that isn't an accessibility
+            // node, so the row names itself.
+            .when_some(item.label_text().cloned(), |this, label| {
+                this.aria_label(label)
+            })
             .aria_selected(selected)
             .when(disabled, |this| this.text_color(muted_foreground))
             .when(!disabled, |this| {
@@ -1012,7 +1036,7 @@ impl CommandState {
         match (&item.content, item.description_text().cloned()) {
             (Some(render), _) => row.child(render(window, cx)).children(trailing),
             (None, None) => row
-                .child(label_line(h_flex().flex_1().gap_2().items_center()))
+                .child(label_line(h_flex().flex_1().gap_2().items_center(), cx))
                 .children(trailing),
             // The description goes under the label line as a block child of
             // the column, not into the row: text in a flex row is measured
@@ -1021,7 +1045,7 @@ impl CommandState {
                 .flex_col()
                 .items_stretch()
                 .gap_0p5()
-                .child(label_line(h_flex().w_full().gap_2().items_center()).children(trailing))
+                .child(label_line(h_flex().w_full().gap_2().items_center(), cx).children(trailing))
                 .child(
                     div()
                         .when(item.icon.is_some(), |this| this.pl(rems(1.5)))
@@ -1132,8 +1156,9 @@ impl Render for CommandState {
                     // The rows carry their inset on the virtual list itself so
                     // that a mid-scroll clip edge sits flush against the
                     // surrounding dividers; only the empty slot needs the
-                    // container padding.
-                    .when(rows_count == 0, |this| this.p_1())
+                    // container padding, and only while it is shown, so a
+                    // loading list leaves no blank strip under the query.
+                    .when(rows_count == 0 && !self.loading, |this| this.p_1())
                     .on_prepaint({
                         let measure_state = command_state.clone();
                         move |bounds, window, cx| {
@@ -1934,6 +1959,56 @@ mod tests {
                     0,
                 );
                 assert!(matches!(state.rows.first(), Some(CommandRow::Heading(_))));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn rows_highlight_the_query_the_palette_filtered_by(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let cx = cx.add_empty_window();
+
+        cx.update(|window, cx| {
+            let plain = cx.new(|cx| command_state(window, cx, suggestion_entries()));
+            plain.update(cx, |state, cx| {
+                state.set_query("cal", window, cx);
+                assert_eq!(state.highlighted_query(), "");
+            });
+
+            let state = cx.new(|cx| {
+                let mut state = CommandState::new(window, cx);
+                state.install_model(
+                    CommandModel {
+                        entries: suggestion_entries(),
+                        highlight_matches: true,
+                        ..CommandModel::default()
+                    },
+                    cx,
+                );
+                state
+            });
+            state.update(cx, |state, cx| {
+                assert_eq!(state.highlighted_query(), "");
+                state.set_query(" cal ", window, cx);
+                assert_eq!(state.highlighted_query(), "cal");
+            });
+
+            let host_filtered = cx.new(|cx| {
+                let mut state = CommandState::new(window, cx);
+                state.install_model(
+                    CommandModel {
+                        entries: suggestion_entries(),
+                        filterable: false,
+                        highlight_matches: true,
+                        ..CommandModel::default()
+                    },
+                    cx,
+                );
+                state
+            });
+            host_filtered.update(cx, |state, cx| {
+                state.set_query("cal", window, cx);
+                assert_eq!(state.highlighted_query(), "");
             });
         });
     }

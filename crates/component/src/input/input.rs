@@ -2,9 +2,9 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, DefiniteLength, Edges, ElementId, Entity, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Rems, RenderOnce, Role, SharedString,
-    StyleRefinement, Styled, TextAlign, TouchPhase, Window, div, px, relative,
+    AnyElement, App, DefiniteLength, Edges, ElementId, Entity, Global, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Rems, RenderOnce, Role,
+    SharedString, StyleRefinement, Styled, TextAlign, TouchPhase, Window, div, px, relative,
 };
 
 use crate::button::{Button, ButtonRounded, ButtonVariants as _};
@@ -17,11 +17,35 @@ use crate::{IconName, Size};
 use crate::{RoleOverride, Selectable, StyledExt, h_flex};
 use crate::{Sizable, StyleSized};
 use gpui_base::InputBase as BaseInput;
+use gpui_base::{LayoutDirection, LogicalStyledExt as _};
 use rust_i18n::t;
 
 use super::state::{TextInputState, sync_focused_input_registry};
 use super::{InputContentType, InputState, sync_native_content_type};
 use crate::ThemeStyled as _;
+
+/// Set when the platform draws the touch selection UI of a focused input.
+#[derive(Default)]
+struct NativeTouchSelection(bool);
+impl Global for NativeTouchSelection {}
+
+/// Let the platform draw the touch selection UI of a focused [`Input`]: the
+/// selection handles and the edit menu a long press leaves behind.
+///
+/// Use it on a host that already shows its own text UI over the window, such
+/// as Android's floating toolbar and drag handles. The long press still
+/// selects a word; the platform follows that selection and drives it back
+/// through the window's input handler. Selections in plain text, outside an
+/// input, keep the handles and menu drawn here.
+pub fn set_native_touch_selection(enabled: bool, cx: &mut App) {
+    cx.set_global(NativeTouchSelection(enabled));
+    cx.refresh_windows();
+}
+
+fn is_native_touch_selection(cx: &App) -> bool {
+    cx.try_global::<NativeTouchSelection>()
+        .is_some_and(|native| native.0)
+}
 
 fn accessibility_role(
     is_multi_line: bool,
@@ -397,7 +421,8 @@ impl Input {
         self
     }
 
-    /// The handles and the edit menu of the selection a long press made.
+    /// The handles and the edit menu of the selection a long press made, unless
+    /// the platform draws them; see [`set_native_touch_selection`].
     ///
     /// The menu offers what the native context menu would: Cut, Copy, Paste
     /// and Select All, leaving out what cannot apply right now rather than
@@ -408,7 +433,7 @@ impl Input {
         window: &Window,
         cx: &App,
     ) -> Vec<AnyElement> {
-        if state.touch_selection(cx).is_none() {
+        if is_native_touch_selection(cx) || state.touch_selection(cx).is_none() {
             return Vec::new();
         }
         let capabilities = state.context_menu_capabilities(cx);
@@ -422,7 +447,6 @@ impl Input {
         let focus_handle = state.presentation(cx).focus_handle().clone();
 
         let dispatch = {
-            let focus_handle = focus_handle.clone();
             move |action: &dyn gpui::Action, window: &mut Window, cx: &mut App| {
                 focus_handle.dispatch_action(action, window, cx);
             }
@@ -514,10 +538,24 @@ impl Styled for Input {
     }
 }
 
+/// The text alignment of the start edge in the global layout direction.
+fn start_text_align(cx: &App) -> TextAlign {
+    if LayoutDirection::global(cx).is_rtl() {
+        TextAlign::Right
+    } else {
+        TextAlign::Left
+    }
+}
+
 impl RenderOnce for Input {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         const LINE_HEIGHT: Rems = Rems(1.25);
-        let text_align = self.style.text.text_align.unwrap_or(TextAlign::Left);
+        // Unless the caller aligns the text, it starts on the start edge.
+        let text_align = self
+            .style
+            .text
+            .text_align
+            .unwrap_or_else(|| start_text_align(cx));
         let state = self.state.clone();
         state.install_token_presentation(
             Some(self.token_renderer.unwrap_or_else(|| {
@@ -759,7 +797,7 @@ impl RenderOnce for Input {
             // controls, custom IDs and focus styling without registering the
             // editor's FocusHandle a second time.
             .role(RoleOverride::Presentational)
-            .flex()
+            .flex_row_dir(cx)
             .size_full()
             .line_height(LINE_HEIGHT)
             .when(!is_multi_line, |this| {
@@ -798,8 +836,9 @@ impl RenderOnce for Input {
                 this.child(state.clone().into_any_element())
             })
             .when(has_suffix, |this| {
-                this.pr(self.size.input_px()).child(
+                this.pe(self.size.input_px(), cx).child(
                     h_flex()
+                        .flex_row_dir(cx)
                         .id("suffix")
                         .gap(gap_x)
                         .items_center()
@@ -982,6 +1021,16 @@ mod tests {
             RoleOverride::Role(Role::Button)
         );
         assert_eq!(RoleOverride::from(None), RoleOverride::Presentational);
+    }
+
+    #[gpui::test]
+    fn default_text_align_follows_layout_direction(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::init(cx);
+            assert_eq!(start_text_align(cx), TextAlign::Left);
+            LayoutDirection::Rtl.set_global(cx);
+            assert_eq!(start_text_align(cx), TextAlign::Right);
+        });
     }
 
     #[gpui::test]
@@ -1235,12 +1284,8 @@ mod tests {
         let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
 
         // Focusing each kind of input registers it, and blurring clears it.
-        let cases: Vec<AnyInputState> = vec![
-            input.clone().into(),
-            textarea.clone().into(),
-            editor.clone().into(),
-            otp.clone().into(),
-        ];
+        let cases: Vec<AnyInputState> =
+            vec![input.into(), textarea.into(), editor.into(), otp.into()];
         for expected in cases {
             cx.update(|window, cx| {
                 let _ = window.draw(cx);
@@ -1339,5 +1384,48 @@ mod tests {
         });
         assert!(!cx.update(|window, cx| window.has_focused_input(cx)));
         assert_eq!(cx.update(|window, cx| window.focused_input(cx)), None);
+    }
+
+    #[gpui::test]
+    fn native_touch_selection_leaves_the_handles_and_menu_to_the_platform(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{AppContext as _, LongPressEvent, Render, point};
+
+        struct Probe(Entity<InputState>);
+        impl Render for Probe {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                div().w(px(300.)).child(Input::new(&self.0))
+            }
+        }
+
+        cx.update(crate::init);
+        let (probe, cx) = cx.add_window_view(|window, cx| {
+            Probe(cx.new(|cx| InputState::new(window, cx).default_value("quick select value")))
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let position = point(px(40.), px(16.));
+        for phase in [TouchPhase::Started, TouchPhase::Ended] {
+            cx.simulate_event(LongPressEvent {
+                phase,
+                start_position: position,
+                position,
+            });
+        }
+        let state = TextInputState::from(probe.read_with(cx, |probe, _| probe.0.clone()));
+        let overlay = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| Input::render_touch_selection(&state, window, cx).len())
+        };
+        assert!(cx.update(|_, cx| state.touch_selection(cx).is_some()));
+        assert!(overlay(cx) > 0);
+
+        cx.update(|_, cx| set_native_touch_selection(true, cx));
+        assert!(cx.update(|_, cx| state.touch_selection(cx).is_some()));
+        assert_eq!(overlay(cx), 0);
+
+        cx.update(|_, cx| set_native_touch_selection(false, cx));
+        assert!(overlay(cx) > 0);
     }
 }

@@ -4,6 +4,7 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, RenderOnce, SharedString, Stateful,
     StatefulInteractiveElement, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _,
 };
+use gpui_base::LogicalStyledExt as _;
 use gpui_base::TestSupportExt as _;
 use smallvec::SmallVec;
 use std::collections::HashMap;
@@ -217,6 +218,7 @@ impl RenderOnce for ListItem {
         outline_style.corner_radii = self.style.corner_radii.clone();
 
         self.base
+            .flex_row_dir(cx)
             .test_support()
             .relative()
             .gap_x_1()
@@ -258,6 +260,7 @@ impl RenderOnce for ListItem {
             })
             .child(
                 h_flex()
+                    .flex_row_dir(cx)
                     .w_full()
                     .items_center()
                     .justify_between()
@@ -290,6 +293,7 @@ impl RenderOnce for ListItem {
                     )
                 } else {
                     this.bg(cx.theme().accent)
+                        .text_color(cx.theme().accent_foreground)
                 }
             })
             .when(is_selectable && self.secondary_selected, |this| {

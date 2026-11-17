@@ -13,8 +13,8 @@ mod palette;
 use gpui::{
     App, AppContext as _, Context, InteractiveElement as _, IntoElement, ListAlignment, ListState,
     MouseButton, ParentElement as _, Pixels, PlatformInput, Point, Render, ScrollDelta,
-    ScrollEvent, ScrollHandle, StatefulInteractiveElement as _, Styled as _, TouchPhase,
-    Window, WindowBounds, WindowOptions, div, list, point, px, size,
+    ScrollEvent, ScrollHandle, StatefulInteractiveElement as _, Styled as _, TouchPhase, Window,
+    WindowBounds, WindowOptions, div, list, point, px, size,
 };
 use gpui_base::{Button, ScrollBounce};
 
@@ -54,7 +54,7 @@ fn send_scroll(event: ScrollEvent, window: &Window, cx: &mut App) {
     // Mouse listeners are temporarily taken out during dispatch. Re-entering
     // dispatch synchronously would miss the viewport's scroll listeners.
     window.defer(cx, move |window, cx| {
-        window.dispatch_event(PlatformInput::ScrollWheel(event), cx);
+        window.dispatch_event(PlatformInput::Scroll(event), cx);
     });
 }
 

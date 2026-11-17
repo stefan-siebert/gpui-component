@@ -63,6 +63,7 @@ pub struct Command {
     searchable: bool,
     filterable: bool,
     dispatch_actions: bool,
+    highlight_matches: bool,
     on_query: Option<Rc<OnQuery>>,
     on_select: Option<Rc<OnIndex>>,
     on_confirm: Option<Rc<OnIndex>>,
@@ -79,6 +80,7 @@ impl Command {
             searchable: true,
             filterable: true,
             dispatch_actions: true,
+            highlight_matches: false,
             on_query: None,
             on_select: None,
             on_confirm: None,
@@ -137,6 +139,14 @@ impl Command {
     /// is how the host learns which item was chosen.
     pub fn dispatch_actions(mut self, dispatch: bool) -> Self {
         self.dispatch_actions = dispatch;
+        self
+    }
+
+    /// Highlight the part of each item's label that matches the query, default
+    /// is `false`. Has no effect with `filterable(false)` or on rows built with
+    /// `child`.
+    pub fn highlight_matches(mut self, highlight: bool) -> Self {
+        self.highlight_matches = highlight;
         self
     }
 
@@ -267,6 +277,7 @@ impl RenderOnce for Command {
             searchable: self.searchable,
             filterable: self.filterable,
             dispatch_actions: self.dispatch_actions,
+            highlight_matches: self.highlight_matches,
             on_query: self.on_query,
             on_select: self.on_select,
             on_confirm: self.on_confirm,

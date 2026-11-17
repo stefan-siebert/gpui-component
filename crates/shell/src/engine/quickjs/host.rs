@@ -218,15 +218,13 @@ pub(super) fn write_file<'js>(
                 "fs.writeFile(path, contents) expects a string or Uint8Array",
             )
         })?;
-        bytes
-            .as_bytes()
-            .ok_or_else(|| {
-                js_error::type_error(
-                    &ctx,
-                    "fs.writeFile(path, contents) received a detached Uint8Array",
-                )
-            })?
-            .to_vec()
+        // SAFETY: copy the bytes before any JavaScript can run again.
+        unsafe { bytes.as_bytes().map(<[u8]>::to_vec) }.ok_or_else(|| {
+            js_error::type_error(
+                &ctx,
+                "fs.writeFile(path, contents) received a detached Uint8Array",
+            )
+        })?
     };
     let grant = grant(&ctx, &path, Access::Write)?;
     let name = grant.describe();
@@ -1320,7 +1318,7 @@ mod tests {
         let directory = TempDir::new();
         let file = directory.path().join("storage.json");
         crate::capability::install(Capabilities::new().storage(true));
-        set_storage_path(file.clone());
+        set_storage_path(file);
 
         with_host(|ctx| {
             // Values are strings, exactly as they are in a browser, so anything

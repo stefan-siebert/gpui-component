@@ -5,15 +5,15 @@ use crate::{
     native_menu::FallbackMenuOverlay,
     notification::{Notification, NotificationList},
     sheet::Sheet,
-    tooltip::render_tooltip,
+    tooltip::tooltip_renderer,
     touch_selection::WindowTouchSelectionOverlay,
     window_border,
 };
 use gpui::{
     App, AppContext, Bounds, Context, DefiniteLength, DispatchPhase, ElementId, Entity,
     FocusHandle, GlobalElementId, Hsla, InteractiveElement, IntoElement, MouseMoveEvent,
-    ParentElement as _, Pixels, Render, RenderOnce, Styled, WeakFocusHandle, Window, canvas, div,
-    prelude::FluentBuilder as _,
+    ParentElement as _, Pixels, Render, RenderOnce, Styled, WeakFocusHandle, Window, canvas,
+    deferred, div, prelude::FluentBuilder as _,
 };
 use gpui_base::{TextSelection, TextSelectionScopeId, motion::Presence};
 use std::{any::TypeId, cell::Cell, rc::Rc};
@@ -53,7 +53,8 @@ struct WindowAppearance {
     /// Shadow size of that wrapper.
     shadow_size: Pixels,
     /// Corner radius for the Linux CSD window border and content rounding.
-    border_radius: Pixels,
+    /// `None` follows the theme's `window.radius`.
+    border_radius: Option<Pixels>,
     /// Per-frame override for the root background fill. `None` paints the
     /// opaque theme background.
     background_fn: Option<Rc<dyn Fn(&App) -> Hsla>>,
@@ -64,7 +65,7 @@ impl Default for WindowAppearance {
         Self {
             bordered: true,
             shadow_size: window_border::SHADOW_SIZE,
-            border_radius: window_border::BORDER_RADIUS,
+            border_radius: None,
             background_fn: None,
         }
     }
@@ -83,7 +84,7 @@ pub trait RootExt: Sized {
     /// Set the window border shadow size for Linux client-side decorations.
     fn window_shadow_size(self, size: impl Into<Pixels>, cx: &mut App) -> Self;
     /// Set the corner radius for the window border and content rounding
-    /// (Linux CSD).
+    /// (Linux CSD), instead of the theme's `window.radius`.
     fn border_radius(self, radius: impl Into<Pixels>, cx: &mut App) -> Self;
     /// Compute the root background per frame instead of painting the opaque
     /// theme background. The callback runs on every render, so it can react
@@ -104,7 +105,7 @@ impl RootExt for gpui_base::Root {
 
     fn border_radius(self, radius: impl Into<Pixels>, cx: &mut App) -> Self {
         let radius = radius.into();
-        self.update_appearance(cx, |appearance| appearance.border_radius = radius)
+        self.update_appearance(cx, |appearance| appearance.border_radius = Some(radius))
     }
 
     fn background_fn(self, f: impl Fn(&App) -> Hsla + 'static, cx: &mut App) -> Self {
@@ -196,7 +197,7 @@ impl WindowState {
             focused_input: None,
             notification: cx.new(|cx| NotificationList::new(window, cx)),
             tooltip_overlay: cx
-                .new(|_| gpui_base::TooltipOverlay::new().render_with(render_tooltip)),
+                .new(|_| gpui_base::TooltipOverlay::new().render_with(tooltip_renderer())),
             tooltip_hovered_trigger: None,
             tooltip_trigger_lifetime: std::rc::Weak::new(),
             tooltip_pressed_trigger: None,
@@ -258,9 +259,12 @@ impl WindowState {
 
     fn notification_layer(
         root: &Entity<WindowState>,
+        window: &Window,
         cx: &App,
     ) -> Option<impl IntoElement + use<>> {
-        let active_sheet_placement = root.read(cx).active_sheet.clone().map(|d| d.placement);
+        let active_sheet_placement = root.read(cx).active_sheet.clone().map(|d| {
+            crate::sheet::physical_placement(d.placement, gpui_base::LayoutDirection::global(cx))
+        });
 
         let sheet_size = root.read(cx).sheet_size;
         let (mt, mr, mb, ml) = match active_sheet_placement {
@@ -271,15 +275,32 @@ impl WindowState {
             _ => (None, None, None, None),
         };
 
+        // Base dialogs are deferred at 10 + their layer index. Defer the whole
+        // notification stack after every dialog, including embedded Base forms.
+        let priority = 11 + root.read(cx).active_dialogs.len();
+        // Keep toasts out from under the system bars and the on-screen keyboard.
+        let safe_insets = window_border::window_safe_insets(window);
+
         Some(
-            div()
-                .absolute()
-                .inset_0()
-                .when_some(mt, |this, offset| this.mt(offset))
-                .when_some(mr, |this, offset| this.mr(offset))
-                .when_some(mb, |this, offset| this.mb(offset))
-                .when_some(ml, |this, offset| this.ml(offset))
-                .child(root.read(cx).notification.clone()),
+            deferred(
+                div()
+                    .absolute()
+                    .top(safe_insets.top)
+                    .right(safe_insets.right)
+                    .bottom(safe_insets.bottom)
+                    .left(safe_insets.left)
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .when_some(mt, |this, offset| this.mt(offset))
+                            .when_some(mr, |this, offset| this.mr(offset))
+                            .when_some(mb, |this, offset| this.mb(offset))
+                            .when_some(ml, |this, offset| this.ml(offset))
+                            .child(root.read(cx).notification.clone()),
+                    ),
+            )
+            .with_priority(priority),
         )
     }
 
@@ -292,7 +313,10 @@ impl WindowState {
             let mut sheet = Sheet::new(window, cx);
             sheet = (active_sheet.builder)(sheet, window, cx);
             sheet.focus_handle = active_sheet.focus_handle.clone();
-            sheet.placement = active_sheet.placement;
+            sheet.placement = crate::sheet::physical_placement(
+                active_sheet.placement,
+                gpui_base::LayoutDirection::global(cx),
+            );
             sheet.selection_scope = active_sheet.selection_scope;
 
             let size = sheet.size;
@@ -320,6 +344,7 @@ impl WindowState {
         }
 
         let mut rendered: Vec<(usize, Dialog)> = Vec::with_capacity(active_dialogs.len());
+        let mut stack_depth = 0;
 
         for (index, active_dialog) in active_dialogs.iter().enumerate() {
             let mut dialog = Dialog::new(cx);
@@ -334,6 +359,11 @@ impl WindowState {
             dialog.selection_scope = active_dialog.selection_scope;
 
             dialog.layer_ix = index;
+            // A dialog that is leaving must not push the next one down.
+            dialog.stack_depth = stack_depth;
+            if !active_dialog.closing {
+                stack_depth += 1;
+            }
             dialog.id = active_dialog.id;
 
             // Refreshed every frame so closing decides in one step whether an
@@ -794,34 +824,37 @@ impl gpui_base::RootPlugin for WindowState {
 
     fn style(&self, surface: &mut gpui::Stateful<gpui::Div>, window: &mut Window, cx: &mut App) {
         use gpui::Refineable as _;
+        // Fork: the background may be computed per frame (`background_fn`).
         let background = self
             .appearance
             .background_fn
             .as_ref()
             .map_or(cx.theme().tokens.background, |f| f(cx).into());
+        // The surface's background must follow the window's rounded corners.
+        // Fork: the radius may come from the root instead of the theme.
+        let radii =
+            window_border::window_corner_radii_or(self.appearance.border_radius, window, cx);
         let mut refinement = gpui::StyleRefinement::default()
             .font_family(cx.theme().font_family.clone())
             .bg(background)
-            .text_color(cx.theme().foreground);
-        // Fork: round the content along with the CSD frame, on the corners
-        // that are not tiled against a screen edge.
-        if let gpui::Decorations::Client { tiling } = window.window_decorations() {
-            let radius = self.appearance.border_radius;
+            .text_color(cx.theme().foreground)
+            .rounded_tl(radii.top_left)
+            .rounded_tr(radii.top_right)
+            .rounded_bl(radii.bottom_left)
+            .rounded_br(radii.bottom_right);
+        // Fork: clip the content along with the CSD frame.
+        if matches!(
+            window.window_decorations(),
+            gpui::Decorations::Client { .. }
+        ) {
             refinement = refinement.overflow_hidden();
-            if !(tiling.top || tiling.left) {
-                refinement = refinement.rounded_tl(radius);
-            }
-            if !(tiling.top || tiling.right) {
-                refinement = refinement.rounded_tr(radius);
-            }
-            if !(tiling.bottom || tiling.left) {
-                refinement = refinement.rounded_bl(radius);
-            }
-            if !(tiling.bottom || tiling.right) {
-                refinement = refinement.rounded_br(radius);
-            }
         }
         surface.style().refine(&refinement);
+        // Text starts on the right in a right-to-left interface; elements
+        // that set their own alignment keep it.
+        if gpui_base::LayoutDirection::global(cx).is_rtl() {
+            surface.style().text.text_align = Some(gpui::TextAlign::Right);
+        }
     }
 
     fn decorate(
@@ -834,7 +867,7 @@ impl gpui_base::RootPlugin for WindowState {
         if self.appearance.bordered {
             window_border()
                 .shadow_size(self.appearance.shadow_size)
-                .border_radius(self.appearance.border_radius)
+                .border_radius_opt(self.appearance.border_radius)
                 .child(surface)
                 .into_any_element()
         } else {
@@ -875,6 +908,60 @@ impl RenderOnce for WindowStateLayers {
             .debug_selector(|| "root-layers".to_string())
             .children(WindowState::sheet_layer(root.clone(), window, cx))
             .children(WindowState::dialog_layer(&root, window, cx))
-            .children(WindowState::notification_layer(&root, cx))
+            .children(WindowState::notification_layer(&root, window, cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{
+        AppContext as _, Bounds, Context, IntoElement, ParentElement as _, Pixels, Render,
+        Styled as _, TestAppContext, Window, canvas, div, px, size,
+    };
+    use std::{cell::Cell, rc::Rc};
+
+    struct BottomBarDemo {
+        bar: Rc<Cell<Option<Bounds<Pixels>>>>,
+    }
+
+    impl Render for BottomBarDemo {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let bar = self.bar.clone();
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().w_full())
+                .child(div().h(px(40.)).w_full().child(
+                    canvas(move |bounds, _, _| bar.set(Some(bounds)), |_, _, _, _| {}).size_full(),
+                ))
+        }
+    }
+
+    /// #3857: with every component layer installed (window border, overlay
+    /// layers), a `size_full` view still fills the window height.
+    #[gpui::test]
+    fn size_full_view_fills_window_height(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let bar = Rc::new(Cell::new(None));
+        let (_, cx) = cx.add_window_view({
+            let bar = bar.clone();
+            move |window, cx| {
+                let view = cx.new(|_| BottomBarDemo { bar });
+                crate::Root::new(view, window, cx)
+            }
+        });
+        cx.simulate_resize(size(px(800.), px(600.)));
+        cx.run_until_parked();
+        let viewport = cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.viewport_size()
+        });
+        let bounds = bar.get().expect("bar painted");
+        assert_eq!(
+            bounds.bottom(),
+            viewport.height,
+            "bar {bounds:?}, viewport {viewport:?}"
+        );
     }
 }
