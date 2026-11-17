@@ -115,6 +115,7 @@ pub struct SidebarMenuItem {
     style: StyleRefinement,
     handler: Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>,
     active: bool,
+    focused: bool,
     default_open: bool,
     click_to_open: bool,
     collapsed: bool,
@@ -144,6 +145,7 @@ impl SidebarMenuItem {
             style: StyleRefinement::default(),
             handler: Rc::new(|_, _, _| {}),
             active: false,
+            focused: false,
             collapsed: false,
             default_open: false,
             click_to_open: false,
@@ -196,6 +198,19 @@ impl SidebarMenuItem {
     /// Set the active state of the menu item
     pub fn active(mut self, active: bool) -> Self {
         self.active = active;
+        self
+    }
+
+    /// Draw the item as the one the keyboard is on, however focus got
+    /// there and wherever the mouse went since.
+    ///
+    /// By itself the item marks focus only while it is *visible* focus,
+    /// and GPUI counts any mouse move as mouse input: nudge the mouse and
+    /// the mark goes while the keys still go to the item. An owner that
+    /// moves focus itself — and keeps a click from taking it — knows when
+    /// its item has the keyboard and says so here.
+    pub fn focused(mut self, focused: bool) -> Self {
+        self.focused = focused;
         self
     }
 
@@ -422,6 +437,7 @@ impl SidebarItem for SidebarMenuItem {
         let handler = self.handler.clone();
         let is_collapsed = self.collapsed;
         let is_active = self.active;
+        let is_focused = self.focused;
         let is_hoverable = !is_active && !self.disabled;
         let is_disabled = self.disabled;
         let is_open = !is_collapsed && is_submenu && is_open_state;
@@ -443,10 +459,22 @@ impl SidebarItem for SidebarMenuItem {
                         Some(focus_handle) => this.track_focus(focus_handle),
                         None => this.tab_index(0),
                     })
+                    // The keyboard's item looks like a list's or a table's
+                    // cursor row: the active fill inside a border. It used
+                    // the accent fill of hover and of the active item, so
+                    // focus on the active item (where it usually lands)
+                    // changed nothing. The border is always there, clear
+                    // until focused, so focus moves nothing by a pixel.
+                    .border_1()
+                    .border_color(gpui::transparent_black())
                     .focus_visible({
-                        let accent = cx.theme().sidebar_accent;
-                        let fg = cx.theme().sidebar_accent_foreground;
-                        move |style| style.bg(accent.opacity(0.8)).text_color(fg)
+                        let fill = cx.theme().list_active;
+                        let border = cx.theme().list_active_border;
+                        move |style| {
+                            let style = style.border_color(border);
+                            // The active item keeps its own fill under it.
+                            if is_active { style } else { style.bg(fill) }
+                        }
                     })
                     .role(Role::TreeItem)
                     .aria_label(accessibility_label.unwrap_or_else(|| label_text.clone()))
@@ -468,6 +496,11 @@ impl SidebarItem for SidebarMenuItem {
                         this.font_medium()
                             .bg(cx.theme().tokens.sidebar_accent)
                             .text_color(cx.theme().sidebar_accent_foreground)
+                    })
+                    // The same mark as focus-visible above, held by the owner.
+                    .when(is_focused, |this| {
+                        this.border_color(cx.theme().list_active_border)
+                            .when(!is_active, |this| this.bg(cx.theme().list_active))
                     })
                     .when_some(self.icon.clone(), |this, icon| this.child(icon))
                     .when(is_collapsed, |this| {

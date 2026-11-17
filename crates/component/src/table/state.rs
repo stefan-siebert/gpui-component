@@ -227,6 +227,9 @@ pub(crate) struct HeaderCell {
 
 pub struct TableState<D: TableDelegate> {
     focus_handle: FocusHandle,
+    /// The selected row's border at half strength: see
+    /// [`TableState::set_selection_muted`].
+    selection_muted: bool,
     delegate: D,
     pub(super) options: TableOptions,
     /// The bounds of the table container.
@@ -346,6 +349,7 @@ where
     pub fn new(delegate: D, _: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             focus_handle: cx.focus_handle().tab_stop(true),
+            selection_muted: false,
             options: TableOptions::default(),
             delegate,
             col_groups: Vec::new(),
@@ -605,6 +609,24 @@ where
     /// count, see [`TableState::selection`].
     pub fn selected_row(&self) -> Option<usize> {
         self.selected_row.filter(|_| self.selection_mode.is_row())
+    }
+
+    /// Draw the selected row's border at half strength while the keyboard
+    /// works somewhere beside the table — a sidebar next to it, say — so
+    /// that two equal cursors do not stand on screen and leave open which
+    /// one the keys move. The owner decides, not the table's own focus: a
+    /// search field outside it may move its cursor, and that cursor is the
+    /// one that matters then.
+    pub fn set_selection_muted(&mut self, muted: bool, cx: &mut Context<Self>) {
+        if self.selection_muted != muted {
+            self.selection_muted = muted;
+            cx.notify();
+        }
+    }
+
+    /// Whether the selected row is drawn muted.
+    pub fn selection_muted(&self) -> bool {
+        self.selection_muted
     }
 
     /// Sets the selected row to the given index.
@@ -3120,7 +3142,11 @@ where
                                     .absolute()
                                     .bg(cx.theme().tokens.table_active)
                                     .border_1()
-                                    .border_color(cx.theme().table_active_border),
+                                    .border_color(if self.selection_muted {
+                                        cx.theme().table_active_border.opacity(0.5)
+                                    } else {
+                                        cx.theme().table_active_border
+                                    }),
                             )
                         } else {
                             this.bg(cx.theme().tokens.accent)

@@ -685,15 +685,34 @@ pub fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
 /// A translucent `color` is flattened onto `background` first, which is
 /// how it would be seen.
 pub fn readable_on(color: Hsla, background: Hsla, toward: Hsla, min_contrast: f32) -> Hsla {
-    let color = background.blend(color);
-    if contrast_ratio(color, background) >= min_contrast {
+    contrasting_on(background.blend(color), &[background], toward, min_contrast)
+}
+
+/// `color` against every one of `backgrounds` (opaque): unchanged when it
+/// reaches `min_contrast` against each, else mixed toward `toward` in
+/// small steps, in Oklab so the hue holds, until it does. For a graphic —
+/// a border, a focus mark — that sits on more than one surface; graphics
+/// want 3:1 (WCAG 1.4.11).
+///
+/// A translucent `color` is judged as seen on each background, and
+/// flattened onto the first one only when it has to change.
+pub fn contrasting_on(color: Hsla, backgrounds: &[Hsla], toward: Hsla, min_contrast: f32) -> Hsla {
+    let reaches = |candidate: Hsla| {
+        backgrounds.iter().all(|&background| {
+            contrast_ratio(background.blend(candidate), background) >= min_contrast
+        })
+    };
+    if reaches(color) {
         return color;
     }
+    let color = backgrounds
+        .first()
+        .map_or(color, |&background| background.blend(color));
     const STEPS: u8 = 20;
     for step in 1..=STEPS {
         // `mix_oklab`'s factor weighs the first color.
         let candidate = color.mix_oklab(toward, 1.0 - f32::from(step) / f32::from(STEPS));
-        if contrast_ratio(candidate, background) >= min_contrast {
+        if reaches(candidate) {
             return candidate;
         }
     }
@@ -1221,6 +1240,34 @@ mod tests {
         let green: Hsla = rgb(0x6A9955).into();
         assert!(contrast_ratio(green, background) >= 4.5);
         assert_eq!(readable_on(green, background, foreground, 4.5), green);
+    }
+
+    /// The case that asked for it: Fahrenheit's cursor border, dark red on
+    /// black, 1.67:1 — the row the keyboard is on all but unmarked.
+    #[test]
+    fn a_border_too_dark_for_its_surfaces_is_raised_against_all_of_them() {
+        let background: Hsla = rgb(0x000000).into();
+        let row: Hsla = background.blend(rgba(0x72020222).into());
+        let foreground: Hsla = rgb(0xFFFFCE).into();
+        let red: Hsla = rgb(0x720202).into();
+        assert!(contrast_ratio(red, background) < 2.0);
+
+        let border = contrasting_on(red, &[background, row], foreground, 3.0);
+
+        assert!(contrast_ratio(border, background) >= 3.0);
+        assert!(contrast_ratio(border, row) >= 3.0);
+        assert!((border.h - red.h).abs() < 0.05, "hue drifted: {border:?}");
+        assert!(border.l > red.l);
+    }
+
+    #[test]
+    fn a_border_that_stands_out_everywhere_is_left_alone() {
+        let border: Hsla = rgba(0x0000FF99).into();
+        let surfaces: [Hsla; 2] = [rgb(0xFFFFFF).into(), rgb(0xF0F0F0).into()];
+        assert_eq!(
+            contrasting_on(border, &surfaces, rgb(0x000000).into(), 3.0),
+            border
+        );
     }
 
     #[test]
