@@ -1806,7 +1806,10 @@ async fn run_held_key(
         ));
     }
     let keystroke_str = keystroke_string(&event);
-    let keystroke = Keystroke::parse(&keystroke_str).map_err(|e| format!("{:?}", e))?;
+    // A keystroke that arrives over the socket is dynamic input: read for
+    // the host the app runs on (`Keystroke::parse` takes literals only).
+    let os = cx.update(|cx| cx.platform_info().os);
+    let keystroke = Keystroke::parse_with_os(&keystroke_str, os).map_err(|e| format!("{:?}", e))?;
     let delay = Duration::from_millis(repeat.delay_ms.unwrap_or(DEFAULT_REPEAT_DELAY_MS));
     let interval = Duration::from_millis(
         repeat
@@ -1954,7 +1957,8 @@ fn keystroke_string(event: &KeyEvent) -> String {
 fn handle_send_key(params: &serde_json::Value, cx: &mut App) -> Result<serde_json::Value, String> {
     let event: KeyEvent = serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
     let keystroke_str = keystroke_string(&event);
-    let keystroke = Keystroke::parse(&keystroke_str).map_err(|e| format!("{:?}", e))?;
+    let keystroke = Keystroke::parse_with_os(&keystroke_str, cx.platform_info().os)
+        .map_err(|e| format!("{:?}", e))?;
 
     // Use resolve_window() for consistent fallback behavior with the other
     // driver handlers (click/type/screenshot/execute_action). This lets the
@@ -1989,7 +1993,7 @@ fn handle_type_text(params: &serde_json::Value, cx: &mut App) -> Result<serde_js
             c => c.to_string(),
         };
 
-        let keystroke = match Keystroke::parse(&keystroke_str) {
+        let keystroke = match Keystroke::parse_with_os(&keystroke_str, cx.platform_info().os) {
             Ok(k) => k,
             Err(_) => continue,
         };
@@ -4058,6 +4062,8 @@ fn handle_list_actions(
     }
 
     // Build rich action info with keybindings and documentation
+    // Spelled as `send_key` takes them back ("ctrl-shift-f5"), for this host.
+    let os = cx.platform_info().os;
     let keymap = cx.key_bindings();
     let keymap = keymap.borrow();
     let docs = cx.action_documentation();
@@ -4073,7 +4079,7 @@ fn handle_list_actions(
                     let keystrokes: Vec<String> = binding
                         .keystrokes()
                         .iter()
-                        .map(|ks| format!("{}", ks))
+                        .map(|ks| ks.unparse(os))
                         .collect();
 
                     let context = binding.predicate().map(|p| format!("{}", p));

@@ -665,6 +665,14 @@ Table:
     zh-CN: 按 %{column} 排序
     zh-HK: 按 %{column} 排序
     zh-TW: 依 %{column} 排序
+  ColumnHeaders:
+    en: Column headers
+    ja: "列見出し"
+    pt-BR: "Cabeçalhos de coluna"
+    ru: "Заголовки столбцов"
+    zh-CN: 列标题
+    zh-HK: 欄標題
+    zh-TW: 欄標題
 Chart:
   open:
     en: Open

@@ -2515,6 +2515,9 @@ where
             // ones, which are laid out in a separate container.
             .role(gpui::Role::Row)
             .aria_row_index(0)
+            // A row with a node and no name is announced as "row" and
+            // nothing else; the body rows get theirs from `row_label`.
+            .aria_label(t!("Table.ColumnHeaders").to_string())
             .h_flex()
             .w_full()
             .flex_shrink_0()
