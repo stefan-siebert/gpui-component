@@ -1055,6 +1055,40 @@ impl ThemeColor {
             0.3,
         );
 
+        // Fork addition: the cursor row is found by its border — its fill
+        // is capped at 20 % just above — so the border is a graphic that
+        // must stand out, 3:1 (WCAG 1.4.11), from the row it frames and the
+        // surface around it. A dozen themes pick one below that (Fahrenheit
+        // 1.67:1); it is moved toward the foreground, the hue kept, once
+        // here rather than at every use.
+        const CURSOR_BORDER_CONTRAST: f32 = 3.0;
+        let background = self.background;
+        let framed = |surfaces: &[Hsla], fill: Hsla| -> Vec<Hsla> {
+            surfaces
+                .iter()
+                .flat_map(|&surface| {
+                    let surface = background.blend(surface);
+                    [surface, surface.blend(fill)]
+                })
+                .collect()
+        };
+        let list_surfaces = framed(&[self.list, self.list_even, self.sidebar], self.list_active);
+        let table_surfaces = framed(&[self.table, self.table_even], self.table_active);
+        self.list_active_border = crate::contrasting_on(
+            self.list_active_border,
+            &list_surfaces,
+            self.foreground,
+            CURSOR_BORDER_CONTRAST,
+        );
+        tokens.list_active_border = self.list_active_border.into();
+        self.table_active_border = crate::contrasting_on(
+            self.table_active_border,
+            &table_surfaces,
+            self.foreground,
+            CURSOR_BORDER_CONTRAST,
+        );
+        tokens.table_active_border = self.table_active_border.into();
+
         tokens
     }
 }
