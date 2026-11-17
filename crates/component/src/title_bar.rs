@@ -559,6 +559,15 @@ impl RenderOnce for TitleBar {
                     // release, so a started selection would follow the
                     // pointer afterwards.
                     crate::GlobalState::suppress_text_selection(cx);
+                    // Fork: a press on the bar leaves focus where it was, as
+                    // a native title bar does — a focusable ancestor would
+                    // otherwise take it. Done here, after the sample above,
+                    // so an app needs no `prevent_default` of its own in the
+                    // bar's empty space, which would read as a control.
+                    // Windows prevents the default below, after letting its
+                    // own posted message through.
+                    #[cfg(not(target_os = "windows"))]
+                    window.prevent_default();
 
                     // A WM_NCLBUTTONDOWN this titlebar posted itself comes back
                     // through GPUI as one more MouseDown. Let it fall through to
@@ -871,8 +880,8 @@ fn start_window_move_win32(window: &mut gpui::Window) {
 mod tests {
     use super::*;
     use gpui::{
-        AppContext as _, Modifiers, Rgba, TestAppContext, VisualTestContext, linear_color_stop,
-        linear_gradient, point, px,
+        AppContext as _, FocusHandle, Modifiers, Rgba, TestAppContext, VisualTestContext,
+        linear_color_stop, linear_gradient, point, px,
     };
     use std::cell::Cell;
 
@@ -939,6 +948,60 @@ mod tests {
         let bar = point(button.left() - px(100.), button.center().y);
         cx.simulate_mouse_down(bar, MouseButton::Left, Modifiers::default());
         cx.update(|_, cx| assert!(crate::GlobalState::is_text_selection_suppressed(cx)));
+    }
+
+    /// A window whose root takes focus on a press, with the bar on top and
+    /// a focused list below — the shape of an app such as Elane.
+    struct FocusingRoot {
+        root: FocusHandle,
+        list: FocusHandle,
+    }
+
+    impl Render for FocusingRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .track_focus(&self.root)
+                .child(TitleBar::new().child(div().w(px(200.)).child("App")))
+                .child(div().size(px(100.)).track_focus(&self.list))
+        }
+    }
+
+    /// Fork: a press on the bar leaves focus where it was, as a native title
+    /// bar does. The bar used to let it through, and an app kept its focus by
+    /// preventing the default in the bar's empty space — which upstream's
+    /// "a control took the press" check (#3918) then read as a control, so
+    /// the bar no longer moved the window.
+    #[gpui::test]
+    fn a_press_on_the_bar_leaves_focus_where_it_was(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (root, list) = cx.update(|cx| (cx.focus_handle(), cx.focus_handle()));
+        let view = cx.new(|_| FocusingRoot {
+            root: root.clone(),
+            list: list.clone(),
+        });
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| crate::Root::new(view.clone(), window, cx))
+            })
+            .unwrap()
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            window.focus(&list, cx);
+            window.draw(cx).clear(cx);
+        });
+
+        cx.simulate_mouse_down(
+            point(px(300.), px(10.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+
+        cx.update(|window, _| {
+            assert!(list.is_focused(window), "the press on the bar moved focus");
+            assert!(!root.is_focused(window));
+        });
     }
 
     /// The test platform's `start_window_move` is `unimplemented!()`, so a
