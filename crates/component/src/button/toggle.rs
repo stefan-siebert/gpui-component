@@ -45,6 +45,8 @@ pub struct Toggle {
     border_corners: Corners<bool>,
     border_edges: Edges<bool>,
     children: SmallVec<[AnyElement; 1]>,
+    /// The first text label, kept as the toggle's accessible name.
+    label: Option<SharedString>,
     on_click: Option<Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>>,
     tooltip: ComponentTooltip,
 }
@@ -68,6 +70,7 @@ impl Toggle {
             },
             border_edges: Edges::all(true),
             children: smallvec![],
+            label: None,
             on_click: None,
             tooltip: ComponentTooltip::default(),
         }
@@ -90,6 +93,7 @@ impl Toggle {
     /// Add a label to the toggle.
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         let label: SharedString = label.into();
+        self.label.get_or_insert_with(|| label.clone());
         self.children.push(label.into_any_element());
         self
     }
@@ -196,8 +200,14 @@ impl RenderOnce for Toggle {
                 // Avoid focus on mouse down, as Button does.
                 this.on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             })
+            // Fork: named like a Button — by its visible label, else by its
+            // tooltip. A text child alone is not in the accessibility tree,
+            // so a toggle with a label and no tooltip was announced as
+            // "toggle button" and nothing else (Elane's F-key prefix chip).
             .when_some(
-                self.tooltip.text.as_ref().map(|(text, _)| text.clone()),
+                self.label
+                    .clone()
+                    .or_else(|| self.tooltip.text.as_ref().map(|(text, _)| text.clone())),
                 |this, label| this.accessibility_label(label),
             )
             .when_some(self.on_click, |this, on_click| {
@@ -828,6 +838,60 @@ mod tests {
     fn instance_style_remains_the_final_visual_override() {
         let toggle = Toggle::new("styled").checked(true).opacity(0.37);
         assert_eq!(toggle.style.opacity, Some(0.37));
+    }
+
+    struct NamedTogglesHarness;
+
+    impl Render for NamedTogglesHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            h_flex()
+                .size(px(300.))
+                .child(Toggle::new("labelled").label("Bold"))
+                .child(
+                    Toggle::new("both")
+                        .label("Italic")
+                        .tooltip("Slant the selection"),
+                )
+                .child(
+                    Toggle::new("icon-only")
+                        .icon(IconName::Check)
+                        .tooltip("Show checks"),
+                )
+        }
+    }
+
+    /// A toggle is named by its visible label first, its tooltip second —
+    /// the order a Button uses.
+    #[gpui::test]
+    fn a_toggle_is_named_by_its_label_then_its_tooltip(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(|_, _| NamedTogglesHarness);
+        cx.update(|window, _| window.set_a11y_force_active(true));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let Some(json) = cx.update(|window, _| window.debug_a11y_tree_json()) else {
+            panic!("no accessibility tree was built");
+        };
+        let tree: serde_json::Value = match serde_json::from_str(&json) {
+            Ok(tree) => tree,
+            Err(error) => panic!("the tree is not JSON ({error}): {json}"),
+        };
+        let mut names: Vec<Option<&str>> = tree
+            .get("nodes")
+            .and_then(|nodes| nodes.as_object())
+            .into_iter()
+            .flat_map(|nodes| nodes.values())
+            .filter(|node| {
+                node.pointer("/aria/role").and_then(|role| role.as_str()) == Some("Button")
+            })
+            .map(|node| node.pointer("/aria/label").and_then(|label| label.as_str()))
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [Some("Bold"), Some("Italic"), Some("Show checks")],
+            "{json}"
+        );
     }
 
     #[gpui::test]
