@@ -2754,6 +2754,12 @@ struct A11yNode {
     label: Option<String>,
     /// Rendered state, in the order a line should read it.
     state: Vec<String>,
+    /// Whether a list (`List`, `ListBox`) holds this node in the tree.
+    /// Read off the accessibility tree, not the element tree: a frame
+    /// that only declares a role has no hitbox, the inspector records no
+    /// element for it, and a list that is right for a screen reader would
+    /// look missing (Elane's Open With list, 2026-11-18).
+    inside_list: bool,
 }
 
 /// Every annotated element of the last frame, keyed by the id gpui derives
@@ -2814,16 +2820,58 @@ fn a11y_nodes(window_id: Option<&str>, cx: &mut App) -> A11yNodes {
     let Ok(tree) = serde_json::from_str::<serde_json::Value>(&json) else {
         return A11yNodes::new();
     };
+    a11y_nodes_of_tree(&tree)
+}
+
+/// [`a11y_nodes`] from the tree gpui wrote: nodes under `nodes`, keyed by a
+/// short name, each naming its `children` by those names.
+fn a11y_nodes_of_tree(tree: &serde_json::Value) -> A11yNodes {
     let Some(nodes) = tree.get("nodes").and_then(|nodes| nodes.as_object()) else {
         return A11yNodes::new();
     };
 
+    let mut parent_of: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for (key, node) in nodes {
+        let children = node
+            .get("children")
+            .and_then(|children| children.as_array());
+        for child in children.into_iter().flatten() {
+            if let Some(child) = child.as_str() {
+                parent_of.insert(child, key.as_str());
+            }
+        }
+    }
+    let is_list = |key: &str| {
+        let role = nodes
+            .get(key)
+            .and_then(|node| node.pointer("/aria/role"))
+            .and_then(|role| role.as_str());
+        matches!(role, Some("List" | "ListBox"))
+    };
+    let inside_list = |key: &str| {
+        let mut current = key;
+        // A tree has no cycles; the bound keeps a malformed one from
+        // hanging the audit.
+        for _ in 0..nodes.len() {
+            let Some(parent) = parent_of.get(current) else {
+                return false;
+            };
+            if is_list(parent) {
+                return true;
+            }
+            current = parent;
+        }
+        false
+    };
+
     nodes
-        .values()
-        .filter_map(|node| {
+        .iter()
+        .filter_map(|(key, node)| {
             let id: u64 = node.get("accesskit_id")?.as_str()?.parse().ok()?;
             let aria = node.get("aria")?;
-            Some((id, a11y_node_of(aria)))
+            let mut a11y = a11y_node_of(aria);
+            a11y.inside_list = inside_list(key);
+            Some((id, a11y))
         })
         .collect()
 }
@@ -2869,7 +2917,12 @@ fn a11y_node_of(aria: &serde_json::Value) -> A11yNode {
         state.push(format!("value=\"{}\"", truncate_chars(value, 40)));
     }
 
-    A11yNode { role, label, state }
+    A11yNode {
+        role,
+        label,
+        state,
+        inside_list: false,
+    }
 }
 /// One line of a snapshot.
 struct SnapshotNode {
@@ -2892,6 +2945,9 @@ struct SnapshotNode {
     /// same claim, and an agent deciding what to trust should be able to see
     /// which it got.
     announced: bool,
+    /// A list item with no list around it in the accessibility tree; see
+    /// [`audit_list_items`].
+    outside_list: bool,
     children: Vec<SnapshotNode>,
 }
 
@@ -2969,6 +3025,8 @@ fn snapshot_nodes_within(
                 bounds: element.bounds.clone(),
                 state: node.map(|node| node.state.clone()).unwrap_or_default(),
                 announced: node.is_some(),
+                outside_list: node
+                    .is_some_and(|node| node.role == Some("listitem") && !node.inside_list),
                 children,
             });
         } else {
@@ -3274,6 +3332,7 @@ fn handle_a11y_audit(
     let mut findings = audit_controls(&flat, min_target);
     findings.extend(audit_ids(&flat));
     findings.extend(audit_unstable_ids(&flat));
+    findings.extend(audit_list_items(&nodes));
 
     // Worst first: a list somebody reads from the top should start with what
     // matters.
@@ -3643,6 +3702,57 @@ fn audit_ids(nodes: &[&SnapshotNode]) -> Vec<Finding> {
             }
         })
         .collect()
+}
+
+/// List items with no list around them.
+///
+/// A screen reader announces a list item as "3 of 12" because of the list
+/// that holds it; without one it reads the row and no position, and its
+/// list navigation (VoiceOver's, NVDA's `L`) never finds it. It is the
+/// mistake a hand-built list makes once its rows declare `ListItem` and its
+/// scroll container declares nothing, and it is invisible in a snapshot
+/// read line by line.
+///
+/// Whether a list holds the item is read off the accessibility tree
+/// ([`A11yNode::inside_list`]) — so a scoped audit judges its top rows by
+/// what really encloses them, and a frame that declares `List` without a
+/// hitbox, which the element tree never records, still counts. Reported
+/// once per group of siblings: twelve rows in one container are one
+/// problem with one fix.
+fn audit_list_items(nodes: &[SnapshotNode]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    list_items_within(nodes, &mut findings);
+    findings
+}
+
+fn list_items_within(nodes: &[SnapshotNode], out: &mut Vec<Finding>) {
+    let orphans: Vec<&SnapshotNode> = nodes.iter().filter(|node| node.outside_list).collect();
+    if let Some(first) = orphans.first() {
+        let subject = if orphans.len() > 1 {
+            format!("These {} list items have", orphans.len())
+        } else {
+            "This list item has".to_string()
+        };
+        out.push(Finding {
+            severity: "serious",
+            check: "list-item-outside-list",
+            message: format!(
+                "{subject} no list around them, so a screen reader cannot say where in the \
+                 list a row is or how many there are, and its list navigation skips them. \
+                 Give the element that holds the rows `.role(Role::List)` — on a frame \
+                 around a `uniform_list`, which takes no role itself."
+            ),
+            role: first.role,
+            test_id: first.test_id.clone(),
+            element: shorten_element_id(&first.full_id),
+            source: first.source.clone(),
+            bounds: Some(first.bounds.clone()),
+        });
+    }
+
+    for node in nodes {
+        list_items_within(&node.children, out);
+    }
 }
 
 /// Ids that will name nothing tomorrow.
@@ -5017,7 +5127,65 @@ mod tests {
         let mut findings = audit_controls(&flat, min_target);
         findings.extend(audit_ids(&flat));
         findings.extend(audit_unstable_ids(&flat));
+        findings.extend(audit_list_items(&nodes));
         findings
+    }
+
+    /// Rows a screen reader is told are list items, with a list around them
+    /// and without: only the second is a finding, once for all its rows.
+    /// The list is a node of the accessibility tree only — like a frame
+    /// that declares `List` and has no hitbox, the element tree has no
+    /// line for it.
+    #[test]
+    fn list_items_need_a_list_around_them() {
+        let tree = json!({
+            "nodes": {
+                "list": { "accesskit_id": "90", "aria": { "role": "List" },
+                          "children": ["l0", "l1", "l2"] },
+                "l0": { "accesskit_id": "41", "aria": { "role": "ListItem" } },
+                "l1": { "accesskit_id": "42", "aria": { "role": "ListItem" } },
+                "l2": { "accesskit_id": "43", "aria": { "role": "ListItem" } },
+                "group": { "accesskit_id": "91", "aria": { "role": "Group" },
+                           "children": ["b0", "b1", "b2"] },
+                "b0": { "accesskit_id": "51", "aria": { "role": "ListItem" } },
+                "b1": { "accesskit_id": "52", "aria": { "role": "ListItem" } },
+                "b2": { "accesskit_id": "53", "aria": { "role": "ListItem" } },
+            }
+        });
+        let a11y = a11y_nodes_of_tree(&tree);
+        let rows = |prefix: &str, first_id: u64| -> Vec<UiElement> {
+            (0..3)
+                .map(|index| {
+                    let mut row = ui_element(
+                        &format!("W/{prefix}.row-{index}[0]"),
+                        None,
+                        &["row"],
+                        vec![],
+                    );
+                    row.accesskit_node_id = first_id + index;
+                    row
+                })
+                .collect()
+        };
+        let listed = ui_element("W/listed[0]", None, &[], rows("listed", 41));
+        let bare = ui_element("W/bare[0]", None, &[], rows("bare", 51));
+
+        let nodes = snapshot_nodes(&[listed, bare], false, &a11y);
+        let findings = audit_list_items(&nodes);
+        assert_eq!(findings.len(), 1, "{}", render(&nodes));
+        let finding = &findings[0];
+        assert_eq!(finding.check, "list-item-outside-list");
+        assert_eq!(finding.severity, "serious");
+        assert!(
+            finding.element.contains("bare.row-0"),
+            "{}",
+            finding.element
+        );
+        assert!(
+            finding.message.starts_with("These 3 list items"),
+            "{}",
+            finding.message
+        );
     }
 
     fn button(id: &str, text: &[&str]) -> UiElement {
