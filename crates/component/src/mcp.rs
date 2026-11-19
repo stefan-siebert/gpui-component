@@ -513,6 +513,9 @@ async fn dispatch(
     if method == methods::DRAG {
         return run_drag(params, with_state, cx).await;
     }
+    if method == methods::HOVER {
+        return run_hover(params, with_state, cx).await;
+    }
     if method == methods::SEND_KEY && params.get("repeat").is_some_and(|repeat| !repeat.is_null()) {
         return run_held_key(params, with_state, cx).await;
     }
@@ -549,6 +552,7 @@ fn is_input_method(method: &str) -> bool {
     matches!(
         method,
         methods::CLICK_ELEMENT
+            | methods::HOVER
             | methods::DRAG
             | methods::SCROLL
             | methods::SEND_KEY
@@ -586,7 +590,8 @@ fn dispatch_sync(
         | methods::BATCH
         | methods::A11Y_TREE
         | methods::SET_VIEWPORT
-        | methods::DRAG => Err(format!("{method} is answered asynchronously")),
+        | methods::DRAG
+        | methods::HOVER => Err(format!("{method} is answered asynchronously")),
         _ => Err(format!("Unknown method: {}", method)),
     }
 }
@@ -1700,6 +1705,97 @@ async fn run_drag(
         if let Some(text) = selected {
             obj.insert("selected_text".into(), json!(text));
         }
+    }
+
+    if !with_state {
+        return Ok(result);
+    }
+    Ok(cx.update(|cx| attach_post_state(result, window_id, settled, cx)))
+}
+
+/// Where a hover goes, and the element it resolved to.
+fn hover_target(
+    event: &HoverEvent,
+    cx: &mut App,
+) -> Result<(gpui::Point<Pixels>, Option<String>), String> {
+    let Some(element_id) = event.element_id.as_deref() else {
+        return Ok((point(px(event.x), px(event.y)), None));
+    };
+    let (bounds, clip, id) = resolve_element_painted(element_id, event.window_id.as_deref(), cx)?;
+    let middle = pointer_target(bounds, clip, &id)?;
+    let position = point(
+        event
+            .offset_x
+            .map_or(middle.x, |offset| bounds.origin.x + px(offset)),
+        event
+            .offset_y
+            .map_or(middle.y, |offset| bounds.origin.y + px(offset)),
+    );
+    Ok((position, Some(id)))
+}
+
+/// How long a hover stays before it is answered.
+fn hover_hold(event: &HoverEvent) -> Duration {
+    Duration::from_millis(event.hold_ms.unwrap_or(0).min(MAX_HOVER_HOLD_MS))
+}
+
+/// Move the mouse somewhere with no button down, and optionally leave it
+/// there.
+///
+/// Until 2026-11-19 the only way to get the mouse over something without
+/// clicking it was a `drag` ending there — a press and a release that were no
+/// part of the question, and that start a selection or a drag-and-drop on the
+/// way. A tooltip, a hover colour and a control that exists only under the
+/// mouse could be reached no other way.
+///
+/// The hold is the reason this is answered asynchronously: a tooltip is shown
+/// by a timer the hover starts, so the frame right after the move never has
+/// it. The wait is the app's own clock, not frames — nothing is painted while
+/// a mouse rests, and that is exactly the time being waited out.
+async fn run_hover(
+    params: &serde_json::Value,
+    with_state: bool,
+    cx: &AsyncApp,
+) -> Result<serde_json::Value, String> {
+    let event: HoverEvent = serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
+    let window_id = event.window_id.clone();
+    let window_id = window_id.as_deref();
+
+    let (position, resolved) = cx.update(|cx| hover_target(&event, cx))?;
+    let hold = hover_hold(&event);
+
+    cx.update(|cx| {
+        dispatch_mouse(
+            window_id,
+            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                position,
+                pressed_button: None,
+                modifiers: gpui_modifiers(event.modifiers),
+            }),
+            cx,
+        )
+    })?;
+    let mut settled = settle(window_id, cx).await;
+
+    if !hold.is_zero() {
+        cx.background_executor().timer(hold).await;
+        settled = settle(window_id, cx).await;
+    }
+
+    let (x, y) = (f32::from(position.x), f32::from(position.y));
+    mcp_log(format!(
+        "Hover at ({x}, {y}) held {} ms",
+        hold.as_millis()
+    ));
+
+    let mut result = json!({
+        "success": true,
+        "x": x,
+        "y": y,
+        "held_ms": hold.as_millis() as u64,
+    });
+    if let (Some(id), Some(obj)) = (resolved, result.as_object_mut()) {
+        obj.insert("resolved_element".into(), json!(id));
     }
 
     if !with_state {
@@ -3895,6 +3991,35 @@ fn flatten_onto(image: &mut image::RgbaImage, backdrop: gpui::Hsla) {
     }
 }
 
+/// The part of an image an element's crop takes: its bounds, widened by
+/// `padding` logical pixels on every side, in device pixels, kept inside the
+/// image.
+///
+/// The padding is for what belongs to an element without being painted inside
+/// it — a tooltip, an open menu, a focus ring. A crop to the bounds alone cut
+/// a tooltip off at the element's edge (2026-11-19), and the only other
+/// picture on offer was the whole window.
+fn crop_rect(
+    bounds: gpui::Bounds<Pixels>,
+    padding: f32,
+    scale_factor: f32,
+    (image_width, image_height): (u32, u32),
+) -> (u32, u32, u32, u32) {
+    let padding = padding.max(0.);
+    let device = |logical: f32| (logical * scale_factor).round().max(0.) as u32;
+    let left = device(f32::from(bounds.origin.x) - padding).min(image_width.saturating_sub(1));
+    let top = device(f32::from(bounds.origin.y) - padding).min(image_height.saturating_sub(1));
+    let right = device(f32::from(bounds.origin.x + bounds.size.width) + padding).min(image_width);
+    let bottom =
+        device(f32::from(bounds.origin.y + bounds.size.height) + padding).min(image_height);
+    (
+        left,
+        top,
+        right.saturating_sub(left),
+        bottom.saturating_sub(top),
+    )
+}
+
 fn handle_take_screenshot(
     params: &serde_json::Value,
     cx: &mut App,
@@ -3940,17 +4065,12 @@ fn handle_take_screenshot(
             }
         };
 
-        // Convert logical bounds to device pixels for cropping
-        let x = (f32::from(elem_bounds.origin.x) * scale_factor).round() as u32;
-        let y = (f32::from(elem_bounds.origin.y) * scale_factor).round() as u32;
-        let w = (f32::from(elem_bounds.size.width) * scale_factor).round() as u32;
-        let h = (f32::from(elem_bounds.size.height) * scale_factor).round() as u32;
-
-        let (img_w, img_h) = image.dimensions();
-        let x = x.min(img_w.saturating_sub(1));
-        let y = y.min(img_h.saturating_sub(1));
-        let w = w.min(img_w.saturating_sub(x));
-        let h = h.min(img_h.saturating_sub(y));
+        let (x, y, w, h) = crop_rect(
+            elem_bounds,
+            opts.padding.unwrap_or(0.),
+            scale_factor,
+            image.dimensions(),
+        );
 
         use image::GenericImageView;
         let cropped = image.view(x, y, w, h).to_image();
@@ -5532,6 +5652,48 @@ mod tests {
                 .is_err_and(|error| error.contains("page-network")
                     && error.contains("outside the visible area")),
             "{gone:?}"
+        );
+    }
+
+    /// An element's crop is its bounds in device pixels; `padding` widens it
+    /// for what is painted outside — a tooltip was cut off at the element's
+    /// edge — and the window's edge is where it ends.
+    #[test]
+    fn a_crop_is_widened_by_its_padding_and_stays_in_the_image() {
+        let element = gpui::Bounds {
+            origin: point(px(100.), px(40.)),
+            size: gpui::size(px(60.), px(20.)),
+        };
+        let image = (1280, 800);
+
+        assert_eq!(crop_rect(element, 0., 1., image), (100, 40, 60, 20));
+        assert_eq!(crop_rect(element, 10., 1., image), (90, 30, 80, 40));
+        // Device pixels: the same window at 150 %.
+        assert_eq!(
+            crop_rect(element, 10., 1.5, (1920, 1200)),
+            (135, 45, 120, 60)
+        );
+        // More padding than there is window: the whole image, no further.
+        assert_eq!(crop_rect(element, 5000., 1., image), (0, 0, 1280, 800));
+        // A negative padding is none, not a smaller crop.
+        assert_eq!(crop_rect(element, -8., 1., image), (100, 40, 60, 20));
+    }
+
+    /// A hover answers at once unless asked to stay, and does not stay
+    /// longer than the cap whatever it is asked.
+    #[test]
+    fn a_hover_holds_as_long_as_asked_up_to_the_cap() {
+        let held = |hold_ms| {
+            hover_hold(&HoverEvent {
+                hold_ms,
+                ..Default::default()
+            })
+        };
+        assert_eq!(held(None), Duration::ZERO);
+        assert_eq!(held(Some(600)), Duration::from_millis(600));
+        assert_eq!(
+            held(Some(u64::MAX)),
+            Duration::from_millis(MAX_HOVER_HOLD_MS)
         );
     }
 

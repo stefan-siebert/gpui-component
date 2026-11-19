@@ -26,9 +26,17 @@ pub struct Tooltip {
 
 impl Tooltip {
     pub fn new(id: impl Into<ElementId>) -> Self {
-        Self {
-            base: div().id(id).role(Role::Tooltip),
-        }
+        let base = div().id(id).role(Role::Tooltip);
+        // An element is in the inspector's list by its hitbox, and a tooltip
+        // has none — nothing in it takes the mouse. So what a tooltip said
+        // could be seen on a screenshot and not read: no snapshot line, no
+        // text for `wait_for` to find (2026-11-19). A listener that does
+        // nothing gives it a hitbox of the ordinary kind, which neither
+        // takes the mouse from what is under it nor occludes it; builds
+        // without the inspector keep the tooltip as it was.
+        #[cfg(feature = "inspector")]
+        let base = base.on_mouse_move(|_, _, _| {});
+        Self { base }
     }
 }
 
