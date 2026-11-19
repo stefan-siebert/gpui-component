@@ -36,6 +36,8 @@ pub struct HoverCard {
     close_delay: Duration,
     appearance: bool,
     content_offset: Point<Pixels>,
+    interactive: bool,
+    click_through: bool,
     on_open_change: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
 }
 
@@ -54,8 +56,32 @@ impl HoverCard {
             close_delay: Duration::from_secs_f64(0.3),
             appearance: true,
             content_offset: Point::default(),
+            interactive: true,
+            click_through: false,
             on_open_change: None,
         }
+    }
+
+    /// Set whether the card gives away every press its controls do not
+    /// claim, default `false`.
+    ///
+    /// For a card that lies over things the user still wants to reach: it
+    /// stays open under the mouse, a control inside takes its press (it
+    /// stops the press from propagating, without occluding the mouse), and
+    /// any other press closes the card and is handed on to what it covered.
+    pub fn click_through(mut self, click_through: bool) -> Self {
+        self.click_through = click_through;
+        self
+    }
+
+    /// Set whether the card itself can be hovered and clicked, default `true`.
+    ///
+    /// A card that only shows something — a picture — sets this to `false`:
+    /// it is open exactly as long as the trigger is hovered, and the mouse
+    /// goes through it to what it covers.
+    pub fn interactive(mut self, interactive: bool) -> Self {
+        self.interactive = interactive;
+        self
     }
 
     /// Set the anchor corner of the hover card, default is [`Anchor::TopCenter`].
@@ -157,15 +183,19 @@ impl RenderOnce for HoverCard {
         let children = self.children;
         let style = self.style;
         let trigger_style = self.trigger_style;
+        let interactive = self.interactive;
+        let click_through = self.click_through;
 
         BaseHoverCard::new(self.id)
             .anchor(anchor)
             .open_delay(self.open_delay)
             .close_delay(self.close_delay)
             .content_offset(self.content_offset)
+            .interactive(interactive)
+            .click_through(click_through)
             .trigger((trigger)(window, cx))
             .content(move |state, window, cx| {
-                Popover::render_popover_content(anchor, appearance, window, cx)
+                Popover::render_popover_content(anchor, appearance, interactive, window, cx)
                     .overflow_hidden()
                     .when_some(content, |this, content| {
                         this.child((content)(state, window, cx))

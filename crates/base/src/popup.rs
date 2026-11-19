@@ -36,6 +36,7 @@ pub struct Popup {
     trigger: AnyElement,
     content: Option<AnyElement>,
     content_offset: Point<Pixels>,
+    mouse_transparent: bool,
 }
 
 impl Popup {
@@ -51,7 +52,18 @@ impl Popup {
             trigger: trigger.into_any_element(),
             content: None,
             content_offset: Point::default(),
+            mouse_transparent: false,
         }
+    }
+
+    /// Let the mouse through the popup to what it covers, default `false`.
+    ///
+    /// For a popup that only shows something — a picture next to a list row.
+    /// Such a popup has nothing to click, and blocking the mouse would take
+    /// the rows under it out of reach for as long as it is open.
+    pub fn mouse_transparent(mut self, mouse_transparent: bool) -> Self {
+        self.mouse_transparent = mouse_transparent;
+        self
     }
 
     pub fn anchor(mut self, anchor: impl Into<Anchor>) -> Self {
@@ -222,15 +234,16 @@ impl RenderOnce for Popup {
         } else {
             positioner
         };
+        let positioner = positioner.margin(WINDOW_MARGIN);
+        // The host blocks the mouse, so no caller has to remember: what a
+        // popup covers belongs to the popup — unless it asked not to.
+        let positioner = if self.mouse_transparent {
+            positioner
+        } else {
+            positioner.occlude()
+        };
         root.child(
-            deferred(
-                positioner
-                    .margin(WINDOW_MARGIN)
-                    // The host blocks the mouse, so no caller has to remember:
-                    // what a popup covers belongs to the popup.
-                    .occlude()
-                    .child(content),
-            )
+            deferred(positioner.child(content))
             .with_priority(POPUP_PRIORITY),
         )
     }

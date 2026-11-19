@@ -298,12 +298,13 @@ impl Popover {
     pub(crate) fn render_popover_content(
         anchor: Anchor,
         appearance: bool,
+        occlude: bool,
         _: &mut Window,
         cx: &mut App,
     ) -> Stateful<Div> {
         v_flex()
             .id("content")
-            .occlude()
+            .when(occlude, |this| this.occlude())
             .tab_group()
             .when(appearance, |this| this.popover_style(cx).p_3())
             .map(|this| match anchor {
