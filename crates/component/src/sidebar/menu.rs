@@ -486,11 +486,12 @@ impl SidebarItem for SidebarMenuItem {
                     .rounded(cx.theme().radius)
                     .text_sm()
                     .refine_style(&self.style)
+                    // The fill every list row hovers with. The sidebar's own
+                    // accent at 80 % was nearly the active item's fill — in a
+                    // dark theme a heavy block that followed the pointer, and
+                    // hard to tell from the item one is on.
                     .when(is_hoverable, |this| {
-                        this.hover(|this| {
-                            this.bg(cx.theme().sidebar_accent.opacity(0.8))
-                                .text_color(cx.theme().sidebar_accent_foreground)
-                        })
+                        this.hover(|this| this.bg(crate::list::row_hover_background(cx)))
                     })
                     .when(is_active, |this| {
                         this.font_medium()
