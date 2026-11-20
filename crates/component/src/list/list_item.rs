@@ -52,6 +52,8 @@ pub struct ListItem {
     disabled: bool,
     selected: bool,
     secondary_selected: bool,
+    selection_muted: bool,
+    outlined: bool,
     confirmed: bool,
     check_icon: Option<Icon>,
     on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
@@ -73,6 +75,8 @@ impl ListItem {
             disabled: false,
             selected: false,
             secondary_selected: false,
+            selection_muted: false,
+            outlined: false,
             confirmed: false,
             on_click: None,
             on_mouse_down: HashMap::new(),
@@ -99,6 +103,23 @@ impl ListItem {
     /// Set ListItem as the selected item style.
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Draw the selected item's border at half strength while the keyboard
+    /// works in another list or view, so that one strong cursor stands on
+    /// screen, where the keys go — as [`crate::table::TableState::set_selection_muted`]
+    /// does for a table's row.
+    pub fn selection_muted(mut self, muted: bool) -> Self {
+        self.selection_muted = muted;
+        self
+    }
+
+    /// Frame an item that is not selected with the selected item's border,
+    /// without its fill: where the keyboard is in a list that has the focus
+    /// but no selection yet. A selected item is drawn as selected regardless.
+    pub fn outlined(mut self, outlined: bool) -> Self {
+        self.outlined = outlined;
         self
     }
 
@@ -288,13 +309,28 @@ impl RenderOnce for ListItem {
                             .absolute()
                             .inset_0()
                             .border_1()
-                            .border_color(cx.theme().list_active_border)
+                            .border_color(if self.selection_muted {
+                                cx.theme().list_active_border.opacity(0.5)
+                            } else {
+                                cx.theme().list_active_border
+                            })
                             .refine_style(&outline_style),
                     )
                 } else {
                     this.bg(cx.theme().accent)
                         .text_color(cx.theme().accent_foreground)
                 }
+            })
+            .when(is_selectable && self.outlined && !self.selected, |this| {
+                this.child(
+                    div()
+                        .when(cfg!(test), |this| this.debug_selector(|| "outlined".into()))
+                        .absolute()
+                        .inset_0()
+                        .border_1()
+                        .border_color(cx.theme().list_active_border)
+                        .refine_style(&outline_style),
+                )
             })
             .when(is_selectable && self.secondary_selected, |this| {
                 this.child(
@@ -333,6 +369,36 @@ mod tests {
             let light: gpui::Background = cx.theme().tokens.list_hover.into();
             assert_eq!(row_hover_background(cx), light);
         });
+    }
+
+    struct Items {
+        selected: bool,
+    }
+
+    impl Render for Items {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(gpui::px(200.)).child(
+                ListItem::new("item")
+                    .selected(self.selected)
+                    .outlined(true)
+                    .child("item"),
+            )
+        }
+    }
+
+    /// An outlined item is framed; once selected, it is drawn as selected.
+    #[gpui::test]
+    fn an_outlined_item_is_framed_until_it_is_selected(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::init);
+        let (view, cx) = cx.add_window_view(|_, _| Items { selected: false });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("outlined").is_some());
+        view.update(cx, |view, cx| {
+            view.selected = true;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("outlined").is_none());
     }
 
     #[gpui::test]

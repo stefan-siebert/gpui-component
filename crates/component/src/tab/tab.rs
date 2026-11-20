@@ -580,6 +580,9 @@ pub struct Tab {
     /// there rather than in a hover group, which would replace the caller's.
     pub(super) hovered: bool,
     pub(super) max_width: Option<Pixels>,
+    /// Draw the keyboard-focus ring without the focus: see
+    /// [`Tab::focus_ring_shown`].
+    focus_ring_shown: bool,
     pub(super) on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
 }
 
@@ -635,6 +638,7 @@ impl Default for Tab {
             variant: TabVariant::default(),
             size: Size::default(),
             max_width: None,
+            focus_ring_shown: false,
             on_click: None,
         }
     }
@@ -719,6 +723,16 @@ impl Tab {
     /// Set disabled state to the tab, default false.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Draw the ring keyboard focus gives a tab, while the focus itself is
+    /// held elsewhere: for a host that keeps the real focus and moves a
+    /// visual one over its controls (a dialog that routes every key
+    /// itself). A ring on a wrapper would be clipped by the bar; this is the
+    /// tab's own, drawn inside it.
+    pub fn focus_ring_shown(mut self, shown: bool) -> Self {
+        self.focus_ring_shown = shown;
         self
     }
 
@@ -982,14 +996,9 @@ impl RenderOnce for Tab {
             // Keyboard focus (the tab list roves it with the arrow keys) gets
             // the theme ring. An inset shadow draws it inside the tab, so the
             // bar neither shifts nor clips it as focus moves.
-            .focus_visible(|style| {
-                style.shadow(vec![gpui::BoxShadow {
-                    color: ring,
-                    offset: point(px(0.), px(0.)),
-                    blur_radius: px(0.),
-                    spread_radius: px(2.),
-                    inset: true,
-                }])
+            .focus_visible(|style| style.shadow(focus_ring_shadow(ring)))
+            .when(self.focus_ring_shown, |this| {
+                this.shadow(focus_ring_shadow(ring))
             })
             .relative()
             // Prefix, label and suffix read from the start edge.
@@ -1115,6 +1124,18 @@ impl RenderOnce for Tab {
                 this.on_click(move |event, window, cx| on_click(event, window, cx))
             })
     }
+}
+
+/// The tab's keyboard-focus ring: an inset shadow, so that the bar neither
+/// shifts nor clips it as focus moves.
+fn focus_ring_shadow(ring: gpui::Hsla) -> Vec<gpui::BoxShadow> {
+    vec![gpui::BoxShadow {
+        color: ring,
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(2.),
+        inset: true,
+    }]
 }
 
 #[cfg(test)]

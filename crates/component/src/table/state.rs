@@ -230,6 +230,9 @@ pub struct TableState<D: TableDelegate> {
     /// The selected row's border at half strength: see
     /// [`TableState::set_selection_muted`].
     selection_muted: bool,
+    /// A row framed without being selected: see
+    /// [`TableState::set_outlined_row`].
+    outlined_row: Option<usize>,
     delegate: D,
     pub(super) options: TableOptions,
     /// The bounds of the table container.
@@ -350,6 +353,7 @@ where
         let mut this = Self {
             focus_handle: cx.focus_handle().tab_stop(true),
             selection_muted: false,
+            outlined_row: None,
             options: TableOptions::default(),
             delegate,
             col_groups: Vec::new(),
@@ -627,6 +631,24 @@ where
     /// Whether the selected row is drawn muted.
     pub fn selection_muted(&self) -> bool {
         self.selection_muted
+    }
+
+    /// Frame row `row` with the selected row's border, without its fill and
+    /// without selecting it: where the keyboard is in a table that has the
+    /// focus but no selection yet, so that the first key does not have to
+    /// be pressed blind. A selected row is drawn as selected regardless.
+    /// The owner decides which row, and clears it once something is
+    /// selected or the table loses the keyboard.
+    pub fn set_outlined_row(&mut self, row: Option<usize>, cx: &mut Context<Self>) {
+        if self.outlined_row != row {
+            self.outlined_row = row;
+            cx.notify();
+        }
+    }
+
+    /// The row framed by [`TableState::set_outlined_row`].
+    pub fn outlined_row(&self) -> Option<usize> {
+        self.outlined_row
     }
 
     /// Sets the selected row to the given index.
@@ -3153,6 +3175,26 @@ where
                         }
                     })
                 })
+                // The keyboard's row in a table without a selection: the
+                // selected row's frame, clamped at the viewport's edges the
+                // same way, and no fill.
+                .when(!is_selected && self.outlined_row == Some(row_ix), |this| {
+                    let is_first_visible = row_ix <= self.visible_range.rows.start;
+                    let is_last_visible = row_ix + 1 >= self.visible_range.rows.end;
+                    this.child(
+                        div()
+                            .when(cfg!(test), |this| {
+                                this.debug_selector(move || format!("outlined-row-{row_ix}"))
+                            })
+                            .top(if is_first_visible { px(0.) } else { px(-1.) })
+                            .left(px(0.))
+                            .right(px(0.))
+                            .bottom(if is_last_visible { px(0.) } else { px(-1.) })
+                            .absolute()
+                            .border_1()
+                            .border_color(cx.theme().table_active_border),
+                    )
+                })
                 // Row right click row style
                 .when(self.right_clicked_row == Some(row_ix), |this| {
                     let is_first_visible = row_ix <= self.visible_range.rows.start;
@@ -3870,6 +3912,27 @@ mod tests {
                 .offset()
                 .y)
                 > end
+        );
+    }
+
+    /// The outlined row is framed while nothing is selected, and gives way
+    /// to the selection once its row, or another, is selected.
+    #[gpui::test]
+    fn an_outlined_row_is_framed_until_a_row_is_selected(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            BounceTable(cx.new(|cx| TableState::new(BounceDelegate, window, cx)))
+        });
+        let state = view.read_with(cx, |view, _| view.0.clone());
+        state.update(cx, |state, cx| state.set_outlined_row(Some(1), cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("outlined-row-1").is_some(), "framed");
+        assert!(cx.debug_bounds("outlined-row-0").is_none(), "only that row");
+        state.update(cx, |state, cx| state.set_selected_row(1, cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            cx.debug_bounds("outlined-row-1").is_none(),
+            "a selected row is drawn as selected"
         );
     }
 
