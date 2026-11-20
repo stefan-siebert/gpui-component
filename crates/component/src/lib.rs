@@ -75,6 +75,7 @@ pub mod radio;
 pub mod rating;
 pub mod resizable;
 pub mod scroll;
+pub mod selectable_lines;
 pub mod searchable_list;
 pub mod select;
 pub mod separator;

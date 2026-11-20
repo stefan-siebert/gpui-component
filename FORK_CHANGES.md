@@ -293,6 +293,10 @@ Elane: `src/ui/components/breadcrumb.rs` (`CollapsibleBreadcrumb`). Tests: 14 (`
 
 | Area / file | Commit | Change | Elane use | Tests |
 |---|---|---|---|---|
+| Table cursor marks `table/state.rs` | (2026-11-20) | `TableState::set_outlined_row(Option<usize>)`: a row framed with the selected row's border, no fill, not selected — where the keyboard is in a focused table without a selection. | `plugin_dialog/views.rs` (`sync_view_cursors`) | `an_outlined_row_is_framed_until_a_row_is_selected` |
+| List item marks `list/list_item.rs` | (2026-11-20) | `ListItem::selection_muted(bool)` (the selected border at half strength, as the table's) and `ListItem::outlined(bool)` (the border without the fill on an item not selected). | `plugin_dialog/renderer.rs` (plugin lists) | `an_outlined_item_is_framed_until_it_is_selected` |
+| Tab focus ring on request `tab/tab.rs` | (2026-11-20) | `Tab::focus_ring_shown(bool)`: the tab's own keyboard ring (inset shadow) for a host that keeps the real focus itself; a ring on a wrapper is clipped by the bar. | `plugin_dialog/views.rs` (`render_tabs`) | — (visual; checked live) |
+| Selectable lines `selectable_lines.rs` (new), `diff/selection.rs` | (2026-11-20) | Character selection and a caret over a virtualized list of lines: one window-selection participant per list, content keys (line, byte), copy from the lines whatever rows are painted; `move_caret(CaretMotion, extend)` with a selection of the participant's own (as the diff viewer's line selection), a press puts the caret. The diff viewer's bridge without the diff; its `selection` module is `pub(crate)` now and `line_distance`/`word_range` are shared. | `plugin_dialog/views.rs` (code views) | `a_drag_selects_characters_across_lines`, `the_copy_does_not_depend_on_the_painted_rows`, `the_caret_moves_by_characters_words_lines_and_ends`, `the_keyboard_selects_from_the_caret`, `the_mouse_places_the_caret_and_shift_extends_its_selection` |
 | Checkbox tri-state `checkbox.rs` | `3e2d5b55`, `167ae344` | `Checkbox::state(CheckboxState)`, `indeterminate(bool)`, `pub use gpui_base::CheckboxState`; dash mark cross-fades with the check; label has no own `line_height` (descenders were clipped). | `change_attributes_dialog.rs` | `indeterminate_is_a_third_value_checked_does_not_reach` |
 | Popup menu `menu/popup_menu.rs`, `menu/mod.rs` | `0c108eca` | `MenuIcon { Vector(Icon), Raster(Arc<RenderImage>) }` in every icon slot (`impl Into<MenuIcon>`); raster sized like an xsmall icon. Also `space`→Confirm, `tab`/`shift-tab`→Cancel in `PopupMenu` (`1ea89009`, settings keyboard work). | `services/shell_menu/submenu.rs` (`MenuIcon::Raster`) | `button_icon.rs` test adjusted (`5a9f2632`) |
 | App menu bar `menu/app_menu_bar.rs` | `7762cc1a` | `set_selected_index` and `has_activated_menu` public (☰-collapsed bar, F10). | `main_window/titlebar.rs`, `help_window.rs`, `shell_menu_palette.rs` | — |
@@ -373,7 +377,8 @@ Confirmed by grep in Elane `src/` and `crates/` (2026-10-21):
 | `TableEvent::RowClick`, `Column::{flex_grow, header_colspan}`, `TableDelegate::{visible_rows_rendered, has_context_menu}` | `file_panel.rs`, `file_table.rs`, `file_table/cells.rs` |
 | `ResizablePanelGroup::snap_to`, `ResizableState::is_resizing` | `panel_splitter.rs` |
 | `HoverCard::content_offset` | `file_table/cells.rs` |
-| `SelectableText`, `TextSelection`, `TextSelectionHandle` re-exports | `preview_window/info_box.rs`, `hex.rs` |
+| `SelectableText`, `TextSelection`, `TextSelectionHandle` re-exports | `preview_window/info_box.rs`, `hex.rs`, `plugin_dialog` |
+| `TableState::set_outlined_row`, `ListItem::{selection_muted, outlined}`, `Tab::focus_ring_shown`, `selectable_lines::{LinesSelection, LineSource, LinePoint, CaretMotion}` | `plugin_dialog/{views,renderer}.rs` |
 | `TextView::image_source` | `help_window.rs` |
 | `CommandItem::{description, key_context}`, `Command::dispatch_actions` | `command_palette.rs` |
 | Behavioural: single-line Up/Down propagate; settings keyboard nav; table auto-width/colspan; resizable proportional rescale | file panels, dialogs, settings, splitter |

@@ -122,7 +122,7 @@ impl SelectionGeometry {
 
 /// Prefer the half-open line band before proximity. Multi-click endpoints are
 /// positioned at the line top, shared with the preceding line's bottom.
-pub(super) fn line_distance(point: Point<Pixels>, bounds: Bounds<Pixels>) -> (bool, u32) {
+pub(crate) fn line_distance(point: Point<Pixels>, bounds: Bounds<Pixels>) -> (bool, u32) {
     let outside = point.y < bounds.top() || point.y >= bounds.bottom();
     let distance: f32 = (point.y - bounds.center().y).abs().into();
     (outside, distance.to_bits())
@@ -136,7 +136,7 @@ pub(super) fn clip_highlight(range: Range<usize>, chunk: &Range<usize>) -> Optio
 
 /// Match Base's bounded native word selection across rendering chunks.
 /// Classification and the 128-character flank bound follow text_boundary.rs.
-pub(super) fn word_range(text: &str, mut offset: usize) -> Option<Range<usize>> {
+pub(crate) fn word_range(text: &str, mut offset: usize) -> Option<Range<usize>> {
     offset = offset.min(text.len());
     while !text.is_char_boundary(offset) {
         offset -= 1;

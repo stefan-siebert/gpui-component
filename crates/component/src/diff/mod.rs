@@ -8,7 +8,7 @@ mod parser;
 #[cfg(test)]
 mod parser_tests;
 mod presentation;
-mod selection;
+pub(crate) mod selection;
 mod state;
 
 pub use conflict::{DiffConflict, DiffConflictResolution};
