@@ -68,6 +68,11 @@ impl HoverCard {
     ///
     /// The card still blocks the mouse while it is open, so nothing under it
     /// shows a hover colour or a tooltip through it.
+    ///
+    /// The keyboard stays where it was: a press on a control of such a card
+    /// does not move the focus into it. The card is gone the moment the
+    /// mouse leaves, and a focus inside it would go with it and leave the
+    /// window without one.
     pub fn click_through(mut self, click_through: bool) -> Self {
         self.click_through = click_through;
         self
@@ -153,6 +158,11 @@ pub struct HoverCardState {
     epoch: usize,
     is_hovering_trigger: bool,
     is_hovering_content: bool,
+    /// A press that began on the card and has not been released: something
+    /// on it is being dragged, a slider's thumb say. gpui reports no hover
+    /// while a drag is under way, and without this the card closed under
+    /// the drag once its delay had run out.
+    pressed: bool,
     /// The release of a press a click-through card handed on, when it came
     /// before the press could be handed on.
     handed_on_release: Rc<RefCell<Option<gpui::MouseUpEvent>>>,
@@ -170,6 +180,7 @@ impl HoverCardState {
             epoch: 0,
             is_hovering_trigger: false,
             is_hovering_content: false,
+            pressed: false,
             handed_on_release: Rc::default(),
         }
     }
@@ -181,7 +192,8 @@ impl HoverCardState {
     /// Close the card now — for a control inside it that has done its work.
     pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_tasks();
-        // The content goes with the card and cannot report the mouse leaving.
+        // The content goes with the card and cannot report the mouse leaving,
+        // nor the release of a press on it.
         self.is_hovering_content = false;
         self.set_open(false, window, cx);
     }
@@ -243,6 +255,10 @@ impl HoverCardState {
         }
 
         self.open = open;
+        if !open {
+            // A closed card has no content to report the release.
+            self.pressed = false;
+        }
         cx.notify();
         // The change is announced from here rather than from the element,
         // because the delay timers outlive the `HoverCard` that carried the
@@ -264,6 +280,28 @@ impl HoverCardState {
     fn on_content_hover(&mut self, hovering: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.is_hovering_content = hovering;
         if hovering {
+            self.cancel_tasks();
+        } else if !self.is_hovering_trigger && !self.pressed {
+            self.schedule_close(window, cx);
+        }
+    }
+
+    /// The left button went down on the card.
+    fn on_content_press(&mut self) {
+        self.pressed = true;
+        // A close already on its way must not land under the press.
+        self.cancel_tasks();
+    }
+
+    /// The press that began on the card ended, on it (`inside`) or elsewhere.
+    /// Where the mouse is now is what the release says: no hover was
+    /// reported while the button was down if something was dragged.
+    fn on_content_release(&mut self, inside: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.pressed) {
+            return;
+        }
+        self.is_hovering_content = inside;
+        if inside {
             self.cancel_tasks();
         } else if !self.is_hovering_trigger {
             self.schedule_close(window, cx);
@@ -359,14 +397,51 @@ impl RenderOnce for HoverCard {
                     state.handed_on_release.replace(Some(event.clone()));
                 },
             );
+            let press = window.listener_for(
+                &state,
+                |state: &mut HoverCardState, event: &gpui::MouseDownEvent, _, _| {
+                    if event.button == gpui::MouseButton::Left {
+                        state.on_content_press();
+                    }
+                },
+            );
+            let release_inside = window.listener_for(
+                &state,
+                |state: &mut HoverCardState, event: &gpui::MouseUpEvent, window, cx| {
+                    if event.button == gpui::MouseButton::Left {
+                        state.on_content_release(true, window, cx);
+                    }
+                },
+            );
+            let release_outside = window.listener_for(
+                &state,
+                |state: &mut HoverCardState, _: &gpui::MouseUpEvent, window, cx| {
+                    state.on_content_release(false, window, cx);
+                },
+            );
             popup.content(state.update(cx, |state, cx| {
                 content(state, window, cx)
                     .when(self.tap_to_open, |content| {
                         content.on_mouse_up_out(gpui::MouseButton::Left, dismiss)
                     })
                     .when(!self.tap_to_open && self.interactive, |content| {
-                        content.on_hover(hover)
+                        // Capture phase, all three: a control inside may stop
+                        // the press or its release, and the card still has
+                        // to know of them.
+                        content
+                            .on_hover(hover)
+                            .capture_any_mouse_down(press)
+                            .capture_any_mouse_up(release_inside)
+                            .on_mouse_up_out(gpui::MouseButton::Left, release_outside)
                     })
+                    .when(
+                        !self.tap_to_open && self.interactive && self.click_through,
+                        |content| {
+                            // Before any control inside sees the press: a
+                            // focusable one would take the focus with it.
+                            content.capture_any_mouse_down(|_, window, _| window.prevent_default())
+                        },
+                    )
                     .when(
                         !self.tap_to_open && self.interactive && self.click_through,
                         |content| {
@@ -398,6 +473,9 @@ mod tests {
         click_through: bool,
         clicks_below: Rc<Cell<usize>>,
         clicks_on_control: Rc<Cell<usize>>,
+        /// Focus of the window around the card, and of the card's control.
+        focus_around: Option<gpui::FocusHandle>,
+        focus_of_control: Option<gpui::FocusHandle>,
     }
 
     impl Render for Harness {
@@ -406,10 +484,14 @@ mod tests {
             let open_changes = self.open_changes.clone();
             let clicks_below = self.clicks_below.clone();
             let clicks_on_control = self.clicks_on_control.clone();
+            let focus_of_control = self.focus_of_control.clone();
             // The card hangs below its trigger, over a strip that counts the
             // clicks it gets.
             div()
                 .size_full()
+                .when_some(self.focus_around.clone(), |this, focus| {
+                    this.track_focus(&focus)
+                })
                 .child(
                     div()
                         .id("below")
@@ -453,6 +535,14 @@ mod tests {
                                         })
                                         .on_click(move |_, _, _| {
                                             clicks_on_control.set(clicks_on_control.get() + 1)
+                                        })
+                                        // Something focusable inside the
+                                        // control, as a slider is inside a
+                                        // strip that claims the press: it
+                                        // sees the press before the control
+                                        // stops it.
+                                        .when_some(focus_of_control, |this, focus| {
+                                            this.child(div().size_full().track_focus(&focus))
                                         }),
                                 )
                         }),
@@ -541,6 +631,86 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert_eq!((clicks_on_control.get(), clicks_below.get()), (1, 1));
         assert!(cx.debug_bounds("hover-card-content").is_none());
+    }
+
+    /// A press that began on the card holds it open until it is released: a
+    /// thumb dragged off the card must not lose the card under it. Released
+    /// outside, the card closes after its delay; released on it, it stays.
+    #[gpui::test]
+    fn a_press_on_the_card_holds_it_open_until_it_is_released(cx: &mut TestAppContext) {
+        let delay = Duration::from_millis(100);
+        let (_, cx) = cx.add_window_view(move |_, _| Harness {
+            click_through: true,
+            ..Default::default()
+        });
+        open_card(delay, cx);
+        let on_control = cx.debug_bounds("hover-card-control").unwrap().center();
+        let far_away = point(px(100.), px(100.));
+        let still_open_after_the_delay = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(delay * 3);
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.debug_bounds("hover-card-content").is_some()
+        };
+        cx.simulate_mouse_move(on_control, None, Default::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        // Pressed on the control, dragged off the card: it stays.
+        cx.simulate_mouse_down(on_control, gpui::MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(far_away, gpui::MouseButton::Left, Default::default());
+        assert!(still_open_after_the_delay(cx));
+
+        // Back on the card and released there: it stays.
+        cx.simulate_mouse_move(on_control, gpui::MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(on_control, gpui::MouseButton::Left, Default::default());
+        assert!(still_open_after_the_delay(cx));
+
+        // Dragged off again and released out there: it closes.
+        cx.simulate_mouse_down(on_control, gpui::MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(far_away, gpui::MouseButton::Left, Default::default());
+        assert!(still_open_after_the_delay(cx));
+        cx.simulate_mouse_up(far_away, gpui::MouseButton::Left, Default::default());
+        assert!(!still_open_after_the_delay(cx));
+    }
+
+    /// A press on a focusable control moves the focus into an ordinary card,
+    /// and leaves it where it was with a click-through one — which closes
+    /// the moment the mouse leaves, and would take the focus with it.
+    #[gpui::test]
+    fn a_click_through_card_leaves_the_focus_where_it_was(cx: &mut TestAppContext) {
+        for click_through in [false, true] {
+            let delay = Duration::from_millis(100);
+            let (view, cx) = cx.add_window_view(move |_, cx| Harness {
+                click_through,
+                focus_around: Some(cx.focus_handle()),
+                focus_of_control: Some(cx.focus_handle()),
+                ..Default::default()
+            });
+            let (around, of_control) = view.read_with(cx, |harness, _| {
+                (
+                    harness.focus_around.clone().unwrap(),
+                    harness.focus_of_control.clone().unwrap(),
+                )
+            });
+            cx.update(|window, cx| around.focus(window, cx));
+            open_card(delay, cx);
+            let on_control = cx.debug_bounds("hover-card-control").unwrap().center();
+            cx.simulate_mouse_move(on_control, None, Default::default());
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+
+            cx.simulate_click(on_control, Default::default());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let focused = cx.update(|window, _| {
+                (around.is_focused(window), of_control.is_focused(window))
+            });
+            assert_eq!(
+                focused,
+                (click_through, !click_through),
+                "click_through: {click_through}"
+            );
+        }
     }
 
     /// A card that only shows something closes when the trigger is left, even
